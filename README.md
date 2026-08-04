@@ -88,14 +88,27 @@ scrolling, the build cursor, the toolbar, in-game menus, the Information
 panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
 Load/Save/Exit menu, the Map Select scenario-number picker, the
 city-name-entry on-screen keyboard, the Select-game-level (Easy/Medium/
-Hard) screen, and the Comprehensive/Information map overlay. See
+Hard) screen, the Comprehensive/Information map overlay, and the View
+screen (the watch icon). See
 [`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) for the full
 investigation, including the six distinct bug variants found and the live
 bsnes tracing that pinned down the last few.
 
-**Known remaining limitation:** the "fast travel" modifier (holding X or Y
-while moving on the map, for a faster/bigger scroll jump) is not yet fixed
--- still under investigation, tracked in the same doc.
+**Known remaining limitations:** the "fast travel" modifier (holding X or Y
+while moving on the map, for a faster/bigger scroll jump) is not yet fixed;
+the View screen's D-pad now genuinely updates its underlying game state but
+nothing visible changes yet. Both tracked in the same doc.
+
+### HDMA execution was entirely missing (also fixed)
+
+Separately from the D-pad bug family: this project's cycle-accurate
+execution mode never actually ran HDMA transfers at all (only plain DMA was
+wired up), so any HDMA-driven visual effect in this ROM silently did
+nothing -- most visibly, the View screen's tilted "photograph on a table"
+map, which instead rendered completely flat. See
+[`docs/INVESTIGATION_hdma.md`](docs/INVESTIGATION_hdma.md) for the root
+cause and fix (implemented game-side in `src/main.c`, no changes to the
+shared `snesrecomp` runtime needed).
 
 ## Controls (windowed mode)
 

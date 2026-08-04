@@ -5,12 +5,15 @@ scrolling, the build cursor, the toolbar, in-game menus, the Information
 panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
 Load/Save/Exit menu, the Map Select scenario-number picker, the
 city-name-entry on-screen keyboard, the Select-game-level (Easy/Medium/
-Hard) screen, and the Comprehensive/Information map overlay (both scrolling
-and the cursor). Confirmed by interactive testing on every screen, and
-independently cross-checked against real hardware-accurate emulation
-(bsnes) partway through the investigation. One known remaining gap: the
-map's "fast travel" modifier (X or Y held while moving, for a bigger/faster
-scroll jump) is not yet fixed -- see "Open item" at the bottom.
+Hard) screen, the Comprehensive/Information map overlay (both scrolling
+and the cursor), and the View screen (the watch icon). Confirmed by
+interactive testing on every screen, and independently cross-checked
+against real hardware-accurate emulation (bsnes) partway through the
+investigation. Two known remaining gaps: the map's "fast travel" modifier
+(X or Y held while moving, for a bigger/faster scroll jump) is not yet
+fixed, and the View screen's D-pad now genuinely updates its underlying
+WRAM state (confirmed live) but nothing visible changes on screen yet --
+see "Open items" at the bottom for both.
 
 ## Root cause
 
@@ -109,7 +112,11 @@ patch (plus one false trail worth noting):
    incrementing or decrementing `$01eb,X`) -- this is why fixing `02:9f37`
    alone made scrolling work but left the cursor itself still frozen, and
    why `02:9f43` had to be found in a second, targeted capture after the
-   first fix landed. All three: repoint at `$011b`.
+   first fix landed. A fourth site of the same shape, `01:f0d3`, sits in
+   the shared bank-1 code and gates the View screen's direction-dispatch
+   loop -- found the same way, once a separate rendering bug (see
+   `docs/INVESTIGATION_hdma.md`) stopped masking whether this screen even
+   responded to input at all. All four: repoint at `$011b`.
 7. **A false trail worth noting:** Map Select's real selection variable
    turned out to be `$0b2d` (confirmed genuinely changing on direction
    presses via live tracing), but fixing the gate that reached it wasn't
@@ -228,3 +235,23 @@ every frame regardless of input, since it's a continuously-running
 background scan. Not yet resolved; a cleaner live-session approach (e.g.
 the `F1`-reset bitmap-diff technique that worked for Tax, scoped tightly
 around holding the modifier) is the natural next step.
+
+## Open item: View screen's D-pad has no visible effect yet
+
+`01:f0d3` (variant 6 above) is fixed, and live tracing confirms the fix is
+real: pressing a direction now reaches a 4-iteration direction-dispatch
+loop at `01:f0d3-f119`, which for each pressed direction calls a subroutine
+at `01:f17d` that reads/adjusts/clamps a value in WRAM at `$7e21b4` (or the
+companion byte at `$7e21b5` when a clamp limit is hit) and writes it back --
+all confirmed firing live via `SC_ADDR_TRACE` on the write sites
+(`01:f18c`, `01:f1ae`, `01:f1bb`). But a live before/after screenshot
+comparison while repeatedly pressing a direction showed no visible change
+beyond normal per-frame animation. So `$7e21b4`/`$7e21b5` is a genuine,
+now-live piece of game state that isn't (yet) known to be read by anything
+that renders -- either it feeds a rendering path we haven't traced, or the
+renderer reads a different/cached copy of whatever position this
+represents. Given the View screen's only other known problem (the tilted
+map not rendering) turned out to be a missing-HDMA engine gap (see
+`docs/INVESTIGATION_hdma.md`), the next step here is probably the same
+kind of hunt: SC_GFX_TRACE or a live bsnes comparison to find what actually
+reads `$7e21b4`/`$7e21b5` for rendering.

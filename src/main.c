@@ -101,7 +101,15 @@ static uint64_t s_nmi_serviced;
  *                           bank:addr PCs, with full registers -- the
  *                           general "is this code path ever reached, and
  *                           with what state" tool. Optional @<start-frame>
- *                           delays tracing until that frame. */
+ *                           delays tracing until that frame.
+ * SC_GFX_TRACE=1            log (rate-limited, 300 hits) every write to
+ *                           BGMODE ($2105), the Mode 7 matrix/center regs
+ *                           ($211b-$2114), HDMAEN ($420c), and every HDMA
+ *                           channel's control/dest/addr regs ($43x0-$43xa)
+ *                           -- for finding whether/how a screen sets up
+ *                           Mode 7 + HDMA (e.g. the tilted "View" map). */
+static bool s_gfx_trace;
+static uint32_t s_gfx_trace_hits;
 static uint64_t s_io_trace_until;
 static int s_pc_capture_after = -1;
 static uint64_t s_pc_trace_at_frame;
@@ -174,6 +182,15 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
       s_wram_watch_hits++;
     }
   }
+  if (s_gfx_trace && hw &&
+      (reg == 0x2105 || (reg >= 0x211b && reg <= 0x2114) || reg == 0x420c ||
+       (reg >= 0x4300 && reg <= 0x437f && (reg & 0x0f) <= 0x0a))) {
+    if (s_gfx_trace_hits < 300) {
+      fprintf(stderr, "[gfxtrace f=%llu] pc=%02x:%04x WRITE $%04x = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, reg, v);
+      s_gfx_trace_hits++;
+    }
+  }
   snes_write(g_snes, adr, v);
 }
 
@@ -199,6 +216,85 @@ enum {
   kPad_Start = 0x0800, kPad_Select = 0x0400, kPad_Y = 0x0200, kPad_B = 0x0100,
   kPad_R = 0x0008, kPad_L = 0x0004, kPad_X = 0x0002, kPad_A = 0x0001,
 };
+
+/* HDMA per-scanline execution. The shared engine's cycle-accurate DMA path
+ * (snes/dma.c) tracks $420C-enabled channels via `hdmaActive` but never
+ * actually walks their tables -- only plain DMA ($420B, dma_doDma) is wired
+ * up. A per-line table-walk implementation exists in the shared runtime
+ * (common_rtl.c's SimpleHdma_Init/DoLine), but it's written for the
+ * AOT/decompiled recomp path (raw host pointers into its own g_ram, which
+ * would collide with this file's g_ram if common_rtl.c were linked in) and
+ * this interpreter-only project never calls it anyway, so every HDMA-driven
+ * effect in this ROM (found so far: the View screen's per-scanline window
+ * (`$2126-$2129`) + BG1/BG2 horizontal-scroll (`$210d`/`$210f`) tilt effect)
+ * silently never applies -- confirmed via SC_GFX_TRACE, which showed the
+ * channels correctly configured and enabled every frame but their target
+ * PPU registers never actually written. Ported here instead, using the same
+ * snes_read/snes_writeBBus bus primitives dma.c's own plain-DMA path already
+ * uses (see dma_transferByte), so it works uniformly for WRAM- or
+ * ROM-sourced tables without needing raw host pointers. This is a
+ * game-specific addition, not a shared-runtime change, but it fixes HDMA
+ * generally for this ROM, not just the one effect that surfaced the gap. */
+typedef struct {
+  bool active;
+  uint8_t bank;       /* bank of the table pointer (and, in direct mode, the data) */
+  uint16_t addr;       /* current table read pointer */
+  uint8_t repCount;
+  uint8_t mode;         /* dc->mode (bits 0-2) | 0x40 if indirect */
+  uint8_t ppuAddr;      /* B-bus dest offset, $00-$3f */
+  uint8_t indirBank;
+  uint16_t indirAddr;    /* current indirect data pointer (mode & 0x40 only) */
+} HdmaChanState;
+static HdmaChanState s_hdma[8];
+
+static void hdma_init_channel(HdmaChanState *c, const DmaChannel *dc) {
+  if (!dc->hdmaActive) { c->active = false; return; }
+  c->active = true;
+  c->bank = dc->aBank;
+  c->addr = dc->aAdr;
+  c->repCount = 0;
+  c->mode = (uint8_t)(dc->mode | (dc->indirect ? 0x40 : 0));
+  c->ppuAddr = dc->bAdr;
+  c->indirBank = dc->indBank;
+}
+
+static void hdma_do_line(HdmaChanState *c) {
+  static const uint8_t kBAdrOffsets[8][4] = {
+    {0, 0, 0, 0}, {0, 1, 0, 1}, {0, 0, 0, 0}, {0, 0, 1, 1},
+    {0, 1, 2, 3}, {0, 1, 0, 1}, {0, 0, 0, 0}, {0, 0, 1, 1},
+  };
+  static const uint8_t kTransferLength[8] = { 1, 2, 2, 4, 4, 4, 2, 4 };
+
+  if (!c->active) return;
+  bool do_transfer = false;
+  if ((c->repCount & 0x7f) == 0) {
+    c->repCount = snes_read(g_snes, ((uint32_t)c->bank << 16) | c->addr);
+    c->addr++;
+    if (c->repCount == 0) { c->active = false; return; }
+    if (c->mode & 0x40) {
+      uint8_t lo = snes_read(g_snes, ((uint32_t)c->bank << 16) | c->addr); c->addr++;
+      uint8_t hi = snes_read(g_snes, ((uint32_t)c->bank << 16) | c->addr); c->addr++;
+      c->indirAddr = (uint16_t)(lo | (hi << 8));
+    }
+    do_transfer = true;
+  }
+  if (do_transfer || (c->repCount & 0x80)) {
+    int len = kTransferLength[c->mode & 7];
+    for (int j = 0; j < len; j++) {
+      uint8_t val;
+      if (c->mode & 0x40) {
+        val = snes_read(g_snes, ((uint32_t)c->indirBank << 16) | c->indirAddr);
+        c->indirAddr++;
+      } else {
+        val = snes_read(g_snes, ((uint32_t)c->bank << 16) | c->addr);
+        c->addr++;
+      }
+      uint8_t reg = (uint8_t)(c->ppuAddr + kBAdrOffsets[c->mode & 7][j]);
+      snes_writeBBus(g_snes, reg, val);
+    }
+  }
+  c->repCount--;
+}
 
 /* ── accurate H/V position driver, ported from snesrecomp/cosim/ref_driver.c
  * (the framework's own game-neutral reference frame loop) ──────────────── */
@@ -226,7 +322,14 @@ static void handle_pos_stuff(void) {
       ppu_runLine(g_ppu, snes->vPos);
     if (snes->vPos == 0) {
       snes->inVblank = false; snes->inNmi = false;
-      dma_startDma(snes->dma, 0, true);
+      /* Real "HDMA init": (re)latch each currently-enabled channel's table
+       * pointer once per frame. This replaces an old `dma_startDma(dma, 0,
+       * true)` call here that unconditionally zeroed every channel's
+       * hdmaActive flag every frame -- harmless while nothing consumed that
+       * flag, but exactly backwards for SimpleHdma_Init, which needs to see
+       * whatever the game's own $420C write last set it to. */
+      for (int i = 0; i < 8; i++)
+        hdma_init_channel(&s_hdma[i], &snes->dma->channel[i]);
     } else if (snes->vPos == 225) {
       startingVblank = !ppu_checkOverscan(g_ppu);
     } else if (snes->vPos == 240) {
@@ -240,7 +343,14 @@ static void handle_pos_stuff(void) {
       if (snes->autoJoyRead) snes->autoJoyTimer = 4224;
     }
   } else if (snes->hPos == 1024) {
-    if (!snes->inVblank) dma_cycle(snes->dma);
+    if (!snes->inVblank) {
+      dma_cycle(snes->dma);
+      /* Per-line HDMA transfer, same timing as plain-DMA continuation
+       * above: this fires during the current line's hblank, so the values
+       * it writes take effect starting with the *next* line's render, at
+       * this loop's hPos==0 branch. */
+      for (int i = 0; i < 8; i++) hdma_do_line(&s_hdma[i]);
+    }
   }
 
   snes->hPos += 2;
@@ -532,6 +642,7 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_PC_TRACE");
     if (e && *e) { s_pc_trace_at_frame = strtoull(e, NULL, 0); s_pc_capture_after = -2; } }
   { const char *e = getenv("SC_ADDR_TRACE"); if (e && *e) parse_addr_trace(e); }
+  { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
   { const char *e = getenv("SC_PC_BITMAP_BANK");
     if (e && *e) s_pc_bitmap_bank = !strcmp(e, "all") ? -2 : (int)strtol(e, NULL, 16); }
   { const char *e = getenv("SC_PC_BITMAP_START"); if (e && *e) s_pc_bitmap_start_frame = strtoull(e, NULL, 0); }
@@ -890,6 +1001,27 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dpad fix: 02:9f43 site NOT patched (byte mismatch)\n");
       }
     }
+
+    /* View screen (the watch icon), found via a fresh F1-bitmap-diff pass
+     * once its graphics were fixed (see the HDMA work above -- the D-pad
+     * bug was previously masked by the whole screen not rendering
+     * correctly). 01:f0d3 does `SEP #$30; LDA $011c; AND #$0f; BEQ ...` --
+     * the exact same absolute-addressing shape as 02:8525/02:9f37/02:9f43
+     * above, just in the shared bank-1 code (home to several already-fixed
+     * cursor/edge-detector sites). Same fix: repoint at $011b. Two
+     * neighboring bank-1 sites the same capture surfaced, 01:8958
+     * (`AND #$f0f0`) and 01:8c68 (`AND #$4f80`), are deliberate
+     * non-direction gates (B/X-button checks) like 02:a4ec's Tax gate --
+     * left alone. */
+    {
+      uint32_t off = 0xf0d4; /* 01:f0d3's low operand byte, file offset = addr (bank 1) */
+      if (off < rom_size && rom_data[off] == 0x1c) {
+        rom_data[off] = 0x1b;
+        fprintf(stderr, "dpad fix: patched 01:f0d3 LDA $011c -> LDA $011b\n");
+      } else {
+        fprintf(stderr, "dpad fix: 01:f0d3 site NOT patched (byte mismatch)\n");
+      }
+    }
   }
 
   g_snes = snes_init(g_ram);
@@ -941,11 +1073,13 @@ int main(int argc, char **argv) {
     while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) quit = true;
       if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) quit = true;
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F1 &&
-          s_pc_bitmap_bank != -1) {
-        if (s_pc_bitmap_bank == -2) memset(s_pc_bitmap_all, 0, sizeof(s_pc_bitmap_all));
-        else memset(s_pc_bitmap, 0, sizeof(s_pc_bitmap));
-        fprintf(stderr, "[F1] PC bitmap capture reset at frame %llu\n",
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F1) {
+        if (s_pc_bitmap_bank != -1) {
+          if (s_pc_bitmap_bank == -2) memset(s_pc_bitmap_all, 0, sizeof(s_pc_bitmap_all));
+          else memset(s_pc_bitmap, 0, sizeof(s_pc_bitmap));
+        }
+        s_gfx_trace_hits = 0;
+        fprintf(stderr, "[F1] PC bitmap capture / gfx trace reset at frame %llu\n",
                 (unsigned long long)s_frames);
       }
     }
