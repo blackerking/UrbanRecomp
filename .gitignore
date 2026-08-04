@@ -1,0 +1,34 @@
+# Build artifacts (all root-level CMake build trees)
+/build*/
+
+# ROM files (copyrighted)
+*.smc
+*.sfc
+*.rom
+
+# Active recompiler output -- generated locally per-developer
+src/gen/
+
+# Save files
+saves/
+*.sav
+*.srm
+
+# IDE
+.vs/
+*.vcxproj.user
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local-only config overrides (per-developer, applied after config.ini)
+config.local.ini
+
+# Boot traces / triage scratch (generated at runtime)
+boot_trace*.txt
+_*
