@@ -774,6 +774,66 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dpad fix: 00:d1b8 site NOT patched (byte mismatch)\n");
       }
     }
+
+    /* Map Select scenario-number picker (found via extensive live
+     * collaborative bsnes tracing -- $0b2d looked like the right selection
+     * variable and genuinely did change on direction presses, but the
+     * "confirm" action never reflected it; traced further and found the
+     * real gate). 03:d3e2 does `LDA $ca` (8-bit); `BMI $d3ed` (tests bit7 =
+     * A, real/valid, left alone); `AND #$0f` (tests bits 0-3, $ca's
+     * hardware-zero low nibble); `BEQ $d459` -- same bug family as
+     * everywhere else. This gate sits ahead of whatever logic actually
+     * drives which control has focus, upstream of the $0b2d
+     * sprite-position update (which runs unconditionally afterward via
+     * 03:d3d4 regardless of this gate's outcome, which is why $0b2d
+     * appeared to "work" while focus never actually changed). Fix: repoint
+     * the load at $c9 directly (single 8-bit dp load, no byte-shift trick
+     * needed, same as the other 8-bit `LDA $ca` sites). */
+    {
+      uint32_t off = 0x1d3e3; /* 03:d3e2's operand byte, file offset = 3*0x8000+(0xd3e3-0x8000) */
+      if (off < rom_size && rom_data[off] == 0xca) {
+        rom_data[off] = 0xc9;
+        fprintf(stderr, "dpad fix: patched 03:d3e2 LDA $ca(dp) -> LDA $c9(dp)\n");
+      } else {
+        fprintf(stderr, "dpad fix: 03:d3e2 site NOT patched (byte mismatch)\n");
+      }
+    }
+
+    /* City-name-entry on-screen keyboard (found via a fresh F1-bitmap-diff
+     * pass, since none of the known $c9/$ca(dp) sites were reachable on
+     * this screen at all). Same bug, new shape: 03:dad9 does `LDA $0124`
+     * (*absolute*, not direct-page) then `AND #$0f` -- $0124 is the
+     * absolute high byte of the shared edge-detector's $0123 mirror (see
+     * 00:928f-92cb: 16-bit `STA $0123,X` writes low byte to $0123, high
+     * byte to $0124), the exact same hardware-zero-nibble region as $ca,
+     * just accessed via absolute addressing instead of the direct-page
+     * mirror. Fix: repoint at $0123 (one byte; absolute addressing is
+     * always 3 bytes regardless of M width, so nothing downstream
+     * shifts). */
+    {
+      uint32_t off = 0x1dada; /* 03:dad9's low operand byte, file offset = 3*0x8000+(0xdada-0x8000) */
+      if (off < rom_size && rom_data[off] == 0x24) {
+        rom_data[off] = 0x23;
+        fprintf(stderr, "dpad fix: patched 03:dad9 LDA $0124 -> LDA $0123\n");
+      } else {
+        fprintf(stderr, "dpad fix: 03:dad9 site NOT patched (byte mismatch)\n");
+      }
+    }
+
+    /* "Select game level" (Easy/Medium/Hard) screen, right after name
+     * entry: 03:d97b does `LDA $c9 (dp, 16-bit); AND #$0300; ...` -- the
+     * exact same shape as 00:d1b8 (Save/Load/Exit), bits 8-9 landing in
+     * $ca's hardware-zero low nibble. Same fix: shift the dp source back
+     * one byte so the real data lands in the tested high-byte position. */
+    {
+      uint32_t off = 0x1d97c; /* 03:d97b's operand byte, file offset = 3*0x8000+(0xd97c-0x8000) */
+      if (off < rom_size && rom_data[off] == 0xc9) {
+        rom_data[off] = 0xc8;
+        fprintf(stderr, "dpad fix: patched 03:d97b LDA $c9(dp) -> LDA $c8(dp)\n");
+      } else {
+        fprintf(stderr, "dpad fix: 03:d97b site NOT patched (byte mismatch)\n");
+      }
+    }
   }
 
   g_snes = snes_init(g_ram);

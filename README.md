@@ -85,10 +85,12 @@ patches at load time (game-specific, never touching the shared snesrecomp
 runtime) that repoint each read at the real edge byte instead. Fixed and
 confirmed working by interactive testing across every affected screen: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information
-panel, the mode-select (start) menu, Scenario Select, Save, Tax, and the
-Load/Save/Exit menu. See
+panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
+Load/Save/Exit menu, the Map Select scenario-number picker, the
+city-name-entry on-screen keyboard, and the Select-game-level (Easy/Medium/
+Hard) screen. See
 [`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) for the full
-investigation, including the four distinct bug variants found and the live
+investigation, including the six distinct bug variants found and the live
 bsnes tracing that pinned down the last few.
 
 **Known remaining limitation:** the "fast travel" modifier (holding X or Y

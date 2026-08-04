@@ -2,8 +2,10 @@
 
 Status: **fixed**. The D-pad now works on every screen tested: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information
-panel, the mode-select (start) menu, Scenario Select, Save, Tax, and the
-Load/Save/Exit menu. Confirmed by interactive testing on every screen, and
+panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
+Load/Save/Exit menu, the Map Select scenario-number picker, the
+city-name-entry on-screen keyboard, and the Select-game-level (Easy/Medium/
+Hard) screen. Confirmed by interactive testing on every screen, and
 independently cross-checked against real hardware-accurate emulation
 (bsnes) partway through the investigation. One known remaining gap: the
 map's "fast travel" modifier (X or Y held while moving, for a bigger/faster
@@ -40,7 +42,7 @@ without ever needing the D-pad.
 
 `src/main.c` patches the ROM image in memory at load time (game-specific,
 never touches the shared snesrecomp runtime) to repoint each broken read at
-the byte that actually holds the direction bits. Four distinct shapes of
+the byte that actually holds the direction bits. Six distinct shapes of
 the same underlying bug were found, each needing a slightly different
 patch:
 
@@ -54,12 +56,13 @@ patch:
    unmodified ladder already expects them. 8 sites for the `$011b` form, 2
    for the `$c9`(dp) form.
 2. **8-bit `LDA $ca` (dp) with various masks including bits 0-3** (the
-   Tax-screen modal, and several of the 20 handlers in the mode-select/
-   list-menu dispatch table at `03:d255`). Since these are single-byte
+   Tax-screen modal, several of the 20 handlers in the mode-select/
+   list-menu dispatch table at `03:d255`, and the Map Select
+   scenario-number picker at `03:d3e2`). Since these are single-byte
    loads (not 16-bit), the fix is simpler: just repoint the load at `$c9`
    directly. 2 sites (`02:a50c`, `02:ab1f` -- later found to be dead code,
    see below) + 1 site (`03:d33e`, mode-select) + 3 more sites across modes
-   5 and 11 (Scenario Select / Save).
+   5 and 11 (Scenario Select / Save) + `03:d3e2` (Map Select).
 3. **A gate excluding direction on purpose.** `02:a4ec` does `LDA $011b;
    AND #$fff0; BNE ...` -- deliberately testing "is any *non-direction*
    button held", a legitimate, correct idiom used elsewhere in the ROM (not
@@ -70,15 +73,39 @@ patch:
    widening its mask from `#$fff0` to `#$ffff` so direction alone also
    satisfies it (one byte).
 4. **16-bit `LDA $c9` (dp) followed by `AND #$0300`/`AND #$0200`, no
-   ladder involved.** The Load/Save/Exit top-level menu (`00:d1b8`) tests
-   bits 8-9 of the combined word directly (no ASL/BCC ladder to desync),
-   so the same address-shift fix as variant 1 applies (`$c9`(dp)→`$c8`(dp))
-   with no extra care needed. One site fixes a symmetric Left/Right pair
-   (`00:d1c4` decrements, `00:d1db` increments a shared selection-index
-   byte at `$0421`, both sharing this one gate). Two neighboring checks at
-   `00:d1aa` (`AND #$8000`, tests `$ca` bit 7 = A) and `00:d1b1`
-   (`AND #$0040`, tests `$c9`'s own bit 6 = Y) already read real, valid
-   bits and were left alone.
+   ladder involved.** The Load/Save/Exit top-level menu (`00:d1b8`) and the
+   Select-game-level screen (`03:d97b`) test bits 8-9 of the combined word
+   directly (no ASL/BCC ladder to desync), so the same address-shift fix as
+   variant 1 applies (`$c9`(dp)→`$c8`(dp)) with no extra care needed.
+   `00:d1b8` fixes a symmetric Left/Right pair (`00:d1c4` decrements,
+   `00:d1db` increments a shared selection-index byte at `$0421`, both
+   sharing this one gate). Two neighboring checks at `00:d1aa`
+   (`AND #$8000`, tests `$ca` bit 7 = A) and `00:d1b1` (`AND #$0040`, tests
+   `$c9`'s own bit 6 = Y) already read real, valid bits and were left
+   alone.
+5. **Absolute (not direct-page) `LDA $0124` followed by `AND #$0f`.** The
+   city-name-entry on-screen keyboard (`03:dad9`) reads the *absolute*
+   high byte of the shared edge-detector's `$0123` mirror (`00:928f-92cb`'s
+   16-bit `STA $0123,X` writes low byte to `$0123`, high byte to `$0124`)
+   instead of the direct-page `$ca` mirror -- same hardware-zero-nibble
+   region, different address entirely, so the earlier byte-pattern scans
+   (which only looked for the direct-page form) missed it. Found via a
+   fresh F1-bitmap-diff pass after every known `$c9`/`$ca`(dp) candidate
+   came back unreached on this screen. Fix: repoint at `$0123` (absolute
+   addressing is always 3 bytes regardless of M width, so nothing
+   downstream shifts).
+6. **A false trail worth noting:** Map Select's real selection variable
+   turned out to be `$0b2d` (confirmed genuinely changing on direction
+   presses via live tracing), but fixing the gate that reached it wasn't
+   enough on its own -- the `$0b2d` sprite-position update runs
+   unconditionally every frame regardless of whether real "focus" changed,
+   which is what made it *look* like the mechanism worked while `03:d3e2`'s
+   gate (variant 2) was still silently swallowing every direction press
+   upstream. The lesson: a variable changing in response to input doesn't
+   prove the *feature* works -- trace all the way to what actually reads
+   that variable to decide the user-visible outcome (in this case, the
+   sprite update ran either way, so the visible "cursor" that mattered was
+   actually static hand-cursor artwork, not `$0b2d`'s target).
 
 All patch sites, their exact file offsets, and the reasoning for each are
 documented inline in `src/main.c` right where they're applied (search for
