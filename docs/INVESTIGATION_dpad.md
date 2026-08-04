@@ -4,8 +4,9 @@ Status: **fixed**. The D-pad now works on every screen tested: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information
 panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
 Load/Save/Exit menu, the Map Select scenario-number picker, the
-city-name-entry on-screen keyboard, and the Select-game-level (Easy/Medium/
-Hard) screen. Confirmed by interactive testing on every screen, and
+city-name-entry on-screen keyboard, the Select-game-level (Easy/Medium/
+Hard) screen, and the Comprehensive/Information map overlay (both scrolling
+and the cursor). Confirmed by interactive testing on every screen, and
 independently cross-checked against real hardware-accurate emulation
 (bsnes) partway through the investigation. One known remaining gap: the
 map's "fast travel" modifier (X or Y held while moving, for a bigger/faster
@@ -44,7 +45,7 @@ without ever needing the D-pad.
 never touches the shared snesrecomp runtime) to repoint each broken read at
 the byte that actually holds the direction bits. Six distinct shapes of
 the same underlying bug were found, each needing a slightly different
-patch:
+patch (plus one false trail worth noting):
 
 1. **16-bit `LDA $011b`/`LDA $c9` (dp) followed by `AND #$0f00`, then an
    ASL/BCC or XBA/LSR ladder.** The ladder's shift calibration is tuned for
@@ -94,7 +95,22 @@ patch:
    came back unreached on this screen. Fix: repoint at `$0123` (absolute
    addressing is always 3 bytes regardless of M width, so nothing
    downstream shifts).
-6. **A false trail worth noting:** Map Select's real selection variable
+6. **Absolute (not direct-page) `LDA $011c` followed by `AND #$0f`, plain
+   8-bit, no byte-shift needed.** The Comprehensive/Information map
+   overlay has two chained sites in bank 2 -- `02:8525` (map scrolling) and
+   `02:9f37` (the gate for a cursor-offset ladder) -- both reading the
+   absolute mirror of the hardware-zero-nibble byte directly, so `AND
+   #$0f` always comes back zero and each routine falls straight through
+   its `BEQ` into a bare `RTS` before doing any work. Found via a fresh
+   F1-bitmap-diff pass on this specific screen. A third site, `02:9f43`,
+   sits just past `02:9f37`'s gate (once that gate is fixed and lets
+   execution through) and re-reads the same dead byte to feed the actual
+   cursor-offset ladder (`LSR A`/`BCC` testing each direction bit,
+   incrementing or decrementing `$01eb,X`) -- this is why fixing `02:9f37`
+   alone made scrolling work but left the cursor itself still frozen, and
+   why `02:9f43` had to be found in a second, targeted capture after the
+   first fix landed. All three: repoint at `$011b`.
+7. **A false trail worth noting:** Map Select's real selection variable
    turned out to be `$0b2d` (confirmed genuinely changing on direction
    presses via live tracing), but fixing the gate that reached it wasn't
    enough on its own -- the `$0b2d` sprite-position update runs

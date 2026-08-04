@@ -87,8 +87,8 @@ confirmed working by interactive testing across every affected screen: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information
 panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
 Load/Save/Exit menu, the Map Select scenario-number picker, the
-city-name-entry on-screen keyboard, and the Select-game-level (Easy/Medium/
-Hard) screen. See
+city-name-entry on-screen keyboard, the Select-game-level (Easy/Medium/
+Hard) screen, and the Comprehensive/Information map overlay. See
 [`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) for the full
 investigation, including the six distinct bug variants found and the live
 bsnes tracing that pinned down the last few.

@@ -834,6 +834,62 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dpad fix: 03:d97b site NOT patched (byte mismatch)\n");
       }
     }
+
+    /* Comprehensive/Information map overlay (found via a fresh F1-bitmap-
+     * diff pass on this specific screen). Two sites, same shape, both
+     * absolute (not direct-page): `LDA $011c; AND #$0f; BEQ ...` at 02:8525
+     * and 02:9f37. $011c is the absolute mirror of the hardware-zero-
+     * low-nibble byte (paralleling $ca), so the AND #$0f always comes back
+     * zero and both routines fall straight through their BEQ into an
+     * immediate RTS -- confirmed by reading the branch targets directly
+     * (8589 and 9f75 are both bare RTS), matching the reported "no
+     * scrolling, no button selection" behavior exactly: the handler that's
+     * supposed to act on the ladder never gets past its first check. Same
+     * fix as every other absolute-addressing site: repoint at $011b, the
+     * real edge/held-state byte (one byte each; absolute addressing is
+     * always 3 bytes regardless of M width, so nothing downstream
+     * shifts). */
+    {
+      uint32_t off = 0x10526; /* 02:8525's low operand byte, file offset = 2*0x8000+(0x8526-0x8000) */
+      if (off < rom_size && rom_data[off] == 0x1c) {
+        rom_data[off] = 0x1b;
+        fprintf(stderr, "dpad fix: patched 02:8525 LDA $011c -> LDA $011b\n");
+      } else {
+        fprintf(stderr, "dpad fix: 02:8525 site NOT patched (byte mismatch)\n");
+      }
+    }
+    {
+      uint32_t off = 0x11f38; /* 02:9f37's low operand byte, file offset = 2*0x8000+(0x9f38-0x8000) */
+      if (off < rom_size && rom_data[off] == 0x1c) {
+        rom_data[off] = 0x1b;
+        fprintf(stderr, "dpad fix: patched 02:9f37 LDA $011c -> LDA $011b\n");
+      } else {
+        fprintf(stderr, "dpad fix: 02:9f37 site NOT patched (byte mismatch)\n");
+      }
+    }
+
+    /* Same routine, second read: once 02:9f37's gate above lets execution
+     * through (PHB; LDA #$02; PHA; PLB switches DBR to bank 2), 02:9f43
+     * re-reads the *same* dead byte -- `LDA $011c; LDX #$00` -- and feeds it
+     * straight into the actual cursor-offset ladder at 02:9f48 (`LSR A;
+     * PHA; BCC +e; LDA $01eb,X; ADC #$02/SBC #$02; CMP` clamp table;
+     * `STA $01eb,X`; `PLA; LSR A; ...`, looping X+=2 up to 4 -- i.e. X/Y
+     * offset increment or decrement per direction bit, clamped against the
+     * tables at 02:9f76/02:9f79). With $011c always zero, every LSR/BCC in
+     * this ladder always branches over its STA, so $01eb,X (the cursor
+     * offset) never actually changes -- confirmed live: reachable in this
+     * exact capture once 02:9f37 alone was fixed, matching the user's
+     * report that scrolling now works but the cursor itself still doesn't
+     * move. Same fix: repoint at $011b. */
+    {
+      uint32_t off = 0x11f44; /* 02:9f43's low operand byte, file offset = 2*0x8000+(0x9f44-0x8000) */
+      if (off < rom_size && rom_data[off] == 0x1c) {
+        rom_data[off] = 0x1b;
+        fprintf(stderr, "dpad fix: patched 02:9f43 LDA $011c -> LDA $011b\n");
+      } else {
+        fprintf(stderr, "dpad fix: 02:9f43 site NOT patched (byte mismatch)\n");
+      }
+    }
   }
 
   g_snes = snes_init(g_ram);
