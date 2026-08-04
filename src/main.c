@@ -751,6 +751,29 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dpad fix: 02:a4ef site NOT patched (byte mismatch)\n");
       }
     }
+
+    /* Save/Load/Exit top-level menu (found via live bsnes tracing, with the
+     * user pointing out the live "main loop" at $0008c0 and independently
+     * spotting $0421 as the changing selection-index byte): 00:d1b8 does
+     * `LDA $c9 (dp, 16-bit); AND #$0300; ...` -- bits 8-9 of that combined
+     * 16-bit word are $ca's bits 0-1, the same hardware-zero region as
+     * every other site in this family. This one gate feeds a symmetric
+     * Left/Right pair (00:d1c4 decrements $0421, 00:d1db increments it,
+     * both wrapping/clamping into a small range and used as a table index
+     * at 00:d23a to reposition the selection-highlight sprite) -- fixing
+     * this one site fixes both directions. The two neighboring checks at
+     * 00:d1aa (`AND #$8000`, tests $ca bit7 = A) and 00:d1b1 (`AND #$0040`,
+     * tests $c9's own bit6 = Y) already read real, valid bits and are left
+     * alone. */
+    {
+      uint32_t off = 0x51b9; /* 00:d1b8's operand byte, file offset = 0xd1b9-0x8000 */
+      if (off < rom_size && rom_data[off] == 0xc9) {
+        rom_data[off] = 0xc8;
+        fprintf(stderr, "dpad fix: patched 00:d1b8 LDA $c9(dp) -> LDA $c8(dp)\n");
+      } else {
+        fprintf(stderr, "dpad fix: 00:d1b8 site NOT patched (byte mismatch)\n");
+      }
+    }
   }
 
   g_snes = snes_init(g_ram);

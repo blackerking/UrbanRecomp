@@ -2,12 +2,12 @@
 
 Status: **fixed**. The D-pad now works on every screen tested: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information
-panel, the mode-select (start) menu, Scenario Select, Save, and Tax.
-Confirmed by interactive testing on every screen, and independently
-cross-checked against real hardware-accurate emulation (bsnes) partway
-through the investigation. One known remaining gap: the map's "fast
-travel" modifier (X or Y held while moving, for a bigger/faster scroll
-jump) is not yet fixed -- see "Open item" at the bottom.
+panel, the mode-select (start) menu, Scenario Select, Save, Tax, and the
+Load/Save/Exit menu. Confirmed by interactive testing on every screen, and
+independently cross-checked against real hardware-accurate emulation
+(bsnes) partway through the investigation. One known remaining gap: the
+map's "fast travel" modifier (X or Y held while moving, for a bigger/faster
+scroll jump) is not yet fixed -- see "Open item" at the bottom.
 
 ## Root cause
 
@@ -40,8 +40,9 @@ without ever needing the D-pad.
 
 `src/main.c` patches the ROM image in memory at load time (game-specific,
 never touches the shared snesrecomp runtime) to repoint each broken read at
-the byte that actually holds the direction bits. Three distinct shapes of
-the same bug were found, each needing a slightly different patch:
+the byte that actually holds the direction bits. Four distinct shapes of
+the same underlying bug were found, each needing a slightly different
+patch:
 
 1. **16-bit `LDA $011b`/`LDA $c9` (dp) followed by `AND #$0f00`, then an
    ASL/BCC or XBA/LSR ladder.** The ladder's shift calibration is tuned for
@@ -68,6 +69,16 @@ the same bug were found, each needing a slightly different patch:
    cursor, but Down alone did nothing, matching the gate exactly. Fixed by
    widening its mask from `#$fff0` to `#$ffff` so direction alone also
    satisfies it (one byte).
+4. **16-bit `LDA $c9` (dp) followed by `AND #$0300`/`AND #$0200`, no
+   ladder involved.** The Load/Save/Exit top-level menu (`00:d1b8`) tests
+   bits 8-9 of the combined word directly (no ASL/BCC ladder to desync),
+   so the same address-shift fix as variant 1 applies (`$c9`(dp)→`$c8`(dp))
+   with no extra care needed. One site fixes a symmetric Left/Right pair
+   (`00:d1c4` decrements, `00:d1db` increments a shared selection-index
+   byte at `$0421`, both sharing this one gate). Two neighboring checks at
+   `00:d1aa` (`AND #$8000`, tests `$ca` bit 7 = A) and `00:d1b1`
+   (`AND #$0040`, tests `$c9`'s own bit 6 = Y) already read real, valid
+   bits and were left alone.
 
 All patch sites, their exact file offsets, and the reasoning for each are
 documented inline in `src/main.c` right where they're applied (search for
