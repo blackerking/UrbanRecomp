@@ -400,7 +400,10 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * replacing the algorithm (risk: any mismatch could produce a different
  * generated map than the real ROM would), just detect execution passing
  * through it and apply the same frame-batching fast-forward uses,
- * automatically, without needing Tab held. */
+ * automatically, without needing Tab held. Also covers the Nintendo
+ * LC_LZ5-style decompressor at 00:90dd (confirmed live: fires repeatedly
+ * during the same map/scenario-load wait, decompressing tile/text data --
+ * see tools/extract_graphics.py and docs/REFERENCE_third_party_optimization_patch.md). */
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
 #define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
 
@@ -411,7 +414,8 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
-    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x824b))
+    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x824b) ||
+        (cpu->k == 0x00 && cpu->pc == 0x90dd))
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
     if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame && s_addr_trace_armed) {
       uint32_t pc = ((uint32_t)cpu->k << 16) | cpu->pc;
