@@ -103,6 +103,19 @@ while moving on the map, for a faster/bigger scroll jump) is not yet fixed;
 the View screen's D-pad now genuinely updates its underlying game state but
 nothing visible changes yet. Both tracked in the same doc.
 
+### Graphics/text export tool
+
+`tools/extract_graphics.py` decompresses and exports the game's font
+tileset, scenario tileset, and every advisor/scenario dialog text block
+(Nintendo's LC_LZ5-style compression, used throughout this ROM) as PNG
+and raw `.bin` files, for mod support. Needs Pillow (`pip install
+Pillow`); run with `python tools/extract_graphics.py` from the repo
+root once your ROM is staged as `simcity.sfc`. Output goes to
+`extracted_assets/` (gitignored -- it's derived from the copyrighted
+ROM, so it's never committed). Verified against this project's own ROM:
+every dialog text block decompresses and renders as readable English
+text.
+
 ### HDMA execution was entirely missing (also fixed)
 
 Separately from the D-pad bug family: this project's cycle-accurate

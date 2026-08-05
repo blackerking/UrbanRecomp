@@ -6,8 +6,16 @@
 *.sfc
 *.rom
 
+# Third-party ROM patches (not this project's work -- reference-only,
+# never redistributed from this repo)
+*.ips
+
 # Active recompiler output -- generated locally per-developer
 src/gen/
+
+# Extracted graphics/text (tools/extract_graphics.py output) -- derived
+# from the copyrighted ROM, generated locally per-developer
+/extracted_assets/
 
 # Save files
 saves/
