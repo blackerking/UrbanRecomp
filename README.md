@@ -6,6 +6,10 @@ the same general-purpose 65816-to-C framework used by
 other snesrecomp game repositories. This repository is ROM-free: you must
 supply your own legally obtained copy.
 
+**Just want to build and play it?** See [SETUP.md](SETUP.md) for a
+Windows/Linux quick-start. Contributors should read
+[CONTRIBUTING.md](CONTRIBUTING.md) instead.
+
 ## Status: Phase 1 (LLE-first correctness baseline)
 
 This bring-up follows snesrecomp's own documented philosophy
