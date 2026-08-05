@@ -8,7 +8,10 @@ supply your own legally obtained copy.
 
 **Just want to build and play it?** See [SETUP.md](SETUP.md) for a
 Windows/Linux quick-start. Contributors should read
-[CONTRIBUTING.md](CONTRIBUTING.md) instead.
+[CONTRIBUTING.md](CONTRIBUTING.md) instead. For a consolidated map of
+everything reverse-engineered about this ROM so far (WRAM variables,
+named routines, patch sites, compressed data regions), see
+[docs/ROM_MAP.md](docs/ROM_MAP.md).
 
 ## Status: Phase 1 (LLE-first correctness baseline)
 
