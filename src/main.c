@@ -1138,6 +1138,15 @@ int main(int argc, char **argv) {
     apply_frame_input(s_frames);
     g_snes->input1_currentState |= input;
 
+    /* Fast-forward: hold Tab to simulate several SNES frames per rendered/
+     * presented frame instead of just one. Only the last of the batch's
+     * audio gets queued (skipping the rest, rather than speeding it up or
+     * garbling it) and only its video is presented -- the frame pacer
+     * below still targets normal 60fps, so this is a real Nx speed-up in
+     * game-time per real second, not just a faster/choppier render. */
+    bool fast_forward = keys[SDL_SCANCODE_TAB];
+    int frames_this_iter = fast_forward ? 6 : 1;
+
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
      * time for any run_one_frame() call slower than the threshold -- there's
      * no frame-pacing throttle in this loop other than vsync on the present
@@ -1147,11 +1156,25 @@ int main(int argc, char **argv) {
     const char *frame_time_thresh_env = getenv("SC_FRAME_TIME");
     uint64_t frame_t0 = frame_time_thresh_env ? SDL_GetPerformanceCounter() : 0;
 
-    if (!run_one_frame()) {
-      fprintf(stderr, "frame %llu: opcode guard tripped (hang/runaway) -- stopping\n",
-              (unsigned long long)s_frames);
-      break;
+    bool guard_tripped = false;
+    for (int ffi = 0; ffi < frames_this_iter; ffi++) {
+      if (!run_one_frame()) {
+        fprintf(stderr, "frame %llu: opcode guard tripped (hang/runaway) -- stopping\n",
+                (unsigned long long)s_frames);
+        guard_tripped = true;
+        break;
+      }
+      /* Extra fast-forward frames still need input re-armed exactly like
+       * the top of this loop does every iteration: apply_frame_input()
+       * resets input1_currentState to 0 (or any scripted qualify-mode
+       * input) before the live keyboard state is OR'd back in -- skipping
+       * the reset here would let stale bits accumulate across frames. */
+      if (ffi + 1 < frames_this_iter) {
+        apply_frame_input(s_frames);
+        g_snes->input1_currentState |= input;
+      }
     }
+    if (guard_tripped) break;
 
     if (frame_time_thresh_env) {
       static uint32_t s_frame_time_hits;

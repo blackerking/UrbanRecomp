@@ -127,6 +127,7 @@ shared `snesrecomp` runtime needed).
 | R | E |
 | Start | Enter |
 | Select | Shift |
+| Fast-forward (hold) | Tab |
 
 A/R advance the title screen itself. To reach the mode-select menu (rather
 than auto-continuing into gameplay), press Start or A roughly 10 seconds
