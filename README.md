@@ -134,6 +134,11 @@ than auto-continuing into gameplay), press Start or A roughly 10 seconds
 after the title screen appears, then wait about 5 more seconds -- see
 `docs/INVESTIGATION_dpad.md`.
 
+Map/scenario loading ("Please wait...") does genuine procedural
+generation work rather than an artificial delay, so it isn't
+patched out -- hold fast-forward (Tab) while it's on screen to blow
+through it in a couple seconds instead.
+
 ## Next phase: AOT/CpuState hybrid tier
 
 To actually run the AOT-compiled banks `tools/regen.sh` already produces

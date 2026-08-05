@@ -387,6 +387,23 @@ static void parse_addr_trace(const char *spec) {
 static bool s_addr_trace_armed = true;
 static uint8_t s_addr_trace_last_ed = 0xff;
 
+/* Auto-fast-forward during map/scenario generation. Found live (bsnes
+ * trace, user-captured): 03:d862 is a 10-iteration loop (X counts 9..0)
+ * calling the checksum/hash accumulator at 00:824b/00:824f, which folds
+ * scenario parameters ($0b27-$0b29) into a rolling pair of WRAM
+ * accumulators ($59/$5b/$5d) -- almost certainly part of procedural
+ * map/seed generation. This is genuine, real computation, not a dumb
+ * idle-delay loop (confirmed: our interpreter already finishes every
+ * frame's work in far under the 16.67ms budget -- SC_FRAME_TIME never
+ * fires -- so the "wait" is the ROM deliberately spreading this work
+ * across many real seconds of paced frames, not CPU cost). Rather than
+ * replacing the algorithm (risk: any mismatch could produce a different
+ * generated map than the real ROM would), just detect execution passing
+ * through it and apply the same frame-batching fast-forward uses,
+ * automatically, without needing Tab held. */
+static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
+#define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
+
 static bool run_one_frame(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
@@ -394,6 +411,8 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
+    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x824b))
+      s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
     if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame && s_addr_trace_armed) {
       uint32_t pc = ((uint32_t)cpu->k << 16) | cpu->pc;
       for (int i = 0; i < s_addr_trace_count; i++) {
@@ -450,6 +469,7 @@ static bool run_one_frame(void) {
     if (s_addr_trace_last_ed == 0xff) { s_addr_trace_last_ed = g_ram[0x01ed]; s_addr_trace_armed = false; }
     else if (!s_addr_trace_armed && g_ram[0x01ed] != s_addr_trace_last_ed) s_addr_trace_armed = true;
   }
+  if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
 }
 
@@ -1143,8 +1163,10 @@ int main(int argc, char **argv) {
      * audio gets queued (skipping the rest, rather than speeding it up or
      * garbling it) and only its video is presented -- the frame pacer
      * below still targets normal 60fps, so this is a real Nx speed-up in
-     * game-time per real second, not just a faster/choppier render. */
-    bool fast_forward = keys[SDL_SCANCODE_TAB];
+     * game-time per real second, not just a faster/choppier render. Also
+     * applied automatically (no key needed) while the map/scenario
+     * generation loop is active -- see s_gen_loop_active_frames above. */
+    bool fast_forward = keys[SDL_SCANCODE_TAB] || s_gen_loop_active_frames > 0;
     int frames_this_iter = fast_forward ? 6 : 1;
 
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
