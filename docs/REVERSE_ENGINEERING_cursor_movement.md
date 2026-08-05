@@ -389,6 +389,35 @@ the next concrete step, and is a different kind of question than anything
 chased in this document so far (a scheduling/timing question, not a
 branch-logic question).
 
+## UPDATE 5: found a likely task-scheduler jump table (autonomous session, static-only, unverified)
+
+A collaborator independently optimizing this ROM described (see
+`docs/REFERENCE_third_party_optimization_patch.md`) a cooperative
+update/render two-thread model where "the render thread only resumes once
+every 4 frames" -- matching this document's measured baseline exactly.
+They also describe patching in a way to switch threads immediately
+"under certain conditions" instead of always waiting, which is very
+plausibly the exact mechanism this recomp fails to trigger.
+
+Searching the ROM for the raw byte pattern of `01:8b4e`'s address (the
+`CursorMoveDispatch_Frame` entry point -- never called via a direct
+`JSR`/`JSL` anywhere in the ROM, ruling out a fixed call site) found it
+appearing exactly once, as apparent table data at **bank `0d`, address
+`~0xe07a`**, alongside several other addresses that also fall inside
+bank 01's `0x8xxx` code range (`0x8b51`, `0x8c44`, ...). This is a strong
+candidate for the task-scheduler dispatch table itself.
+
+**Not yet confirmed**: no direct long-addressing (`JSL`/`LDA long`)
+reference to this table region was found via static byte search either --
+it's likely accessed via absolute addressing with the data bank register
+separately set to `$0D` beforehand (the same `PLB`-from-a-loaded-byte
+pattern seen in the decompressor at `00:90dd`), which a simple byte-level
+search can't locate without knowing where that `PLB` happens. This needs
+either live tracing (set a read-breakpoint on `$0d:e07a` and see what
+reads it and with what index) or a much broader static search for `PLB`
+sites feeding data-bank `$0D`. Genuinely the most promising open lead for
+the cadence bug, but real verification requires live testing help.
+
 ## UPDATE 4: CONFIRMED -- real hardware steps every single frame while held; this is a genuine recomp bug
 
 Two decisive pieces of live data settle this:

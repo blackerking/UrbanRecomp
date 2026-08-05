@@ -236,6 +236,26 @@ background scan. Not yet resolved; a cleaner live-session approach (e.g.
 the `F1`-reset bitmap-diff technique that worked for Tax, scoped tightly
 around holding the modifier) is the natural next step.
 
+**Ruled out (static analysis, autonomous session)**: the main-map cursor
+dispatcher decoded in `docs/REVERSE_ENGINEERING_cursor_movement.md`
+(`01:8b4f`-`01:8c52`) checks B/X (`01:8bd3`) and Y (`01:8be1`) held state,
+but **neither leads to a movement-boost path**. Both just write a small
+"reason code" into direct-page `$c5` (`1` for B or X, `2` for Y) and
+`RTS` immediately (`01:8c52: STA $c5; RTS`) -- the same shared exit every
+other "interrupt" condition in that function uses ($0395/$0383/$0387 mode
+flags, non-direction buttons). Whatever B/X/Y actually *do* on the map
+(quite possibly: B/X opens a menu, Y calls the advisor -- matching the
+in-game tutorial text "I'll come and help if you press [Y]") is decided
+by the *caller* of this dispatcher based on `$c5`'s value, not inside it.
+**Fast travel is very likely a completely separate code path from the
+one this whole session's cursor-cadence work has been analyzing** --
+the earlier lead (`JSL $0098a0`, gated behind a Y|A check "in the
+mode-select dispatch family") points somewhere else entirely. Next step:
+trace `$c5`'s consumer (the caller of `01:8b4f`) to find where reason
+codes 1/2 actually get handled, or -- more directly -- get a fresh live
+bsnes trace on `$01bd`/`$01be` (scroll-X/Y) specifically while holding
+X+direction, now that the wrong dispatcher has been ruled out.
+
 ## Open item: View screen's D-pad has no visible effect yet
 
 `01:f0d3` (variant 6 above) is fixed, and live tracing confirms the fix is
@@ -255,3 +275,25 @@ map not rendering) turned out to be a missing-HDMA engine gap (see
 `docs/INVESTIGATION_hdma.md`), the next step here is probably the same
 kind of hunt: SC_GFX_TRACE or a live bsnes comparison to find what actually
 reads `$7e21b4`/`$7e21b5` for rendering.
+
+**Autonomous static-analysis update**: searched the ROM for absolute/long
+references to `$21b4`/`$21b5`. Most hits in "high" banks (0c-0f) are false
+positives -- those banks are compressed graphics/text data (see
+`tools/extract_graphics.py`), not code, and the byte pattern searched for
+coincidentally appears in the compressed bytes. Two genuine hits in
+confirmed-executable banks:
+- `00:c0fb`: `STA $7e21b5` writes `#$e0` (the same "at clamp limit"
+  sentinel value found earlier at `01:f1bb`), then does the same to
+  `$7e21b9`, `$7e21bd`, `$7e21c1`, ... `$7e21d5` -- a regular stride of 4
+  bytes, 8 times. This looks like a **generic initialization pass over an
+  array of position-tracking "slots"**, of which the View screen's
+  `$21b4`/`$21b5` pair is only one -- i.e. this WRAM region is likely
+  shared/reused by multiple UI elements, not View-screen-specific.
+- `05:9c73`-`9c8a`: increments *both* `$7e21b1` and `$7e21b5` by 2 each,
+  unconditionally, then `JMP $9e2b`. Not yet traced further -- this could
+  be the actual renderer (or a different consumer entirely) advancing a
+  position each call, but whether it's reached during the View screen or
+  some other context isn't confirmed.
+Next step (needs live testing): read-breakpoint `$7e21b4` in bsnes while
+on the View screen to see exactly what reads it, rather than more static
+guessing.
