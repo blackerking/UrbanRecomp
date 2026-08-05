@@ -110,6 +110,7 @@ static uint64_t s_nmi_serviced;
  *                           Mode 7 + HDMA (e.g. the tilted "View" map). */
 static bool s_gfx_trace;
 static uint32_t s_gfx_trace_hits;
+static uint32_t s_dbg_live_hits;
 static uint64_t s_io_trace_until;
 static int s_pc_capture_after = -1;
 static uint64_t s_pc_trace_at_frame;
@@ -174,7 +175,7 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
     fprintf(stderr, "[io f=%llu] WRITE %04x = %02x\n",
             (unsigned long long)s_frames, reg, v);
   if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
-      (reg == 0x01eb || reg == 0x01ec || reg == 0x01ed || reg == 0x01ee)) {
+      (reg == 0x01eb || reg == 0x01ec || reg == 0x01ed || reg == 0x01ee || reg == 0x007c)) {
     static uint32_t s_wram_watch_hits;
     if (s_wram_watch_hits < 200) {
       fprintf(stderr, "[wramwrite f=%llu] pc=%02x:%04x $%04x = %02x\n",
@@ -378,6 +379,14 @@ static void parse_addr_trace(const char *spec) {
   }
 }
 
+/* Self-arming gate for SC_ADDR_TRACE, mirroring SC_DEBUG_LIVE's: don't
+ * start logging until $01ed (the cursor/scroll byte under investigation)
+ * first changes, so imprecise timing getting into gameplay doesn't burn
+ * through the 200-hit-per-address cap on dead frames. Only takes effect
+ * when SC_ADDR_TRACE_ARM_ON_01ED is set; otherwise behaves as before. */
+static bool s_addr_trace_armed = true;
+static uint8_t s_addr_trace_last_ed = 0xff;
+
 static bool run_one_frame(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
@@ -385,7 +394,7 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
-    if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame) {
+    if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame && s_addr_trace_armed) {
       uint32_t pc = ((uint32_t)cpu->k << 16) | cpu->pc;
       for (int i = 0; i < s_addr_trace_count; i++) {
         if (s_addr_trace_pcs[i] == pc && s_addr_trace_hits[i] < 200) {
@@ -394,7 +403,7 @@ static bool run_one_frame(void) {
                   (unsigned long long)s_frames, cpu->k, cpu->pc, cpu->a, cpu->x,
                   cpu->y, cpu->sp, cpu->dp, cpu->db, cpu->mf ? "8" : "16",
                   cpu->xf ? "8" : "16", s_addr_trace_hits[i]);
-          if (s_addr_trace_hits[i] < 3) {
+          if (s_addr_trace_hits[i] < 40) {
             fprintf(stderr, "  pc history (oldest..newest, this pc last):\n");
             int n = s_pc_history_filled;
             for (int h = n - 1; h >= 0; h--) {
@@ -436,6 +445,10 @@ static bool run_one_frame(void) {
     for (int i = 0; i < master; i += 2) handle_pos_stuff();
     snes->apuCatchupCycles += (double)master * kApuCyclesPerMaster;
     snes_catchupApu(snes);
+  }
+  if (getenv("SC_ADDR_TRACE_ARM_ON_01ED")) {
+    if (s_addr_trace_last_ed == 0xff) { s_addr_trace_last_ed = g_ram[0x01ed]; s_addr_trace_armed = false; }
+    else if (!s_addr_trace_armed && g_ram[0x01ed] != s_addr_trace_last_ed) s_addr_trace_armed = true;
   }
   return guard > 0;
 }
@@ -1049,8 +1062,16 @@ int main(int argc, char **argv) {
       "SimCitySNESRecomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
       kVideoWidth * scale, kVideoHeight * scale, SDL_WINDOW_SHOWN);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+  /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
+   * driver's vsync wait blocks for longer than one real display refresh
+   * (e.g. ~33ms instead of ~16.67ms), silently halving the whole loop's
+   * rate -- since simulation advancement here is 1:1 with each present,
+   * that drags the SNES-side "logical" game down to half speed too (every
+   * animation, not just this cursor), while the interpreter itself was
+   * never the bottleneck (SC_FRAME_TIME showed zero frames exceeding the
+   * 16.67ms budget). Pace manually against the wall clock instead below. */
   SDL_Renderer *renderer = SDL_CreateRenderer(
-      window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+      window, -1, SDL_RENDERER_ACCELERATED);
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
@@ -1068,6 +1089,17 @@ int main(int argc, char **argv) {
   double audio_acc = 0.0;
   int16_t audio_buf[1024 * 2];
   bool quit = false;
+  /* Live FPS counter in the window title, updated once/sec -- lets a user
+   * on a slow host (e.g. a VM) tell at a glance whether the emulator itself
+   * is keeping up with real time, independent of anything ROM-side. */
+  uint64_t fps_window_start = SDL_GetPerformanceCounter();
+  uint64_t fps_window_frames = 0;
+  /* Manual frame pacer, replacing vsync (see the renderer-creation comment
+   * above): target the SNES's real ~60.0988fps, sleeping off any leftover
+   * budget each loop iteration instead of blocking on a potentially-broken
+   * driver vsync wait. */
+  const double kTargetFrameSeconds = 1.0 / 60.0988;
+  uint64_t next_frame_deadline = SDL_GetPerformanceCounter();
   while (!quit) {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
@@ -1079,6 +1111,7 @@ int main(int argc, char **argv) {
           else memset(s_pc_bitmap, 0, sizeof(s_pc_bitmap));
         }
         s_gfx_trace_hits = 0;
+        s_dbg_live_hits = 0;
         fprintf(stderr, "[F1] PC bitmap capture / gfx trace reset at frame %llu\n",
                 (unsigned long long)s_frames);
       }
@@ -1105,10 +1138,49 @@ int main(int argc, char **argv) {
     apply_frame_input(s_frames);
     g_snes->input1_currentState |= input;
 
+    /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
+     * time for any run_one_frame() call slower than the threshold -- there's
+     * no frame-pacing throttle in this loop other than vsync on the present
+     * call, so if simulating a frame's worth of 65816 instructions takes
+     * longer than ~16.67ms on some screen, the game visibly runs below
+     * 60fps on that screen specifically, with no other symptom. */
+    const char *frame_time_thresh_env = getenv("SC_FRAME_TIME");
+    uint64_t frame_t0 = frame_time_thresh_env ? SDL_GetPerformanceCounter() : 0;
+
     if (!run_one_frame()) {
       fprintf(stderr, "frame %llu: opcode guard tripped (hang/runaway) -- stopping\n",
               (unsigned long long)s_frames);
       break;
+    }
+
+    if (frame_time_thresh_env) {
+      static uint32_t s_frame_time_hits;
+      double ms = (double)(SDL_GetPerformanceCounter() - frame_t0) * 1000.0 /
+                  (double)SDL_GetPerformanceFrequency();
+      double thresh = atof(frame_time_thresh_env);
+      if (ms >= thresh && s_frame_time_hits < 500) {
+        fprintf(stderr, "[frametime f=%llu] %.2fms\n", (unsigned long long)s_frames, ms);
+        s_frame_time_hits++;
+      }
+    }
+
+    if (getenv("SC_DEBUG_LIVE")) {
+      /* Self-triggering: don't start logging until $01ed first changes
+       * (i.e. movement has actually begun), so a few seconds of imprecise
+       * F1 timing before/after the user actually holds a direction don't
+       * burn through the hit cap on dead frames. */
+      static uint8_t s_dbg_live_last_ed = 0xff;
+      static bool s_dbg_live_armed;
+      if (!s_dbg_live_armed) {
+        if (s_dbg_live_last_ed == 0xff) s_dbg_live_last_ed = g_ram[0x01ed];
+        else if (g_ram[0x01ed] != s_dbg_live_last_ed) s_dbg_live_armed = true;
+      }
+      if (s_dbg_live_armed && s_dbg_live_hits < 2000) {
+        fprintf(stderr, "[dbgl f=%llu] $01ed=%02x $00d7=%02x $01f3=%02x $01ff=%02x\n",
+                (unsigned long long)s_frames, g_ram[0x01ed], g_ram[0xd7],
+                g_ram[0x01f3], g_ram[0x01ff]);
+        s_dbg_live_hits++;
+      }
     }
 
     if (getenv("SC_LIVE_C9CA")) {
@@ -1146,7 +1218,34 @@ int main(int argc, char **argv) {
     SDL_UnlockTexture(texture);
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
+
+    next_frame_deadline += (uint64_t)(kTargetFrameSeconds * (double)SDL_GetPerformanceFrequency());
+    uint64_t now = SDL_GetPerformanceCounter();
+    if (now < next_frame_deadline) {
+      double remaining_ms = (double)(next_frame_deadline - now) * 1000.0 /
+                             (double)SDL_GetPerformanceFrequency();
+      if (remaining_ms > 1.0) SDL_Delay((Uint32)(remaining_ms - 1.0));
+      while (SDL_GetPerformanceCounter() < next_frame_deadline) { /* spin for the last <1ms */ }
+    } else {
+      /* Running behind (e.g. this frame's work overran budget) -- don't
+       * try to catch up by presenting a burst of frames back-to-back;
+       * just resync the deadline to now so pacing doesn't accumulate
+       * drift after a one-off slow frame. */
+      next_frame_deadline = now;
+    }
     SDL_RenderPresent(renderer);
+
+    fps_window_frames++;
+    double fps_window_elapsed = (double)(SDL_GetPerformanceCounter() - fps_window_start) /
+                                 (double)SDL_GetPerformanceFrequency();
+    if (fps_window_elapsed >= 1.0) {
+      char title[128];
+      snprintf(title, sizeof(title), "SimCitySNESRecomp -- %.1f fps",
+               (double)fps_window_frames / fps_window_elapsed);
+      SDL_SetWindowTitle(window, title);
+      fps_window_frames = 0;
+      fps_window_start = SDL_GetPerformanceCounter();
+    }
   }
 
   if (audio_dev) SDL_CloseAudioDevice(audio_dev);
