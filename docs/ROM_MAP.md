@@ -198,9 +198,21 @@ not just inferred from the option table's ordering.
 - **View screen rendering** (`docs/INVESTIGATION_dpad.md`, "Open item:
   View screen's D-pad"): the write side is fully confirmed and working;
   no renderer/consumer of `$7e21b4`/`$7e21b5` has been found yet.
-- **Sound**: no total-failure bug (audio active ~92% of a simulated
-  minute); whatever's actually missing needs a specific description to
-  chase further.
+- **Sound**: no total-failure bug in the underlying DSP simulation (audio
+  active ~92% of a simulated minute, confirmed via headless qualify
+  mode). Live testing found a real, specific symptom: audio in the
+  windowed build lags behind by 1-2 seconds, traced to fast-forward
+  batches (`frames_this_iter > 1` in `src/main.c`) leaving several
+  frames' worth of DSP output undrained each time, which then plays back
+  later as increasingly stale audio -- this includes the *automatic*
+  fast-forward (not just Tab-held), which fires any time the LC_LZ5
+  decompressor runs, including ordinary dialog/UI popups mid-game, not
+  just loading screens. Two attempts to discard that backlog (both a
+  hand-rolled fix and the shared runner's own `dsp_trimSamples()`) each
+  caused a complete, permanent audio freeze in live testing instead --
+  root cause of *that* not found, reverted. The 1-2s delay remains
+  unfixed; `SC_AUDIO_DEBUG` (periodic drain-loop stats) was added for the
+  next attempt.
 - **Widescreen** (`docs/PLAN_widescreen.md`): scoped, not implemented --
   the shared engine already has the rendering machinery; needs SimCity-
   specific BG-layer identification and visual verification.

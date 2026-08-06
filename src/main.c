@@ -153,7 +153,15 @@ static uint8_t bus_read(void *mem, uint32_t adr) {
     fprintf(stderr, "[pctrace f=%llu] $4218 read = %02x -- capturing next 60 PCs\n",
             (unsigned long long)s_frames, v);
   }
+  /* Gated behind its own SC_CADENCE_WATCH flag, not just s_addr_trace_count
+   * -- this used to piggyback on any SC_ADDR_TRACE use at all, which meant
+   * tracing something unrelated (e.g. a task-scheduler lead far from the
+   * cadence investigation this was built for) silently also turned on
+   * hundreds of lines/frame of unrelated $011b/$011c read spam, tanking
+   * framerate badly enough to make the window unplayable long before
+   * reaching whatever screen was actually being tested. */
   if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
+      getenv("SC_CADENCE_WATCH") &&
       (reg == 0x011b || reg == 0x011c)) {
     static uint32_t s_read_watch_hits;
     if (s_read_watch_hits < 400) {
@@ -175,6 +183,7 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
     fprintf(stderr, "[io f=%llu] WRITE %04x = %02x\n",
             (unsigned long long)s_frames, reg, v);
   if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
+      getenv("SC_CADENCE_WATCH") &&
       (reg == 0x01eb || reg == 0x01ec || reg == 0x01ed || reg == 0x01ee || reg == 0x007c)) {
     static uint32_t s_wram_watch_hits;
     if (s_wram_watch_hits < 200) {
@@ -439,7 +448,14 @@ static bool run_one_frame(void) {
         }
       }
     }
-    if (s_addr_trace_count) {
+    /* Gated on s_addr_trace_start_frame too, not just s_addr_trace_count --
+     * this ran on every single opcode (not just every frame) from frame 0
+     * the moment SC_ADDR_TRACE was set at all, regardless of an @start
+     * suffix, which made interactive play visibly slower for however long
+     * it took to reach the frame actually being investigated. Now a
+     * delayed start via SC_ADDR_TRACE=...@N keeps the game at full,
+     * untraced speed until frame N. */
+    if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame) {
       s_pc_history[s_pc_history_head] = ((uint32_t)cpu->k << 16) | cpu->pc;
       s_pc_history_head = (s_pc_history_head + 1) % SC_PC_HISTORY_SIZE;
       if (s_pc_history_filled < SC_PC_HISTORY_SIZE) s_pc_history_filled++;
@@ -1238,7 +1254,16 @@ int main(int argc, char **argv) {
   want.channels = 2;
   want.samples = 1024;
   SDL_AudioDeviceID audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-  if (audio_dev) SDL_PauseAudioDevice(audio_dev, 0);
+  if (audio_dev) {
+    SDL_PauseAudioDevice(audio_dev, 0);
+    fprintf(stderr, "audio: opened freq=%d format=%04x channels=%d samples=%d\n",
+            have.freq, have.format, have.channels, have.samples);
+  } else {
+    /* Previously silent on failure -- every audio code path below is
+     * gated on `if (audio_dev)`, so a failed open just ran the whole
+     * game with no sound and no indication why. */
+    fprintf(stderr, "audio: SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+  }
 
   double audio_acc = 0.0;
   int16_t audio_buf[1024 * 2];
@@ -1384,30 +1409,19 @@ int main(int argc, char **argv) {
     }
     if (guard_tripped) break;
 
-    /* Fast-forward's audio comment above ("only the last of the batch's
-     * audio gets queued, skipping the rest") describes the intent, but
-     * nothing previously enforced it: dsp_getSamples() below still only
-     * drains one real-time frame's worth (534 native samples, its fixed
-     * quantum -- see the comment at its call site) per *outer* loop
-     * iteration, regardless of how many sub-frames just ran. The DSP's
-     * own ring buffer (runner/src/snes/dsp.c) still produces real audio
-     * for every simulated sub-frame though, so during a 6x batch, 5
-     * frames' worth of audio piles up undrained instead of being
-     * discarded -- a backlog that then has to be drained on *later*
-     * frames, playing back increasingly stale audio. Confirmed as the
-     * likely cause of a reported growing audio delay: this auto-boost
-     * fires any time the LC_LZ5 decompressor runs (00:90dd), which
-     * isn't only map/scenario loading -- dialog/UI text and tilesets
-     * decompress the same way (see tools/extract_graphics.py), so a
-     * routine popup during normal play can trigger it too, each time
-     * adding to the backlog. Discard the excess here so only the most
-     * recent frame's audio survives, matching what the comment above
-     * always claimed happened. */
-    if (frames_this_iter > 1) {
-      Dsp *dsp_ff = g_snes->apu->dsp;
-      uint32_t avail_ff = dsp_ff->sampleWrite - dsp_ff->sampleRead;
-      if (avail_ff > 534) dsp_ff->sampleRead = dsp_ff->sampleWrite - 534;
-    }
+    /* REVERTED (see docs/ROM_MAP.md or git history for the attempt):
+     * fast-forward's audio comment above ("only the last of the batch's
+     * audio gets queued, skipping the rest") describes intent that was
+     * never actually enforced -- during a fast-forward batch, the DSP
+     * ring genuinely accumulates several frames' worth of undrained
+     * audio, which plays back later as an audible delay. Two different
+     * attempts to discard that backlog each frame (a hand-rolled
+     * sampleRead assignment, then the shared runner's own
+     * dsp_trimSamples()) both caused a complete, permanent audio freeze
+     * in live testing instead of just fixing the delay -- root cause not
+     * found. Reverted rather than ship a "fix" that's worse than the
+     * original symptom; the delay remains a known issue (see the sound
+     * investigation thread). */
 
     if (frame_time_thresh_env) {
       static uint32_t s_frame_time_hits;
@@ -1461,10 +1475,28 @@ int main(int argc, char **argv) {
        * call and resamples them to `wantN` -- gate on that real fixed
        * quantum, not on `wantN`, or the DSP's own ring-full backpressure
        * permanently freezes production (see run_qualification()). */
+      static uint64_t s_audio_dbg_queued, s_audio_dbg_calls, s_audio_dbg_fails;
       if (available >= 534 && wantN > 0 && wantN <= 1024) {
         audio_acc -= (double)wantN;
         dsp_getSamples(dsp, audio_buf, wantN);
-        SDL_QueueAudio(audio_dev, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
+        int qrc = SDL_QueueAudio(audio_dev, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
+        s_audio_dbg_calls++;
+        if (qrc != 0) s_audio_dbg_fails++;
+        else s_audio_dbg_queued += (uint64_t)wantN;
+      }
+      /* SC_AUDIO_DEBUG: periodic drain-loop status, for diagnosing
+       * windowed-only audio issues -- headless qualify mode shows healthy
+       * DSP production (92% active frames) as a baseline, so if this
+       * never fires or queued/drained stay at 0, the bug is specifically
+       * in this drain loop or the SDL device, not the underlying audio
+       * synthesis. Built while chasing a reported total-silence bug that
+       * turned out to be self-inflicted (see the revert above) -- kept
+       * for next time. */
+      if (getenv("SC_AUDIO_DEBUG") && (s_frames % 180) == 0) {
+        fprintf(stderr, "audio: f=%llu queued_dev=%u drained_total=%llu calls=%llu fails=%llu\n",
+                (unsigned long long)s_frames, SDL_GetQueuedAudioSize(audio_dev),
+                (unsigned long long)s_audio_dbg_queued, (unsigned long long)s_audio_dbg_calls,
+                (unsigned long long)s_audio_dbg_fails);
       }
     }
 
