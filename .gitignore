@@ -40,3 +40,9 @@ config.local.ini
 # Boot traces / triage scratch (generated at runtime)
 boot_trace*.txt
 _*
+
+# On-demand WRAM snapshots (F4 hotkey) and other ad-hoc runtime dumps --
+# generated locally per-debugging-session, derived from the copyrighted
+# ROM's runtime state
+wram_snapshot.bin
+*.wram
