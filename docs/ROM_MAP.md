@@ -18,7 +18,7 @@ any `bank:addr` with `addr >= 0x8000` is `bank*0x8000 + (addr-0x8000)`
 | `00` | Core engine: boot, NMI/joypad handling, shared edge-detector (`00:928f-92cb`), LC_LZ5 decompressor (`00:90dd`), various shared utilities |
 | `01` | Shared UI/cursor dispatch code: map cursor movement, mode-select ladder, direction-priority scanners, the `01:8b4e`+ per-frame dispatcher chain |
 | `02` | Modal screens: Tax, Save, and similar bank-2-resident popups |
-| `03` | Mode-select dispatch table (`03:d255`, 20 entries) and its handlers: Map Select, city-name-entry keyboard, Select-game-level, Scenario Select |
+| `03` | Mode-select dispatch table (`03:d255`, 20 entries) and its handlers: Map Select, city-name-entry keyboard, Select-game-level, Scenario Select; also the map-generation tile mask/copy loop (`03:cf82-cf9d`) |
 | `05` | Misc shared routines; at least one position-array stepper (`05:9c73`) not yet fully traced |
 | `09`-`0f` | Compressed graphics/text data (font tileset, dialog text, scenario tileset/text -- see "Compressed data regions" below) and possibly a task-scheduler jump table (`0d:~e07a`, unconfirmed) |
 
@@ -32,17 +32,17 @@ this ROM).
 |---|---|---|
 | `$00c9`/`$c9` (dp) | Edge-detect mirror, low byte -- real direction+face-button bits live in the **low nibble** here (see `$011b`) | High, extensively verified |
 | `$00ca`/`$ca` (dp) | Edge-detect mirror, high byte -- **low nibble is hardware-guaranteed zero** (unconnected controller pins); real A/X/L/R bits are in the *high* nibble | High |
-| `$00d7`/`$d7` (dp) | Bail-out flag checked at the top of several dispatch functions (`01:c0dd`, `01:948b`) -- confirmed always `0` in every live sample so far, role unconfirmed | Medium |
+| `$00d7`/`$d7` (dp) | **Not just a bail-out flag -- a dispatcher-selector state machine.** `01:8b3b-8b42` branches on it: `0` runs the "normal" per-frame cursor dispatcher (`01:8b4e+`, has the buggy Y-precondition described in the fast-travel writeup); `1` jumps to a second, near-identical dispatcher (`01:8c55`) with no such precondition. Also checked at `01:c0dd`/`01:948b` (role there still unconfirmed). Previously documented as "always 0 in every live sample" -- that was apparently just never sampled during actual fast-travel use | High (dispatcher-select role) / Medium (role at c0dd/948b) |
 | `$0059`-`$005d` (`$59`/`$5b`/`$5d`) | Rolling checksum/hash accumulator pair, folds scenario parameters (`$0b27`-`$0b29`) via `00:824b`/`824f`; part of procedural map/seed generation (10-iteration loop at `03:d862`) | High (byte-level, live traced) |
 | `$0079`/`$79` (dp) | Scratch: per-axis step delta in several contexts (cursor movement, decompressor table pointer) -- meaning is call-site-dependent | Medium |
 | `$007a`-`$007e` | Scratch block used by a table-driven update loop at `00:94fd`-`95d8` (indexed via `$0b4d`) | Low, not traced in detail |
 | `$007c`/`$7c` (dp) | **Reused scratch, not a single-purpose variable** -- among other uses, `00:cdec` treats it as a tight busy-loop delay counter (32 decrements within one frame); a red herring for the cadence investigation, see `docs/REVERSE_ENGINEERING_cursor_movement.md` | High (the "don't trust this" lesson is confirmed) |
-| `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`) is held, right before an early `RTS` (`01:8c52`) -- consumer not yet found | Medium |
+| `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`, only when no direction also held -- see below) is held, right before an early `RTS` (`01:8c52`). Consumer: `01:897f` reads it right after the write and dispatches via a jump table at `01:88ef` (`ASL A; TAX; JSR (table,X)`, opcode `0xFC`). Reason `1` (B/X) lands at `01:8d26`, which updates the animated hand-**cursor sprite** (OAM writes to `$7e2840+`/`$7e3040+`/`$7e3840+`), not the map scroll. Reason `2` (Y, direction-less only) lands at `01:8dce`, an advisor-panel toggle via `JSL $0098a0` (inline param `6`/`7`). **Y held together with a direction traces to reason `0` (no-op)** -- this contradicts confirmed-live bsnes behavior (Y+direction genuinely scrolls faster on real hardware), so either this trace has an error or this dispatcher isn't actually what gates main-map movement -- unresolved, see `docs/INVESTIGATION_dpad.md` "Fast travel" | High (dispatch mechanism itself) / contradicted-by-live-testing for the fast-travel conclusion, needs re-verification |
 | `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B | High |
 | `$011c` | `$4219` mirror (held-state). Bits 4-7 = R/L/X/A (real); **bits 0-3 are hardware-guaranteed zero** | High |
 | `$011a` | One byte before `$011b` -- the D-pad fix family's standard "shift the 16-bit load back one byte" target, so a load spanning `$011a`/`$011b` puts real direction bits where a buggy ladder expected zeroed `$011c` bits | High |
 | `$0123`/`$0124` | Absolute (non-direct-page) mirror pair, same relationship as `$011b`/`$011c` | High |
-| `$01bd`/`$01be` | Map scroll-X / scroll-Y (fast-travel investigation lead, not confirmed) | Low |
+| `$01bd`/`$01bf` | Map scroll-X / scroll-Y, **confirmed** (corrects the earlier `$01bd`/`$01be` guess -- no code anywhere in the ROM touches `$01be`; the real pair is 2 bytes apart). Clamped by `01:a0c4` against bounds in `$01c5`-`$01cb`; also the destination of the "warp to absolute tile coordinate" routine `01:a640`. No modifier-dependent step size found at either site -- still not the fast-travel mechanism | High |
 | `$01c1` | Referenced in early SC_DEBUG tooling; role not documented | Low |
 | `$01d7` | Checked (`!= 0`) partway through `01:c0dd`'s gate chain; always `0` in live samples so far | Medium |
 | `$01df` | "Screen-mode index" -- written `3` when the cursor dispatcher's interrupt path fires | Medium |
@@ -65,6 +65,13 @@ this ROM).
 | `$03fe` | Checked early in `01:8b4f`'s dispatcher, gates whether `$0201`/fast-travel-adjacent `JSL $0098a0` logic runs at all | Low |
 | `$0421` | Shared selection-index byte for the Load/Save/Exit menu and Select-game-level screen (both patched via the same D-pad fix family) | High |
 | `$0b27`-`$0b29` | Scenario generation parameters, folded into the `$59`/`$5b`/`$5d` checksum loop | Medium |
+| `$01eb`/`$01ed` | Also the target of the ported community mouse patch (see "Mouse patch integration" below) -- `src/main.c`'s `apply_mouse_delta()` writes here directly from host mouse motion when F3 is toggled on | High (write side) / Medium (which screen's cursor actually reads it) |
+| `$0425` | **Debug-menu cheat flags bitfield.** `0x01`=No Disasters (inferred), `0x02`=Needless Money (**confirmed**, gates the deduction at `01:bb7a`), `0x04`=Valve Max (**confirmed**, gates the RCI-demand force at `03:8b37`), `0x08`=Water Reclaim (inferred), `0x10`=transient "Memory: SET selected" UI state (not a persisted cheat). Read at 19+ sites across banks 00/01/03. See "Debug menu / cheat mechanism" below | High |
+| `$0429` | Currently-selected debug-menu option index (1-based); `00:da04`'s handler branches on it (`==0`->something else, `==5`->Memory commit, else->toggle) | Medium |
+| `$0b9d`/`$0b9f` | City treasury/money, multi-byte value. Confirmed by the Needless-Money-gated deduction at `01:bbbc-bbcc` (`SEC; SBC $79; STA $0b9d` then an 8-bit borrow into `$0b9f`) | High |
+| `$0bad`/`$0baf`/`$0bb1` | R/C/I demand-meter values ("valves"). Forced to `0x07d0`/`0x05dc`/`0x05dc` when Valve Max (`$0425 & 4`) is set (`03:8b37-8b4b`) | High |
+| `$0200`-`$5fc0` | Raw/unmasked map tile buffer (24000 bytes, 12000 16-bit tiles), source for the mask/copy loop at `03:cf82-cf9d` | High |
+| `$8000`-`$ddbf` | **Final, usable map tile buffer** (24000 bytes, 12000 16-bit tiles) -- each tile is `$0200+n AND $03FF`, written by `03:cf82-cf9d`. This is what a map-rendering/export tool should read; the raw buffer above still has flag bits (e.g. bit15 = 3x3 building footprint, per third-party RE notes, not independently verified) mixed into the tile ID | High (location/derivation) / Low (per-tile-value semantics) |
 | `$0b4b`/`$0b4d`/`$0b4f` | Control values for the `00:94d5`-area table-driven update loop | Low |
 | `$0bcb` | Written `0x0a` alongside `$01df=3` on the cursor dispatcher's interrupt path | Medium |
 | `$0c0f` | The **other**, already-D-pad-fixed cursor-mover's own gate byte (`01:ae2e`'s routine) -- confirmed *not* the same mechanism driving `$01ed`'s cadence (stayed `0` throughout live cadence sampling) | High |
@@ -92,6 +99,15 @@ confidence notes on each -- summary table only below.
 | `01:f17d` | *(View-screen position stepper)* | Reads/adds/clamps `$7e21b4` (or writes `$e0` to `$7e21b5` on clamp), called from the View screen's direction-dispatch loop at `01:f0d3-f119` |
 | `03:d255` | *(mode-select dispatch table)* | 20 entries, one per screen/menu mode selected by direct-page `$14` |
 | `00:c0fb` | *(position-array initializer)* | Writes `0xE0` across an 8-slot, 4-byte-stride array starting at `$7e21b5` |
+| `03:cf82-cf9d` | *(map tile mask/copy loop)* | `SEP #$20; PHB; LDA #$7e; PHA; PLB; REP #$30; LDX #0` loop: `LDA $7e0200,X (long); AND #$03ff; STA $8000,X; INX; INX; CPX #$5dc0; BNE`. Copies the raw generated map (`$7e0200+`) into the final masked buffer (`$7e8000+`), stripping flag bits from each tile |
+| `01:88ef` | *(per-frame "reason code" jump table)* | Indexed by `$c5` (`ASL A; TAX; JSR (table,X)` at `01:897f`); entries found: `0`=no-op, `1`=`01:8d26` (cursor sprite), `2`=`01:8dce` (advisor toggle), `3`-`5`=`01:8e28`/`8e3d`/`9d6b` (menu-list auto-repeat, not traced in detail) |
+| `01:8d26` | *(reason-1 handler)* | Reads `$011b`'s direction nibble, dispatches to 4 per-direction OAM-sprite handlers (`b2f9`/`b1f6`/`b166`/`b030`) that animate the hand cursor -- **not** the map scroll, despite being reached via the same "B or X held" condition the fast-travel bug involves |
+| `01:8dce` | *(reason-2/Y handler)* | Toggles `$01d7` and calls `JSL $0098a0` with inline param `6` (open) or `7` (close) -- reads as the advisor-panel toggle, matching the in-game tutorial text ("press Y" for advisor help) |
+| `01:a0c4` | *(scroll-position clamp)* | Clamps `$01bd` to `[$01c7,$01c5]` and `$01bf` to `[$01c9,$01cb]` |
+| `01:a640` | *(warp to absolute tile coordinate)* | Converts tile coords at `$0400`/`$0402` to scroll position via `01:a688`'s clamp, stores to `$01bd`/`$01bf` -- likely used for camera jumps (disaster alerts, advisor "take me there"), not incremental scrolling |
+| `01:8c55-8c8e` | *(second reason-code dispatcher)* | Near-identical to `01:8b4f`'s dispatcher, reached via `01:8b42`'s `$d7==1` branch instead of the default `$d7==0` path. Its Y-check (`01:8c75`) has no `$01f5==0` precondition, unlike the default dispatcher's -- this is the one that actually handles Y+direction (fast travel) |
+| `01:9f2d` | *(reason-6 handler, dispatcher 2's Y-path)* | Extensive setup (clears `$01c1`/`$01f5`, sets several flags to `$ffff`, sets `$01df=3`), ends in `JMP $9dcc`. Internally also branches on `$d7` (`0`/`1`/`2` sub-states), separate from the top-level `$d7` dispatcher-select role |
+| `01:9dcc` | *(possible task-scheduler entry point)* | Writes into tables at `$30c2,X`/`$ef20,X`/`$4420,X` indexed by `$01df` doubled, then returns immediately -- looks like "schedule a deferred task for mode `$01df`" rather than doing the work synchronously. Not yet confirmed as the same mechanism as the bank-`0d` task-scheduler lead from the cadence investigation, but a strong candidate -- worth checking |
 
 ## D-pad patch sites (all fixed -- `src/main.c`, search for "dpad fix:")
 
@@ -123,6 +139,39 @@ just the address list for quick lookup.
 | Scenario text, group 0 | `0x05BCAD`, 5 packets | |
 | Scenario text, group 1 | `0x05EE30`, 12 packets | |
 
+## Debug menu / cheat mechanism (found via published Pro Action Replay codes)
+
+A user-supplied list of published cheat-code addresses (Game Genie/PAR-style
+`bank:addr:value`, same LoROM addressing this doc uses throughout) included
+one labeled "Enable Debugger" at `01:88e7`. Tracing it forward, cross-checked
+against a second, independent source (a fan guide crediting Corey Miller/
+"ZaphodBee" describing an in-game debug menu reached via a controller-2 code
+at the quit-confirmation screen), both point at the same mechanism:
+
+- `01:88e7-88ee`: boot-time routine, `LDA $700009` (long -- reads one byte
+  from cartridge SRAM) `; STA $0425 ; RTS`. The "Enable Debugger" PAR code
+  replaces the load with `LDA #$80`, forcing this to look nonzero
+  regardless of real SRAM contents.
+- `00:da04-da3f`: the in-game menu's option handler. Looks up a per-option
+  bitmask from a table at `00:da50` (`01 02 04 08 10 00` for options 1-6),
+  XORs it into `$0425` to toggle (options 1-4), and for option 5
+  ("Memory"), instead writes `$0425` back out to SRAM `$700009` -- the same
+  address the boot loader reads. This is the "Memory: CLR/SET, reset to
+  activate" flow the fan guide describes, fully confirmed from ROM bytes
+  alone, no live testing needed.
+- `$0425`'s individual bits are then read at 19+ sites across banks 00/01/03
+  to gate the actual cheats -- see the `$0425` WRAM table entry above for
+  the confirmed/inferred bit mapping.
+
+`src/main.c` exposes this two ways: **F2** automates the documented
+controller-2 entry sequence (unverified whether this ROM revision even
+reads controller 2 -- a separate whole-ROM search for any `$421A`/`$421B`/
+`$4016`/`$4017` access found none), and **F5-F8** poke `$0425`'s bits
+directly, bypassing both the entry code and the in-game menu navigation
+entirely. The direct-poke route is the higher-confidence one since two of
+its four bits are independently confirmed against their actual consumers,
+not just inferred from the option table's ordering.
+
 ## Open investigation threads (see linked docs for full detail)
 
 - **Cursor cadence** (`docs/REVERSE_ENGINEERING_cursor_movement.md`,
@@ -132,11 +181,20 @@ just the address list for quick lookup.
   chain has been confirmed to evaluate identically to real hardware --
   the gap is in *how often the dispatcher itself gets invoked*, not a
   wrong decode. Leading candidate: an unconfirmed task-scheduler jump
-  table in bank `0d`.
-- **Fast travel** (`docs/INVESTIGATION_dpad.md`, "Open item: fast
-  travel"): confirmed *not* implemented via the main cursor dispatcher's
-  B/X/Y checks (those just set a reason code and return). Real location
-  still unknown; `JSL $0098a0` remains a lead but has 90+ call sites.
+  table in bank `0d` -- **possibly the same mechanism as the
+  `01:9dcc`-based scheduler entry found via the fast-travel thread
+  below**, not yet checked.
+- **Fast travel**: confirmed broken on this recomp, confirmed working on
+  bsnes for the same ROM (SNES Y/A held simultaneously with a direction).
+  Traced to a genuine dispatcher-selection state machine on `$d7` (see
+  the `$00d7` WRAM entry) -- the *correct* per-frame dispatcher for
+  Y+direction (`01:8c55`, reached when `$d7==1`) schedules a deferred
+  task via `01:9dcc` rather than moving the cursor synchronously. Root
+  cause narrowed to: either that task-scheduler mechanism never actually
+  runs the scheduled task in this recomp, or `$d7` never reaches `1`
+  during real play here. Next step: find what consumes the
+  `$30c2`/`$ef20`/`$4420` tables `01:9dcc` writes into. See
+  `docs/INVESTIGATION_dpad.md` "Fast travel" for the full writeup.
 - **View screen rendering** (`docs/INVESTIGATION_dpad.md`, "Open item:
   View screen's D-pad"): the write side is fully confirmed and working;
   no renderer/consumer of `$7e21b4`/`$7e21b5` has been found yet.

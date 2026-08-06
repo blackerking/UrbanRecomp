@@ -511,20 +511,61 @@ static uint8_t *read_file(const char *path, uint32_t *size_out) {
 /* ── synthetic input injection for headless repro (mirrors the --input
  * flag in snesrecomp/cosim/ref_driver.c) -- lets a specific controller
  * press be reproduced deterministically at an exact frame, instead of
- * guessing from an interactive session. ─────────────────────────────── */
+ * guessing from an interactive session. Player 2 gets its own identical
+ * array/parser (--input2) -- needed for the documented debug-menu code
+ * entry, which is read on controller 2. ──────────────────────────────── */
 typedef struct InputEvent { uint64_t start, duration; uint16_t mask; } InputEvent;
 static InputEvent s_input_events[64];
 static uint32_t s_input_event_count;
+static InputEvent s_input2_events[96];
+static uint32_t s_input2_event_count;
 
-static bool add_input_event(const char *text) {
+static bool add_input_event_to(InputEvent *arr, uint32_t *count, uint32_t cap, const char *text) {
   unsigned long long start = 0, duration = 0;
   unsigned mask = 0;
   char trailing = '\0';
-  if (s_input_event_count >= 64 ||
+  if (*count >= cap ||
       sscanf(text, "%llu:%llu:%x%c", &start, &duration, &mask, &trailing) != 3 ||
       !duration || mask > 0xffffu)
     return false;
-  s_input_events[s_input_event_count++] = (InputEvent){start, duration, (uint16_t)mask};
+  arr[(*count)++] = (InputEvent){start, duration, (uint16_t)mask};
+  return true;
+}
+
+static bool add_input_event(const char *text) {
+  return add_input_event_to(s_input_events, &s_input_event_count, 64, text);
+}
+
+static bool add_input2_event(const char *text) {
+  return add_input_event_to(s_input2_events, &s_input2_event_count, 96, text);
+}
+
+/* One-button macro for the documented debug-menu entry code (Peter's
+ * SimCity SNES Guide, crediting Corey Miller/"ZaphodBee"): a fixed
+ * 16-step sequence read on controller 2 while on the "Goodbye! See you
+ * soon" quit-confirmation screen. Static ROM analysis found no code
+ * anywhere in this ROM dump reading a second controller (no $421A/$421B
+ * or manual $4016/$4017 access), so this is unverified for this specific
+ * ROM revision -- this macro exists to test it live/headlessly rather
+ * than requiring 16 hand-timed presses. Each step is held for
+ * kP2StepHold frames with a kP2StepGap release between steps so the
+ * game's edge-detection (if any) sees 16 distinct presses, not one held
+ * button. */
+enum { kP2StepHold = 6, kP2StepGap = 6, kP2StepFrames = kP2StepHold + kP2StepGap };
+static bool queue_debug_menu_code(uint64_t start_frame) {
+  static const uint16_t kSeq[] = {
+    kPad_Left, kPad_A, kPad_Right, kPad_Y, kPad_Up, kPad_B, kPad_Down, kPad_X,
+    kPad_Select, kPad_Start, kPad_Start, kPad_Select, kPad_R, kPad_R, kPad_L, kPad_L,
+  };
+  uint32_t n = (uint32_t)(sizeof(kSeq) / sizeof(kSeq[0]));
+  if (s_input2_event_count + n > 96) return false;
+  for (uint32_t i = 0; i < n; i++) {
+    s_input2_events[s_input2_event_count++] = (InputEvent){
+      start_frame + (uint64_t)i * kP2StepFrames, kP2StepHold, kSeq[i]
+    };
+  }
+  fprintf(stderr, "queued debug-menu code on controller 2 starting frame %llu (%u steps, %d frames each)\n",
+          (unsigned long long)start_frame, n, kP2StepFrames);
   return true;
 }
 
@@ -535,6 +576,47 @@ static void apply_frame_input(uint64_t frame) {
     if (frame >= e->start && frame - e->start < e->duration) input |= e->mask;
   }
   g_snes->input1_currentState = input;
+
+  uint16_t input2 = 0;
+  for (uint32_t i = 0; i < s_input2_event_count; i++) {
+    InputEvent *e = &s_input2_events[i];
+    if (frame >= e->start && frame - e->start < e->duration) input2 |= e->mask;
+  }
+  g_snes->input2_currentState = input2;
+}
+
+/* ── host-mouse cursor control, ported from the community "SimCity mouse
+ * patch" (https://github.com/Selicre/simcity-mouse, main.asm/mouse.asm).
+ * That patch hooks the NMI to bit-bang an actual SNES mouse's serial
+ * protocol on controller port 2 and accumulates the result into two WRAM
+ * bytes it identified by testing: $7E01EB (X) and $7E01ED (Y) -- the same
+ * $01eb,X "cursor-offset ladder" this project's own D-pad investigation
+ * found and fixed for the Comprehensive/Information overlay screen (see
+ * docs/INVESTIGATION_dpad.md, variant 6). Rather than apply the original
+ * ASM patch (which would mean shipping a modified ROM binary, contrary to
+ * this project being ROM-free, and would require an NMI-vector splice
+ * this recomp's C driver doesn't need), this ports just the destination
+ * semantics: since we already have direct WRAM access every frame, skip
+ * the serial-read entirely and drive the same two accumulator bytes from
+ * the real host mouse instead. Upstream's own README calls this "lots of
+ * jank" (menus visually desync until the D-pad is used, no button
+ * support, occasional resets to origin) -- ported as-is, same caveats
+ * apply here. Toggle with F3 (see SDL_SCANCODE_F3 above). */
+static bool s_mouse_enabled;
+
+static void apply_mouse_delta(int dx, int dy) {
+  if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
+  if (dy > 127) dy = 127; else if (dy < -127) dy = -127;
+
+  int x = (int)g_ram[0x01eb] + dx;
+  if (x > 0xff) x = 0xff;
+  if (x < 0x00) x = 0x00;
+  g_ram[0x01eb] = (uint8_t)x;
+
+  int y = (int)g_ram[0x01ed] + dy;
+  if (y > 0xdf) y = 0xdf; /* 223: patch clamps Y to the visible scanline range */
+  if (y < 0x00) y = 0x00;
+  g_ram[0x01ed] = (uint8_t)y;
 }
 
 /* ── generic activity qualification (--qualify N): the same pass/fail bar
@@ -613,6 +695,43 @@ static int run_qualification(uint64_t frames) {
         else
           fprintf(stderr, "failed to write WRAM dump to %s\n", wram_path);
       }
+      /* SC_DUMP_DIR + SC_DUMP_INTERVAL [+ SC_DUMP_START]: same idea as the
+       * SC_WRAM_DUMP_DIR family below, but for video (.ppm) frames -- lets
+       * a single --qualify run capture a whole navigation sequence (e.g.
+       * every frame of a menu transition) for offline visual inspection,
+       * instead of needing one run per SC_DUMP_AT frame. */
+      const char *dump_dir = getenv("SC_DUMP_DIR");
+      const char *dump_interval_s = getenv("SC_DUMP_INTERVAL");
+      if (dump_dir && dump_interval_s) {
+        uint64_t interval = strtoull(dump_interval_s, NULL, 0);
+        const char *start_s = getenv("SC_DUMP_START");
+        uint64_t start = start_s ? strtoull(start_s, NULL, 0) : 0;
+        if (interval > 0 && f >= start && (f - start) % interval == 0) {
+          char path[512];
+          snprintf(path, sizeof(path), "%s/frame_%010llu.ppm", dump_dir, (unsigned long long)f);
+          if (!write_ppm(path))
+            fprintf(stderr, "failed to write frame dump to %s\n", path);
+        }
+      }
+      /* SC_WRAM_DUMP_DIR + SC_WRAM_DUMP_INTERVAL [+ SC_WRAM_DUMP_START]:
+       * repeatedly dump WRAM every <interval> frames starting at <start>
+       * (default 0), one file per dump named wram_<frame>.bin in <dir> --
+       * for bulk automation (e.g. stepping through many Map Select
+       * screens in a single --qualify run) where a single SC_DUMP_AT
+       * frame isn't enough. */
+      const char *wram_dir = getenv("SC_WRAM_DUMP_DIR");
+      const char *wram_interval_s = getenv("SC_WRAM_DUMP_INTERVAL");
+      if (wram_dir && wram_interval_s) {
+        uint64_t interval = strtoull(wram_interval_s, NULL, 0);
+        const char *start_s = getenv("SC_WRAM_DUMP_START");
+        uint64_t start = start_s ? strtoull(start_s, NULL, 0) : 0;
+        if (interval > 0 && f >= start && (f - start) % interval == 0) {
+          char path[512];
+          snprintf(path, sizeof(path), "%s/wram_%010llu.bin", wram_dir, (unsigned long long)f);
+          if (!write_wram_dump(path))
+            fprintf(stderr, "failed to write WRAM dump to %s\n", path);
+        }
+      }
     }
 
     Dsp *dsp = g_snes->apu->dsp;
@@ -683,6 +802,12 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_PC_BITMAP_BANK");
     if (e && *e) s_pc_bitmap_bank = !strcmp(e, "all") ? -2 : (int)strtol(e, NULL, 16); }
   { const char *e = getenv("SC_PC_BITMAP_START"); if (e && *e) s_pc_bitmap_start_frame = strtoull(e, NULL, 0); }
+  /* SC_DEBUG_CODE_AT=<frame>: queue the one-button debug-menu code macro
+   * (see queue_debug_menu_code) on controller 2 at that frame, for
+   * headless verification in --qualify mode without hand-timing 16
+   * presses. */
+  { const char *e = getenv("SC_DEBUG_CODE_AT");
+    if (e && *e) queue_debug_menu_code(strtoull(e, NULL, 0)); }
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--qualify") && i + 1 < argc) {
       qualify_frames = strtoull(argv[++i], NULL, 0);
@@ -691,6 +816,11 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
       if (!add_input_event(argv[++i])) {
         fprintf(stderr, "invalid --input event; expected start:duration:hexmask\n");
+        return 2;
+      }
+    } else if (!strcmp(argv[i], "--input2") && i + 1 < argc) {
+      if (!add_input2_event(argv[++i])) {
+        fprintf(stderr, "invalid --input2 event; expected start:duration:hexmask\n");
         return 2;
       }
     } else if (argv[i][0] != '-') {
@@ -1139,6 +1269,58 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[F1] PC bitmap capture / gfx trace reset at frame %llu\n",
                 (unsigned long long)s_frames);
       }
+      /* F2: one-button entry of the documented debug-menu code on
+       * controller 2 (see queue_debug_menu_code) -- press once while on
+       * the "Goodbye! See you soon" quit-confirmation screen, instead of
+       * hand-timing all 16 inputs. !ev.key.repeat so holding F2 doesn't
+       * re-queue every auto-repeat tick. */
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F2 && !ev.key.repeat) {
+        queue_debug_menu_code(s_frames + 1);
+      }
+      /* F3: toggle host-mouse cursor control (see apply_mouse_delta below).
+       * Off by default -- it's a ported experimental community patch, and
+       * incidental OS mouse movement over the window shouldn't silently
+       * steer the game cursor unless asked for. */
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F3 && !ev.key.repeat) {
+        s_mouse_enabled = !s_mouse_enabled;
+        if (s_mouse_enabled) SDL_GetRelativeMouseState(NULL, NULL); /* discard stale accumulated delta */
+        fprintf(stderr, "[F3] mouse cursor control %s\n", s_mouse_enabled ? "ON" : "OFF");
+      }
+      /* F5-F8: directly toggle the stock ROM's own debug-menu cheat flags
+       * word, WRAM $0425 -- found by tracing a published Pro Action Replay
+       * code list's "Enable Debugger" address (01:88e7, a boot-time load
+       * from SRAM $700009 into $0425) forward to every site that reads
+       * $0425, and the in-game debug-menu handler itself (00:da04-da3f,
+       * which XORs a per-option bitmask table at 00:da50 into $0425, and
+       * commits it to SRAM $700009 when "Memory: SET" is chosen). This
+       * sidesteps needing the documented controller-2 entry code or menu
+       * navigation entirely -- same end effect, poked directly.
+       * Bit 0x02 (Needless Money) and 0x04 (Valve Max) are independently
+       * confirmed by disassembling their consumers (01:bb7a's money-
+       * deduction skip; 03:8b37's RCI-demand-meter force). Bits 0x01/0x08
+       * are inferred from the option table's position/ordering only (not
+       * yet confirmed against a consumer) -- label accordingly if this
+       * turns out wrong. */
+      if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+        const char *label = NULL; uint8_t bit = 0;
+        switch (ev.key.keysym.scancode) {
+          case SDL_SCANCODE_F5: label = "No Disasters (unconfirmed bit)"; bit = 0x01; break;
+          case SDL_SCANCODE_F6: label = "Needless Money"; bit = 0x02; break;
+          case SDL_SCANCODE_F7: label = "Valve Max"; bit = 0x04; break;
+          case SDL_SCANCODE_F8: label = "Water Reclaim (unconfirmed bit)"; bit = 0x08; break;
+          default: break;
+        }
+        if (bit) {
+          g_ram[0x0425] ^= bit;
+          fprintf(stderr, "[cheat] %s %s ($0425=%02x)\n", label,
+                  (g_ram[0x0425] & bit) ? "ON" : "OFF", g_ram[0x0425]);
+        }
+      }
+    }
+    if (s_mouse_enabled) {
+      int mdx = 0, mdy = 0;
+      SDL_GetRelativeMouseState(&mdx, &mdy);
+      if (mdx || mdy) apply_mouse_delta(mdx, mdy);
     }
     const uint8_t *keys = SDL_GetKeyboardState(NULL);
     uint16_t input = 0;

@@ -101,10 +101,13 @@ screen (the watch icon). See
 investigation, including the six distinct bug variants found and the live
 bsnes tracing that pinned down the last few.
 
-**Known remaining limitations:** the "fast travel" modifier (holding X or Y
-while moving on the map, for a faster/bigger scroll jump) is not yet fixed;
-the View screen's D-pad now genuinely updates its underlying game state but
-nothing visible changes yet. Both tracked in the same doc.
+**Known remaining limitations:** the View screen's D-pad now genuinely
+updates its underlying game state but nothing visible changes yet. The
+"fast travel" modifier (holding Y or A while moving, for a faster/bigger
+scroll jump) is confirmed broken on this recomp -- works correctly on
+real-hardware-accurate bsnes running the same ROM, but does nothing here
+beyond showing the directional cursor indicators. Both tracked in the
+same doc.
 
 ### Graphics/text export tool
 
@@ -144,11 +147,35 @@ shared `snesrecomp` runtime needed).
 | Start | Enter |
 | Select | Shift |
 | Fast-forward (hold) | Tab |
+| Debug-menu code entry (controller 2, one-shot) | F2 |
+| Mouse cursor control (toggle) | F3 |
+| Cheat: No Disasters (toggle, unconfirmed bit) | F5 |
+| Cheat: Needless Money (toggle, confirmed) | F6 |
+| Cheat: Valve Max (toggle, confirmed) | F7 |
+| Cheat: Water Reclaim (toggle, unconfirmed bit) | F8 |
 
 A/R advance the title screen itself. To reach the mode-select menu (rather
 than auto-continuing into gameplay), press Start or A roughly 10 seconds
 after the title screen appears, then wait about 5 more seconds -- see
 `docs/INVESTIGATION_dpad.md`.
+
+F2 and F3 aren't SNES buttons -- host-only additions this recomp's C driver
+can offer since it isn't limited to 8 controller inputs:
+
+- **F2** queues the documented debug-menu entry code (Left, A, Right, Y,
+  Up, B, Down, X, Select, Start, Start, Select, R, R, L, L) on controller
+  2 in one shot, timed automatically, instead of 16 hand-timed presses.
+  Press it once while on the "Goodbye! See you soon" quit-confirmation
+  screen (Load/Save/Exit menu -> END). Unverified against this ROM dump --
+  a whole-ROM search found no code reading controller 2 at all, so this
+  may not exist in this revision; F2 exists to test it either way. Also
+  available headlessly via `SC_DEBUG_CODE_AT=<frame>`.
+- **F3** toggles host-mouse control of the game's cursor, ported from the
+  community mouse patch (https://github.com/Selicre/simcity-mouse) --
+  drives the same WRAM bytes ($7e01eb/$7e01ed) that patch identified,
+  directly from real mouse movement instead of emulating an SNES mouse
+  peripheral. Off by default. Carries the same caveats upstream documents:
+  jank in menus, no button support, occasional resets to origin.
 
 Map/scenario loading ("Please wait...") does genuine procedural
 generation work rather than an artificial delay, so it isn't
@@ -192,5 +219,5 @@ See CONTRIBUTING.md for the full checkout/build/PR workflow and how this
 repository's framework dependency is managed, and
 `docs/INVESTIGATION_dpad.md` for the debugging tools built along the way
 (env-gated tracing, PC-reachability bitmap diffing, synthetic `--input`
-injection, frame dumps) if you're picking up the fast-travel issue or a
+injection, frame dumps) if you're picking up the View screen issue or a
 similar input bug.

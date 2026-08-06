@@ -219,42 +219,85 @@ Two different techniques, used together:
   `ppmdiff.py`) still current; see "Pitfalls" above for `dis65816.py`'s
   known SEP/REP tracking gap.
 
-## Open item: fast travel
+## Fast travel: confirmed broken in this recomp, root cause not yet found
 
-Holding X or Y while moving on the map is supposed to trigger a faster/
-bigger scroll jump (per interactive testing, confirmed still not working
-after the D-pad fix above). `JSL $0098a0` was suspected as the relevant
-call (originally spotted gated behind a Y|A check in the mode-select
-dispatch family), but it turned out to be an extremely generic utility
-with 90+ call sites throughout the ROM, making it impractical to trace
-statically. A live RAM-diff (map, no modifier vs. X+direction held) turned
-up `$1efd`/`$1efe` changing, but that traced back to the direct-page base
-used by the background city-statistics scanner (walking `$7f0200,X` tile
-data for the crime/pollution overlay) -- a false positive that changes
-every frame regardless of input, since it's a continuously-running
-background scan. Not yet resolved; a cleaner live-session approach (e.g.
-the `F1`-reset bitmap-diff technique that worked for Tax, scoped tightly
-around holding the modifier) is the natural next step.
+**Status: broken, contradicts a static trace -- unresolved, flagged for
+re-examination.** A long live-testing session (cross-checked against
+real-hardware-accurate bsnes running the same ROM) nailed down the
+actual mechanism and a genuine, still-unexplained discrepancy:
 
-**Ruled out (static analysis, autonomous session)**: the main-map cursor
-dispatcher decoded in `docs/REVERSE_ENGINEERING_cursor_movement.md`
-(`01:8b4f`-`01:8c52`) checks B/X (`01:8bd3`) and Y (`01:8be1`) held state,
-but **neither leads to a movement-boost path**. Both just write a small
-"reason code" into direct-page `$c5` (`1` for B or X, `2` for Y) and
-`RTS` immediately (`01:8c52: STA $c5; RTS`) -- the same shared exit every
-other "interrupt" condition in that function uses ($0395/$0383/$0387 mode
-flags, non-direction buttons). Whatever B/X/Y actually *do* on the map
-(quite possibly: B/X opens a menu, Y calls the advisor -- matching the
-in-game tutorial text "I'll come and help if you press [Y]") is decided
-by the *caller* of this dispatcher based on `$c5`'s value, not inside it.
-**Fast travel is very likely a completely separate code path from the
-one this whole session's cursor-cadence work has been analyzing** --
-the earlier lead (`JSL $0098a0`, gated behind a Y|A check "in the
-mode-select dispatch family") points somewhere else entirely. Next step:
-trace `$c5`'s consumer (the caller of `01:8b4f`) to find where reason
-codes 1/2 actually get handled, or -- more directly -- get a fresh live
-bsnes trace on `$01bd`/`$01be` (scroll-X/Y) specifically while holding
-X+direction, now that the wrong dispatcher has been ruled out.
+- **Real behavior (bsnes, confirmed "working as intended")**: holding
+  SNES Y **or** SNES A *simultaneously* while pressing a direction (not a
+  toggle -- released Y/A immediately stops the effect) makes the map
+  scroll genuinely faster, with the four directional arrow-cursor
+  indicators visible throughout. SNES L/R have no visible effect either
+  way.
+- **This recomp**: holding the same buttons (keyboard A = SNES Y,
+  keyboard X = SNES A, per this recomp's keymap -- see the controls table
+  in README.md) shows the same arrow indicators, but the view **never
+  moves at all** while held; only the game's normal edge-of-screen
+  auto-scroll still works. Confirmed multiple times, unambiguously, not a
+  toggle-vs-hold confusion.
+- **The contradiction**: a careful, flag-tracked static trace of
+  `01:8bd3`-`01:8c52` (the `$c5` reason-code dispatcher, see the WRAM
+  table's `$00c5` entry in `docs/ROM_MAP.md`) found that holding Y
+  *together* with a direction causes **every** branch in that dispatcher
+  to fail to match, falling through to reason code `0` (a bare `RTS`,
+  i.e. the dispatcher does nothing) -- specifically because Y's own check
+  at `01:8be1` is gated behind `$01f5 == 0` (no direction currently
+  held), so Y+direction skips it, and no other branch catches that
+  combination either. This is the *same* ROM bytes bsnes executes, so if
+  the trace is right, bsnes should show the same nothing-happens result
+  it doesn't. **Conclusion: the trace has an error somewhere, or a wrong
+  premise (e.g. this may not actually be the dispatcher gating main-map
+  movement, despite `docs/ROM_MAP.md` describing bank 01 that way) --
+  not yet resolved.**
+
+Also found and ruled out separately: **SNES B/X** show the identical
+arrow-indicators-no-movement symptom via a *different*, cleanly-traced
+path (reason code `1`, `01:8d26`, calls the per-direction sprite routines
+`b030`/`b166`/`b1f6`/`b2f9` directly, skipping a wrapper
+`c1ba`/`c1f3`/`c23f`/`c280` that a normal D-pad press goes through and
+which presumably commits the actual scroll position) -- but B/X were
+never confirmed as real fast-travel buttons on bsnes, so whether that's
+a bug or an unrelated quirk of those two buttons is still unknown.
+
+**Contradiction resolved (autonomous follow-up, same session)**: the
+"active dispatcher" premise was wrong, not the trace. `01:8b3b-8b42`
+(part of the *same* function as the `01:8bd3`-`01:8c52` dispatcher
+above, just earlier in it) branches on `$d7`: `$d7==0` falls through to
+the buggy dispatcher already described; `$d7==1` does `JMP $8c55`, a
+**second, near-identical dispatcher** whose own Y-check (`01:8c75`) has
+**no** `$01f5==0` precondition -- so Y+direction is *not* blocked there.
+`$d7` was previously documented as "always observed as 0" (see the
+`$00d7` WRAM entry in `docs/ROM_MAP.md`), but that was apparently never
+sampled during actual main-map fast-travel use.
+
+Dispatcher 2's Y-path (reason code `6`, table entry `01:88ef+12` ->
+`01:9f2d`) does substantial setup (clears `$01c1`/`$01f5`, sets several
+flags to `$ffff`, sets `$01df=3` -- the same "screen-mode index" already
+in the WRAM table) and ends with `JMP $9dcc`. That routine looks like an
+**entry into a task-scheduler mechanism**: it writes into tables at
+`$30c2,X`/`$ef20,X`/`$4420,X`, indexed by `$01df` doubled, then returns
+immediately -- i.e. reason code 6 doesn't move the cursor synchronously,
+it *schedules* a deferred task (mode 3) that presumably does the actual
+scroll update on a later frame. This may be the same task-scheduler
+mechanism the cursor-cadence investigation has been looking for (see
+`docs/REVERSE_ENGINEERING_cursor_movement.md`'s bank-`0d` jump-table
+lead) -- worth checking whether they're the same thing.
+
+**Not yet confirmed**: what the scheduled mode-3 task actually does, or
+why it doesn't appear to run in this recomp (the open bug). Found real
+consumers for two of the three tables (`00:b66a: LDY $30c2,X`;
+`01:f309: LDY $4420,X`), confirming they're genuinely read back
+somewhere, not dead data -- but static disassembly around both readers
+came out heavily misaligned (many unknown-opcode bytes), meaning the
+true M/X flag state entering those functions isn't known and any further
+decoding there would just be guessing. Stopped here rather than keep
+pushing on an unreliable decode -- this needs either finding a clean
+entry point to trace flags forward from, or live tracing (`SC_ADDR_TRACE`
+on `00:b66a`/`01:f309` while triggering fast travel would settle it
+directly).
 
 ## Open item: View screen's D-pad has no visible effect yet
 
