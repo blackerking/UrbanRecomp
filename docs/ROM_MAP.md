@@ -37,8 +37,8 @@ this ROM).
 | `$0079`/`$79` (dp) | Scratch: per-axis step delta in several contexts (cursor movement, decompressor table pointer) -- meaning is call-site-dependent | Medium |
 | `$007a`-`$007e` | Scratch block used by a table-driven update loop at `00:94fd`-`95d8` (indexed via `$0b4d`) | Low, not traced in detail |
 | `$007c`/`$7c` (dp) | **Reused scratch, not a single-purpose variable** -- among other uses, `00:cdec` treats it as a tight busy-loop delay counter (32 decrements within one frame); a red herring for the cadence investigation, see `docs/REVERSE_ENGINEERING_cursor_movement.md` | High (the "don't trust this" lesson is confirmed) |
-| `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`, only when no direction also held -- see below) is held, right before an early `RTS` (`01:8c52`). Consumer: `01:897f` reads it right after the write and dispatches via a jump table at `01:88ef` (`ASL A; TAX; JSR (table,X)`, opcode `0xFC`). Reason `1` (B/X) lands at `01:8d26`, which updates the animated hand-**cursor sprite** (OAM writes to `$7e2840+`/`$7e3040+`/`$7e3840+`), not the map scroll. Reason `2` (Y, direction-less only) lands at `01:8dce`, an advisor-panel toggle via `JSL $0098a0` (inline param `6`/`7`). **Y held together with a direction traces to reason `0` (no-op)** -- this contradicts confirmed-live bsnes behavior (Y+direction genuinely scrolls faster on real hardware), so either this trace has an error or this dispatcher isn't actually what gates main-map movement -- unresolved, see `docs/INVESTIGATION_dpad.md` "Fast travel" | High (dispatch mechanism itself) / contradicted-by-live-testing for the fast-travel conclusion, needs re-verification |
-| `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B | High |
+| `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`, only when no direction also held) is held, right before an early `RTS` (`01:8c52`). Consumer: `01:897f` reads it right after the write and dispatches via a jump table at `01:88ef` (`ASL A; TAX; JSR (table,X)`, opcode `0xFC`). Reason `1` (B/X) lands at `01:8d26`, which updates the animated hand-**cursor sprite** (OAM writes to `$7e2840+`/`$7e3040+`/`$7e3840+`) *and* unconditionally calls `01:afbe` at its tail -- `01:afbe` is the routine that actually increments `$01bd` (see `01:afc6` below), gated on `$01c1` bit 0. This whole `$c5` dispatcher mechanism turned out to be a red herring for the fast-travel bug specifically -- root cause is upstream of it, in how `$011b` gets read (see `$011b` entry and `docs/INVESTIGATION_dpad.md` "Fast travel") | High (dispatch mechanism itself) |
+| `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B. **Confirmed genuinely written** by the shared edge-detector (`00:928f-92cb`, `92c7: STA $011b,X`) with real `$4218,X`-sourced data, same call that also populates `$c9,X`/`$0123,X` (both confirmed working elsewhere) -- but a **direct 16-bit `LDA $011b`** (spanning `$011b`+`$011c` together, used unpatched at `01:c01e`/`c105`/`c12a` for the fast-travel modifier check) reads `$0000` live in this recomp regardless of button state, while the working D-pad-fix sites all read `$011a` (one byte earlier) instead. Root cause not yet isolated between two candidates: a call-ordering gap (edge-detector runs too late in the frame relative to this read) or a `$4212` auto-joypad-read-timing mismatch in the edge-detector's own hardware wait loop (`00:9280`). See `docs/INVESTIGATION_dpad.md` "Fast travel" | High (population mechanism) / confirmed-broken for this specific unpatched read pattern |
 | `$011c` | `$4219` mirror (held-state). Bits 4-7 = R/L/X/A (real); **bits 0-3 are hardware-guaranteed zero** | High |
 | `$011a` | One byte before `$011b` -- the D-pad fix family's standard "shift the 16-bit load back one byte" target, so a load spanning `$011a`/`$011b` puts real direction bits where a buggy ladder expected zeroed `$011c` bits | High |
 | `$0123`/`$0124` | Absolute (non-direct-page) mirror pair, same relationship as `$011b`/`$011c` | High |
@@ -86,7 +86,10 @@ confidence notes on each -- summary table only below.
 
 | Address | Name | Purpose |
 |---|---|---|
-| `00:928f-92cb` | *(shared edge-detector)* | XORs `$4218`/`$4219` against the previous frame; writes held/edge state to `$0123,X`/`$c9,X`/`$ca,X` |
+| `00:9278`/`00:927c` | *(edge-detector entry point)* | JSL wrapper (`9278`) into the real entry (`927c`), which sets `Y=4, X=0` before falling into `928f`'s loop -- processes all 4 SNES controller ports (`$4218`/`421A`/`421C`/`421E`, spaced by 2). Dispatched via a jump table at `01:8fda` (6 pointers: `91c4,9200,923c,9278,932c,92f0`) -- likely a per-frame task scheduler, but the table's own dispatch site (what indexes into it) wasn't found this session |
+| `00:928f-92cb` | *(shared edge-detector body)* | Busy-waits on `$4212 & 1` (auto-joypad-read-in-progress) before reading each port; XORs new vs. previous value for edge-detect, writes held/edge state to `$0123,X`/`$c9,X` **and** `$011b,X` (`92c7`) -- confirmed genuinely populates `$011b` with real data, contradicting a naive "always zero" read elsewhere (see `$011b` WRAM entry) |
+| `01:8fda` | *(task-scheduler jump table, tentative)* | 6 function pointers in bank 00: `91c4, 9200, 923c, 9278, 932c, 92f0`. Entry 3 (`9278`) is the joypad edge-detector. Dispatch site not found -- a raw-byte search for references to `$8fda` hit only a false positive in unrelated bank-03 code |
+| `01:afbe`/`01:afc6` | *(fast-travel scroll increment, confirmed live via bsnes)* | `afc6: INC $01bd`, gated on bit 0 of `$01c1`. Called unconditionally from the tail of `01:8d26`. Confirmed via live bsnes instruction tracing to fire every frame while SNES Y or A is held with a direction; confirmed via this recomp's own `SC_ADDR_TRACE` to never fire under the same conditions |
 | `00:90dd` | *(LC_LZ5 decompressor)* | Nintendo/community-named "LC_LZ5" compression; input bank/offset via WRAM `$09`/`$0b`, output to `$7E:0000+X`. See `tools/extract_graphics.py` for a verified-working reimplementation |
 | `01:8b4f` | `CursorMoveDispatch_Frame` | Per-frame entry; checks non-direction buttons and a couple of state flags, bails to a reset path or falls into the mode-flag checker |
 | `01:8b9f`/`8ba2` | `CursorMoveDispatch_CheckModeFlags` | Checks `$0395`/`$0383`/`$0387`, then B/X/Y held (writes `$c5` reason code + `RTS` if so), then falls into the direction ladder |
@@ -182,19 +185,24 @@ not just inferred from the option table's ordering.
   the gap is in *how often the dispatcher itself gets invoked*, not a
   wrong decode. Leading candidate: an unconfirmed task-scheduler jump
   table in bank `0d` -- **possibly the same mechanism as the
-  `01:9dcc`-based scheduler entry found via the fast-travel thread
-  below**, not yet checked.
-- **Fast travel**: confirmed broken on this recomp, confirmed working on
-  bsnes for the same ROM (SNES Y/A held simultaneously with a direction).
-  Traced to a genuine dispatcher-selection state machine on `$d7` (see
-  the `$00d7` WRAM entry) -- the *correct* per-frame dispatcher for
-  Y+direction (`01:8c55`, reached when `$d7==1`) schedules a deferred
-  task via `01:9dcc` rather than moving the cursor synchronously. Root
-  cause narrowed to: either that task-scheduler mechanism never actually
-  runs the scheduled task in this recomp, or `$d7` never reaches `1`
-  during real play here. Next step: find what consumes the
-  `$30c2`/`$ef20`/`$4420` tables `01:9dcc` writes into. See
-  `docs/INVESTIGATION_dpad.md` "Fast travel" for the full writeup.
+  `01:8fda`-based task-scheduler table found via the fast-travel thread
+  below** (the `01:9dcc` lead from an earlier pass this session turned
+  out to be a dead end, not this), not yet checked.
+- **Fast travel**: root cause found via live bsnes instruction tracing.
+  `01:afc6: INC $01bd` (gated on `$01c1` bit 0, called from `01:8d26`'s
+  tail) is the real scroll-increment instruction, confirmed firing every
+  frame on bsnes while SNES Y/A is held with a direction. Confirmed via
+  this recomp's own live tracing that the same instruction never fires
+  here -- traced upstream to a direct 16-bit `LDA $011b` (at
+  `01:c01e`/`c105`/`c12a`) reading `$0000` regardless of button state,
+  even though the writer (`00:928f-92cb`) is confirmed genuinely
+  populating `$011b` for other, working consumers (`$c9`, `$0123`) in
+  the same call. Root cause narrowed to either a call-ordering gap
+  (edge-detector runs too late relative to this read) or a `$4212`
+  auto-joypad-read timing mismatch in the edge-detector's own hardware
+  wait loop. See `docs/INVESTIGATION_dpad.md` "Fast travel" for the full
+  writeup, including a method note on why static analysis alone kept
+  producing dead ends here and live tracing is what actually worked.
 - **View screen rendering** (`docs/INVESTIGATION_dpad.md`, "Open item:
   View screen's D-pad"): the write side is fully confirmed and working;
   no renderer/consumer of `$7e21b4`/`$7e21b5` has been found yet.

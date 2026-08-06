@@ -219,85 +219,114 @@ Two different techniques, used together:
   `ppmdiff.py`) still current; see "Pitfalls" above for `dis65816.py`'s
   known SEP/REP tracking gap.
 
-## Fast travel: confirmed broken in this recomp, root cause not yet found
+## Fast travel: root cause found (with live bsnes tracing), fix not yet attempted
 
-**Status: broken, contradicts a static trace -- unresolved, flagged for
-re-examination.** A long live-testing session (cross-checked against
-real-hardware-accurate bsnes running the same ROM) nailed down the
-actual mechanism and a genuine, still-unexplained discrepancy:
+**Status: broken, root cause identified and confirmed live in this
+recomp specifically -- not yet fixed.** Everything below this point
+superseded a long chain of earlier static-only theories (dispatcher
+`$c5` reason codes, the `$d7` dispatcher-select state machine, a
+speculated `01:9dcc` task-scheduler) that all turned out to be dead
+ends or false trails once checked against real hardware. Keeping this
+writeup linear rather than rewriting history, since the dead ends
+themselves are informative about how not to chase this class of bug
+(see "Method note" at the end).
 
-- **Real behavior (bsnes, confirmed "working as intended")**: holding
-  SNES Y **or** SNES A *simultaneously* while pressing a direction (not a
-  toggle -- released Y/A immediately stops the effect) makes the map
-  scroll genuinely faster, with the four directional arrow-cursor
-  indicators visible throughout. SNES L/R have no visible effect either
-  way.
-- **This recomp**: holding the same buttons (keyboard A = SNES Y,
-  keyboard X = SNES A, per this recomp's keymap -- see the controls table
-  in README.md) shows the same arrow indicators, but the view **never
-  moves at all** while held; only the game's normal edge-of-screen
-  auto-scroll still works. Confirmed multiple times, unambiguously, not a
-  toggle-vs-hold confusion.
-- **The contradiction**: a careful, flag-tracked static trace of
-  `01:8bd3`-`01:8c52` (the `$c5` reason-code dispatcher, see the WRAM
-  table's `$00c5` entry in `docs/ROM_MAP.md`) found that holding Y
-  *together* with a direction causes **every** branch in that dispatcher
-  to fail to match, falling through to reason code `0` (a bare `RTS`,
-  i.e. the dispatcher does nothing) -- specifically because Y's own check
-  at `01:8be1` is gated behind `$01f5 == 0` (no direction currently
-  held), so Y+direction skips it, and no other branch catches that
-  combination either. This is the *same* ROM bytes bsnes executes, so if
-  the trace is right, bsnes should show the same nothing-happens result
-  it doesn't. **Conclusion: the trace has an error somewhere, or a wrong
-  premise (e.g. this may not actually be the dispatcher gating main-map
-  movement, despite `docs/ROM_MAP.md` describing bank 01 that way) --
-  not yet resolved.**
+**The real mechanism (confirmed via live bsnes instruction tracing,
+same ROM)**: holding SNES Y or SNES A together with a direction causes
+`01:afc6: inc $01bd` to fire every frame the combination is held --
+this is the actual scroll-increment instruction, inside a routine at
+`01:afbe` that's called unconditionally from the tail of `01:8d26` (the
+same handler that draws the four arrow-cursor indicators). `01:afbe`
+gates the increment on bit 0 of `$01c1`. On bsnes, holding Y or A sets
+that bit correctly and the instruction fires every time; holding
+neither, or D-pad alone, never fires it.
 
-Also found and ruled out separately: **SNES B/X** show the identical
-arrow-indicators-no-movement symptom via a *different*, cleanly-traced
-path (reason code `1`, `01:8d26`, calls the per-direction sprite routines
-`b030`/`b166`/`b1f6`/`b2f9` directly, skipping a wrapper
-`c1ba`/`c1f3`/`c23f`/`c280` that a normal D-pad press goes through and
-which presumably commits the actual scroll position) -- but B/X were
-never confirmed as real fast-travel buttons on bsnes, so whether that's
-a bug or an unrelated quirk of those two buttons is still unknown.
+**Confirmed live in this recomp (via `SC_ADDR_TRACE`, after fixing two
+tooling bugs that were making this untestable -- see "Tooling fixes"
+below)**: `01:afc6` **never fires**, holding the equivalent buttons
+(keyboard A/X per this recomp's keymap) for as long as needed. Tracing
+further upstream (`01:8d40`, `01:b03c`, `01:afc0` -- the full
+`$01c1` set/clear/read chain) found **none of those fire either**,
+which pointed at something more fundamental than `$01c1` bookkeeping.
 
-**Contradiction resolved (autonomous follow-up, same session)**: the
-"active dispatcher" premise was wrong, not the trace. `01:8b3b-8b42`
-(part of the *same* function as the `01:8bd3`-`01:8c52` dispatcher
-above, just earlier in it) branches on `$d7`: `$d7==0` falls through to
-the buggy dispatcher already described; `$d7==1` does `JMP $8c55`, a
-**second, near-identical dispatcher** whose own Y-check (`01:8c75`) has
-**no** `$01f5==0` precondition -- so Y+direction is *not* blocked there.
-`$d7` was previously documented as "always observed as 0" (see the
-`$00d7` WRAM entry in `docs/ROM_MAP.md`), but that was apparently never
-sampled during actual main-map fast-travel use.
+**Actual root cause, found by tracing the raw button state itself**:
+`SC_ADDR_TRACE` on `01:c021` (right after `01:c01e: LDA $011b`, the
+modifier-button check `$011b & $4080` that gates reason code 1) showed
+**`$011b` reads as `$0000`, constantly, regardless of what's held.**
+This is a 16-bit load, so it spans `$011b` (low byte) and `$011c` (high
+byte) together.
 
-Dispatcher 2's Y-path (reason code `6`, table entry `01:88ef+12` ->
-`01:9f2d`) does substantial setup (clears `$01c1`/`$01f5`, sets several
-flags to `$ffff`, sets `$01df=3` -- the same "screen-mode index" already
-in the WRAM table) and ends with `JMP $9dcc`. That routine looks like an
-**entry into a task-scheduler mechanism**: it writes into tables at
-`$30c2,X`/`$ef20,X`/`$4420,X`, indexed by `$01df` doubled, then returns
-immediately -- i.e. reason code 6 doesn't move the cursor synchronously,
-it *schedules* a deferred task (mode 3) that presumably does the actual
-scroll update on a later frame. This may be the same task-scheduler
-mechanism the cursor-cadence investigation has been looking for (see
-`docs/REVERSE_ENGINEERING_cursor_movement.md`'s bank-`0d` jump-table
-lead) -- worth checking whether they're the same thing.
+Traced `$011b`/`$011c`'s actual writer: the shared edge-detector
+(`00:928f-92cb`, entered via a JSL wrapper at `00:9278`/`00:927c`) does
+correctly write `$011b,X` (`00:92c7: STA $011b,X`) with fresh
+`$4218,X`-sourced data, in the *same* call that also writes `$c9,X` and
+`$0123,X` two lines earlier -- both of which are confirmed working
+(they're what the existing D-pad fixes rely on). So the writer is real
+and clearly executes successfully for its other targets. The entry
+point (`00:927c`) sets `Y=4, X=0` before falling into the loop --
+processing all 4 SNES controller ports (`$4218`, `$421A`, `$421C`,
+`$421E`, spaced by 2), and **includes a real hardware-timing wait**
+(`00:9280: LDA $4212; AND #$01; BNE $9280`, busy-waiting on the
+auto-joypad-read-in-progress flag) before reading the ports.
 
-**Not yet confirmed**: what the scheduled mode-3 task actually does, or
-why it doesn't appear to run in this recomp (the open bug). Found real
-consumers for two of the three tables (`00:b66a: LDY $30c2,X`;
-`01:f309: LDY $4420,X`), confirming they're genuinely read back
-somewhere, not dead data -- but static disassembly around both readers
-came out heavily misaligned (many unknown-opcode bytes), meaning the
-true M/X flag state entering those functions isn't known and any further
-decoding there would just be guessing. Stopped here rather than keep
-pushing on an unreliable decode -- this needs either finding a clean
-entry point to trace flags forward from, or live tracing (`SC_ADDR_TRACE`
-on `00:b66a`/`01:f309` while triggering fast travel would settle it
-directly).
+**Two live possibilities, not yet distinguished**: either (a) this
+edge-detector call happens to run *after* the fast-travel check reads
+`$011b` for the current frame (a call-ordering gap specific to this
+recomp -- the `$c9`/`$0123` consumers just happen to run later in the
+same frame, masking the same underlying issue), or (b) the `$4212`
+busy-wait behaves differently under this recomp's auto-joypad-read
+timing model than on real hardware, causing this call to read before
+the hardware mirror is actually populated. Either way, this is very
+likely the **same root-cause class** as the entire original D-pad bug
+family (a WRAM mirror not being populated the way working code paths
+assume) -- just at a read site (`01:c01e`/`01:c105`/`01:c12a`, all
+direct `$011b` reads) that was never part of the earlier `$011a`-based
+D-pad fixes, because those fixes only covered *direction* checks, not
+this *modifier-button* check.
+
+Also found: `00:9278` is dispatched through a jump table at `01:8fda`
+(6 function pointers: `91c4, 9200, 923c, 9278, 932c, 92f0`), which looks
+like a genuine per-frame task-scheduler -- possibly the same mechanism
+`docs/REVERSE_ENGINEERING_cursor_movement.md`'s bank-`0d` lead was
+looking for. The table's actual dispatch site (what indexes into it and
+calls through it) wasn't found this session -- a raw-byte search for
+references to `$8fda` hit only a false positive (coincidental bytes
+inside unrelated `LDA`/`STA` long instructions in bank 03).
+
+**Next step**: confirm which of the two possibilities above is real,
+most directly via live-tracing `00:92c7` (`STA $011b,X`) alongside
+`01:c01e` (`LDA $011b`) in the *same* run to see their relative
+frame-timing and values, or by finding `01:8fda`'s actual dispatcher to
+understand the task-scheduler's per-frame ordering.
+
+### Method note: what actually worked vs. what didn't
+
+Every static-only theory this session produced (the `$c5` dispatcher
+chain, the `$d7` state machine, `01:9dcc` as a scheduler) was
+individually clean, self-consistent, and wrong or unconfirmable --
+each one only got resolved (either confirmed or discarded) once checked
+against a live bsnes trace or a live `SC_ADDR_TRACE` run in this
+recomp. Flag-tracked static disassembly is good at finding *candidate*
+mechanisms and is a real prerequisite for knowing what to trace, but on
+its own it kept producing plausible-looking dead ends here, matching
+the same lesson `docs/INVESTIGATION_cursor_cadence.md` already recorded
+for the cadence bug. The live bsnes instruction-level trace (not just
+video/input comparison) was what actually cracked this -- worth
+reaching for early next time rather than as a last resort.
+
+### Tooling fixes made along the way (also useful beyond this bug)
+
+- `SC_ADDR_TRACE`'s cadence side-watches (reads of `$011b`/`$011c`,
+  writes of `$01eb`/`ec`/`ed`/`ee`/`$7c`) used to piggyback on *any*
+  `SC_ADDR_TRACE` use at all, regardless of which addresses were
+  actually being traced -- flooding stderr with hundreds of lines/frame
+  and making the window unplayably slow whenever tracing something
+  unrelated. Now gated behind their own `SC_CADENCE_WATCH` flag.
+- The per-opcode PC-history write (feeding `SC_ADDR_TRACE`'s "last 128
+  PCs" dump) used to run unconditionally from frame 0 the moment
+  `SC_ADDR_TRACE` was set, regardless of an `@start` delay -- now gated
+  on `s_addr_trace_start_frame` too, so a delayed start genuinely avoids
+  all overhead until then.
 
 ## Open item: View screen's D-pad has no visible effect yet
 
