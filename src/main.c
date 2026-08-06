@@ -1384,6 +1384,31 @@ int main(int argc, char **argv) {
     }
     if (guard_tripped) break;
 
+    /* Fast-forward's audio comment above ("only the last of the batch's
+     * audio gets queued, skipping the rest") describes the intent, but
+     * nothing previously enforced it: dsp_getSamples() below still only
+     * drains one real-time frame's worth (534 native samples, its fixed
+     * quantum -- see the comment at its call site) per *outer* loop
+     * iteration, regardless of how many sub-frames just ran. The DSP's
+     * own ring buffer (runner/src/snes/dsp.c) still produces real audio
+     * for every simulated sub-frame though, so during a 6x batch, 5
+     * frames' worth of audio piles up undrained instead of being
+     * discarded -- a backlog that then has to be drained on *later*
+     * frames, playing back increasingly stale audio. Confirmed as the
+     * likely cause of a reported growing audio delay: this auto-boost
+     * fires any time the LC_LZ5 decompressor runs (00:90dd), which
+     * isn't only map/scenario loading -- dialog/UI text and tilesets
+     * decompress the same way (see tools/extract_graphics.py), so a
+     * routine popup during normal play can trigger it too, each time
+     * adding to the backlog. Discard the excess here so only the most
+     * recent frame's audio survives, matching what the comment above
+     * always claimed happened. */
+    if (frames_this_iter > 1) {
+      Dsp *dsp_ff = g_snes->apu->dsp;
+      uint32_t avail_ff = dsp_ff->sampleWrite - dsp_ff->sampleRead;
+      if (avail_ff > 534) dsp_ff->sampleRead = dsp_ff->sampleWrite - 534;
+    }
+
     if (frame_time_thresh_env) {
       static uint32_t s_frame_time_hits;
       double ms = (double)(SDL_GetPerformanceCounter() - frame_t0) * 1000.0 /
