@@ -1311,6 +1311,17 @@ int main(int argc, char **argv) {
         if (s_mouse_enabled) SDL_GetRelativeMouseState(NULL, NULL); /* discard stale accumulated delta */
         fprintf(stderr, "[F3] mouse cursor control %s\n", s_mouse_enabled ? "ON" : "OFF");
       }
+      /* F4: dump WRAM to a fixed path right now, on demand -- for pinning
+       * down exact WRAM byte values at a precise live moment (e.g. hold a
+       * button combo, press F4, inspect $7e011b/$7e011c directly) instead
+       * of inferring values from instruction traces. */
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F4 && !ev.key.repeat) {
+        const char *path = "wram_snapshot.bin";
+        if (write_wram_dump(path))
+          fprintf(stderr, "[F4] dumped WRAM to %s at frame %llu\n", path, (unsigned long long)s_frames);
+        else
+          fprintf(stderr, "[F4] failed to write WRAM dump to %s\n", path);
+      }
       /* F5-F8: directly toggle the stock ROM's own debug-menu cheat flags
        * word, WRAM $0425 -- found by tracing a published Pro Action Replay
        * code list's "Enable Debugger" address (01:88e7, a boot-time load

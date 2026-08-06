@@ -149,6 +149,7 @@ shared `snesrecomp` runtime needed).
 | Fast-forward (hold) | Tab |
 | Debug-menu code entry (controller 2, one-shot) | F2 |
 | Mouse cursor control (toggle) | F3 |
+| Dump WRAM snapshot now (`wram_snapshot.bin`) | F4 |
 | Cheat: No Disasters (toggle, unconfirmed bit) | F5 |
 | Cheat: Needless Money (toggle, confirmed) | F6 |
 | Cheat: Valve Max (toggle, confirmed) | F7 |

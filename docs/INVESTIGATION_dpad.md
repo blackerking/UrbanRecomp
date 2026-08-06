@@ -269,35 +269,54 @@ processing all 4 SNES controller ports (`$4218`, `$421A`, `$421C`,
 (`00:9280: LDA $4212; AND #$01; BNE $9280`, busy-waiting on the
 auto-joypad-read-in-progress flag) before reading the ports.
 
-**Two live possibilities, not yet distinguished**: either (a) this
-edge-detector call happens to run *after* the fast-travel check reads
-`$011b` for the current frame (a call-ordering gap specific to this
-recomp -- the `$c9`/`$0123` consumers just happen to run later in the
-same frame, masking the same underlying issue), or (b) the `$4212`
-busy-wait behaves differently under this recomp's auto-joypad-read
-timing model than on real hardware, causing this call to read before
-the hardware mirror is actually populated. Either way, this is very
-likely the **same root-cause class** as the entire original D-pad bug
-family (a WRAM mirror not being populated the way working code paths
-assume) -- just at a read site (`01:c01e`/`01:c105`/`01:c12a`, all
-direct `$011b` reads) that was never part of the earlier `$011a`-based
-D-pad fixes, because those fixes only covered *direction* checks, not
-this *modifier-button* check.
+**Resolved (confirmed live, same session)**: it's option (a), a
+call-ordering/scheduling mismatch, not a `$4212` timing bug or a
+never-populated mirror. Two pieces of same-session evidence:
+
+1. `SC_ADDR_TRACE` on `00:92c7` (the writer) showed it firing correctly
+   every frame, 4 times per frame (one per controller port) -- but every
+   single logged value across a long session was `0x0000`.
+2. `SC_ADDR_TRACE` on `01:c01e` (the fast-travel modifier read) showed
+   it firing only *periodically* -- roughly every 4 frames (observed at
+   consistent 4-frame spacing: `f=1463, 1467, 1471, 1475, 1479, ...`),
+   consistent with the `01:8fda` task-scheduler rotation giving this
+   dispatcher a turn only once per rotation, not every frame. Every
+   logged value at those specific instants was also `0x0000`.
+3. **But** a new on-demand WRAM-dump hotkey (`F4`, see below) taken
+   *in between* those instants, at frame 1421, captured `$011b` (16-bit,
+   spanning `$011b`+`$011c`) as `0x0082` -- genuinely nonzero, and
+   `0x0082 & 0x4080 = 0x0080`, which would satisfy the modifier check if
+   read at that exact moment.
+
+So `$011b` **does** hold correct data at times -- it's just that the
+specific once-every-~4-frames instant `01:c01e` happens to run doesn't
+line up with when that data is actually present; something (most likely
+another task in the same `01:8fda` rotation, given none of the small
+number of other `$011b`-touching sites found this session write to it)
+clears or overwrites it before this particular dispatcher's turn comes
+around. This is very likely the **same root-cause class** as the entire
+original D-pad bug family (a WRAM mirror not surviving to the moment a
+particular consumer expects it) -- just manifesting as a scheduling
+race here rather than a permanently-wrong address.
 
 Also found: `00:9278` is dispatched through a jump table at `01:8fda`
 (6 function pointers: `91c4, 9200, 923c, 9278, 932c, 92f0`), which looks
 like a genuine per-frame task-scheduler -- possibly the same mechanism
 `docs/REVERSE_ENGINEERING_cursor_movement.md`'s bank-`0d` lead was
-looking for. The table's actual dispatch site (what indexes into it and
-calls through it) wasn't found this session -- a raw-byte search for
-references to `$8fda` hit only a false positive (coincidental bytes
-inside unrelated `LDA`/`STA` long instructions in bank 03).
+looking for, and plausibly the same scheduler responsible for the
+long-standing cursor-cadence bug's "works in bursts" symptom (some
+per-rotation slots landing on stale data, others on fresh). The table's
+actual dispatch site (what indexes into it and calls through it) wasn't
+found this session -- a raw-byte search for references to `$8fda` hit
+only a false positive (coincidental bytes inside unrelated `LDA`/`STA`
+long instructions in bank 03).
 
-**Next step**: confirm which of the two possibilities above is real,
-most directly via live-tracing `00:92c7` (`STA $011b,X`) alongside
-`01:c01e` (`LDA $011b`) in the *same* run to see their relative
-frame-timing and values, or by finding `01:8fda`'s actual dispatcher to
-understand the task-scheduler's per-frame ordering.
+**Next step**: find `01:8fda`'s dispatch site and full task list, to
+see exactly what else runs in the same rotation as the edge-detector
+(`9278`) and the fast-travel dispatcher, and confirm which other task is
+clearing `$011b` between them. A live trace on every write site touching
+`$011b` across a full rotation (not just `92c7`) would settle it
+directly once the dispatcher is found.
 
 ### Method note: what actually worked vs. what didn't
 
@@ -327,6 +346,13 @@ reaching for early next time rather than as a last resort.
   `SC_ADDR_TRACE` was set, regardless of an `@start` delay -- now gated
   on `s_addr_trace_start_frame` too, so a delayed start genuinely avoids
   all overhead until then.
+- Added an on-demand WRAM-dump hotkey (**F4** in windowed mode, see the
+  README controls table) -- writes a full WRAM snapshot to
+  `wram_snapshot.bin` in the working directory at the exact moment
+  pressed. This is what actually cracked the scheduling-race finding
+  above: a live snapshot at a specific instant, cross-referenced against
+  `SC_ADDR_TRACE` hits in the *same* session, showed `$011b` holding
+  correct data at a moment the periodic trace never landed on.
 
 ## Open item: View screen's D-pad has no visible effect yet
 
