@@ -279,9 +279,9 @@ never-populated mirror. Two pieces of same-session evidence:
 2. `SC_ADDR_TRACE` on `01:c01e` (the fast-travel modifier read) showed
    it firing only *periodically* -- roughly every 4 frames (observed at
    consistent 4-frame spacing: `f=1463, 1467, 1471, 1475, 1479, ...`),
-   consistent with the `01:8fda` task-scheduler rotation giving this
-   dispatcher a turn only once per rotation, not every frame. Every
-   logged value at those specific instants was also `0x0000`.
+   meaning whatever gates this dispatcher only gives it a turn on some
+   frames, not every frame. Every logged value at those specific
+   instants was also `0x0000`.
 3. **But** a new on-demand WRAM-dump hotkey (`F4`, see below) taken
    *in between* those instants, at frame 1421, captured `$011b` (16-bit,
    spanning `$011b`+`$011c`) as `0x0082` -- genuinely nonzero, and
@@ -290,33 +290,42 @@ never-populated mirror. Two pieces of same-session evidence:
 
 So `$011b` **does** hold correct data at times -- it's just that the
 specific once-every-~4-frames instant `01:c01e` happens to run doesn't
-line up with when that data is actually present; something (most likely
-another task in the same `01:8fda` rotation, given none of the small
-number of other `$011b`-touching sites found this session write to it)
-clears or overwrites it before this particular dispatcher's turn comes
-around. This is very likely the **same root-cause class** as the entire
+line up with when that data is actually present; something clears or
+overwrites it before this particular dispatcher's turn comes around.
+This is very likely the **same root-cause class** as the entire
 original D-pad bug family (a WRAM mirror not surviving to the moment a
 particular consumer expects it) -- just manifesting as a scheduling
 race here rather than a permanently-wrong address.
 
-Also found: `00:9278` is dispatched through a jump table at `01:8fda`
-(6 function pointers: `91c4, 9200, 923c, 9278, 932c, 92f0`), which looks
-like a genuine per-frame task-scheduler -- possibly the same mechanism
-`docs/REVERSE_ENGINEERING_cursor_movement.md`'s bank-`0d` lead was
-looking for, and plausibly the same scheduler responsible for the
-long-standing cursor-cadence bug's "works in bursts" symptom (some
-per-rotation slots landing on stale data, others on fresh). The table's
-actual dispatch site (what indexes into it and calls through it) wasn't
-found this session -- a raw-byte search for references to `$8fda` hit
-only a false positive (coincidental bytes inside unrelated `LDA`/`STA`
-long instructions in bank 03).
+**Retracted, autonomous follow-up**: an earlier pass in this same
+session speculated that `00:9278` (the edge-detector) is dispatched
+through a jump table at `01:8fda` (6 "function pointers":
+`91c4, 9200, 923c, 9278, 932c, 92f0`), and framed that as the likely
+task-scheduler responsible for the periodic gating above. Checked more
+carefully afterward and this doesn't hold up: three of those six
+addresses (`91c4`, `9200`, `923c`) form a genuine, self-consistent
+bytecode-VM opcode-handler pattern (reads a script buffer at `$0000,Y`
+via a PC at `$0009`, writes to `$7e8000,X` -- plausibly the title-screen
+logo animation, given it fires around frame 50) -- but the other two
+(`932c`, `92f0`) turned out to just be the middle of two *already*
+separately-disassembled, unrelated functions (`92f0` is literally
+mid-body of the `00:92cc` routine documented elsewhere in this file).
+That's not a coherent task list, and an exhaustive search for any
+reference to `$8fda` (immediate load, indexed load, indexed-indirect
+`JSR`) found none at all. **The `01:8fda` table is very likely
+coincidental bytes, not a real dispatcher** -- retracting the claim
+rather than let it stand uncorrected. What actually gates `01:c01e`'s
+periodic execution, and what clears `$011b` in between, is still
+unknown.
 
-**Next step**: find `01:8fda`'s dispatch site and full task list, to
-see exactly what else runs in the same rotation as the edge-detector
-(`9278`) and the fast-travel dispatcher, and confirm which other task is
-clearing `$011b` between them. A live trace on every write site touching
-`$011b` across a full rotation (not just `92c7`) would settle it
-directly once the dispatcher is found.
+**Next step**: this needs live tracing, not more static guessing --
+static analysis has now produced multiple dead ends on this specific
+question (the `$c5`/`$d7`/`$9dcc` chain earlier, and this `$8fda` table
+just now). Most direct: a live trace on every write site touching
+`$011b` across several consecutive frames (not just `92c7`) while
+holding the fast-travel modifier, to see what runs *between* the
+correct-data moment (like frame 1421) and the next `01:c01e` check that
+reads it as zero.
 
 ### Method note: what actually worked vs. what didn't
 

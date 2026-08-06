@@ -38,7 +38,7 @@ this ROM).
 | `$007a`-`$007e` | Scratch block used by a table-driven update loop at `00:94fd`-`95d8` (indexed via `$0b4d`) | Low, not traced in detail |
 | `$007c`/`$7c` (dp) | **Reused scratch, not a single-purpose variable** -- among other uses, `00:cdec` treats it as a tight busy-loop delay counter (32 decrements within one frame); a red herring for the cadence investigation, see `docs/REVERSE_ENGINEERING_cursor_movement.md` | High (the "don't trust this" lesson is confirmed) |
 | `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`, only when no direction also held) is held, right before an early `RTS` (`01:8c52`). Consumer: `01:897f` reads it right after the write and dispatches via a jump table at `01:88ef` (`ASL A; TAX; JSR (table,X)`, opcode `0xFC`). Reason `1` (B/X) lands at `01:8d26`, which updates the animated hand-**cursor sprite** (OAM writes to `$7e2840+`/`$7e3040+`/`$7e3840+`) *and* unconditionally calls `01:afbe` at its tail -- `01:afbe` is the routine that actually increments `$01bd` (see `01:afc6` below), gated on `$01c1` bit 0. This whole `$c5` dispatcher mechanism turned out to be a red herring for the fast-travel bug specifically -- root cause is upstream of it, in how `$011b` gets read (see `$011b` entry and `docs/INVESTIGATION_dpad.md` "Fast travel") | High (dispatch mechanism itself) |
-| `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B. **Confirmed genuinely written** by the shared edge-detector (`00:928f-92cb`, `92c7: STA $011b,X`) with real `$4218,X`-sourced data, same call that also populates `$c9,X`/`$0123,X` (both confirmed working elsewhere). **Confirmed via same-session live evidence to hold correct data at some frames but not others**: an on-demand WRAM snapshot (F4) at frame 1421 showed `$011b` (16-bit, spanning `$011b`+`$011c`) as `$0082` -- correct, nonzero data -- while `SC_ADDR_TRACE` on the fast-travel modifier's direct 16-bit read (`01:c01e`, unpatched, used at `c105`/`c12a` too) showed `$0000` at every one of its own periodic ~4-frame-interval hits in the *same* session. Root cause: a scheduling race, not a never-populated mirror -- `01:c01e` only gets a turn once per `01:8fda` task-scheduler rotation (~every 4 frames), and something else in that rotation appears to clear/overwrite `$011b` before this dispatcher's turn comes around. See `docs/INVESTIGATION_dpad.md` "Fast travel" | High (population mechanism, confirmed) / confirmed scheduling-race for this specific read site |
+| `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B. **Confirmed genuinely written** by the shared edge-detector (`00:928f-92cb`, `92c7: STA $011b,X`) with real `$4218,X`-sourced data, same call that also populates `$c9,X`/`$0123,X` (both confirmed working elsewhere). **Confirmed via same-session live evidence to hold correct data at some frames but not others**: an on-demand WRAM snapshot (F4) at frame 1421 showed `$011b` (16-bit, spanning `$011b`+`$011c`) as `$0082` -- correct, nonzero data -- while `SC_ADDR_TRACE` on the fast-travel modifier's direct 16-bit read (`01:c01e`, unpatched, used at `c105`/`c12a` too) showed `$0000` at every one of its own periodic ~4-frame-interval hits in the *same* session. Root cause: a scheduling race, not a never-populated mirror -- `01:c01e` only gets a turn roughly once every 4 frames, and something else running in between clears/overwrites `$011b` before this dispatcher's turn comes around. (An earlier same-session theory that a jump table at `01:8fda` was the responsible scheduler was checked further and retracted -- see `docs/INVESTIGATION_dpad.md` "Fast travel".) What actually gates the ~4-frame period, and what clears `$011b`, is still unknown | High (population mechanism, confirmed) / confirmed scheduling-race for this specific read site |
 | `$011c` | `$4219` mirror (held-state). Bits 4-7 = R/L/X/A (real); **bits 0-3 are hardware-guaranteed zero** | High |
 | `$011a` | One byte before `$011b` -- the D-pad fix family's standard "shift the 16-bit load back one byte" target, so a load spanning `$011a`/`$011b` puts real direction bits where a buggy ladder expected zeroed `$011c` bits | High |
 | `$0123`/`$0124` | Absolute (non-direct-page) mirror pair, same relationship as `$011b`/`$011c` | High |
@@ -86,9 +86,8 @@ confidence notes on each -- summary table only below.
 
 | Address | Name | Purpose |
 |---|---|---|
-| `00:9278`/`00:927c` | *(edge-detector entry point)* | JSL wrapper (`9278`) into the real entry (`927c`), which sets `Y=4, X=0` before falling into `928f`'s loop -- processes all 4 SNES controller ports (`$4218`/`421A`/`421C`/`421E`, spaced by 2). Dispatched via a jump table at `01:8fda` (6 pointers: `91c4,9200,923c,9278,932c,92f0`) -- likely a per-frame task scheduler, but the table's own dispatch site (what indexes into it) wasn't found this session |
+| `00:9278`/`00:927c` | *(edge-detector entry point)* | JSL wrapper (`9278`) into the real entry (`927c`), which sets `Y=4, X=0` before falling into `928f`'s loop -- processes all 4 SNES controller ports (`$4218`/`421A`/`421C`/`421E`, spaced by 2). What calls this each frame (and how often) is still unknown -- an exhaustive search for any reference to `9278` or a nearby candidate table (`01:8fda`, since retracted) found nothing; needs live tracing, not more static search |
 | `00:928f-92cb` | *(shared edge-detector body)* | Busy-waits on `$4212 & 1` (auto-joypad-read-in-progress) before reading each port; XORs new vs. previous value for edge-detect, writes held/edge state to `$0123,X`/`$c9,X` **and** `$011b,X` (`92c7`) -- confirmed genuinely populates `$011b` with real data, contradicting a naive "always zero" read elsewhere (see `$011b` WRAM entry) |
-| `01:8fda` | *(task-scheduler jump table, tentative)* | 6 function pointers in bank 00: `91c4, 9200, 923c, 9278, 932c, 92f0`. Entry 3 (`9278`) is the joypad edge-detector. Dispatch site not found -- a raw-byte search for references to `$8fda` hit only a false positive in unrelated bank-03 code |
 | `01:afbe`/`01:afc6` | *(fast-travel scroll increment, confirmed live via bsnes)* | `afc6: INC $01bd`, gated on bit 0 of `$01c1`. Called unconditionally from the tail of `01:8d26`. Confirmed via live bsnes instruction tracing to fire every frame while SNES Y or A is held with a direction; confirmed via this recomp's own `SC_ADDR_TRACE` to never fire under the same conditions |
 | `00:90dd` | *(LC_LZ5 decompressor)* | Nintendo/community-named "LC_LZ5" compression; input bank/offset via WRAM `$09`/`$0b`, output to `$7E:0000+X`. See `tools/extract_graphics.py` for a verified-working reimplementation |
 | `01:8b4f` | `CursorMoveDispatch_Frame` | Per-frame entry; checks non-direction buttons and a couple of state flags, bails to a reset path or falls into the mode-flag checker |
@@ -184,10 +183,11 @@ not just inferred from the option table's ordering.
   chain has been confirmed to evaluate identically to real hardware --
   the gap is in *how often the dispatcher itself gets invoked*, not a
   wrong decode. Leading candidate: an unconfirmed task-scheduler jump
-  table in bank `0d` -- **possibly the same mechanism as the
-  `01:8fda`-based task-scheduler table found via the fast-travel thread
-  below** (the `01:9dcc` lead from an earlier pass this session turned
-  out to be a dead end, not this), not yet checked.
+  table in bank `0d` -- possibly the same mechanism responsible for the
+  ~4-frame periodic gating found via the fast-travel thread below, but
+  an attempted static identification of that scheduler (a table at
+  `01:8fda`) didn't hold up on closer inspection and was retracted --
+  not yet resolved either way.
 - **Fast travel**: root cause found via live bsnes instruction tracing
   plus same-session cross-verification in this recomp. `01:afc6: INC
   $01bd` (gated on `$01c1` bit 0, called from `01:8d26`'s tail) is the
@@ -195,17 +195,19 @@ not just inferred from the option table's ordering.
   bsnes while SNES Y/A is held with a direction, confirmed never firing
   in this recomp under the same conditions. Traced upstream to a
   **scheduling race**: a direct 16-bit `LDA $011b` (at
-  `01:c01e`/`c105`/`c12a`) only runs once per `01:8fda` task-scheduler
-  rotation (~every 4 frames), and a same-session WRAM snapshot (new `F4`
-  hotkey) proved `$011b` genuinely holds correct data at other frames in
-  between those checks -- something else in the same rotation clears it
-  before this dispatcher's periodic turn. Not a never-populated mirror,
-  not a `$4212` timing bug -- confirmed with direct evidence, not just
-  narrowed to candidates. See `docs/INVESTIGATION_dpad.md` "Fast travel"
-  for the full writeup, including a method note on why static analysis
-  alone kept producing dead ends here and live tracing is what actually
-  worked. Next step: find `01:8fda`'s dispatch site to see the full task
-  rotation and identify what's clearing `$011b`.
+  `01:c01e`/`c105`/`c12a`) only runs roughly once every 4 frames, and a
+  same-session WRAM snapshot (new `F4` hotkey) proved `$011b` genuinely
+  holds correct data at other frames in between those checks --
+  something clears it before this dispatcher's periodic turn. Not a
+  never-populated mirror, not a `$4212` timing bug -- confirmed with
+  direct evidence, not just narrowed to candidates. What gates the
+  ~4-frame period and what clears `$011b` are both still unknown; a
+  same-session static attempt to identify the scheduler (`01:8fda`) was
+  checked further and retracted as a false lead. See
+  `docs/INVESTIGATION_dpad.md` "Fast travel" for the full writeup,
+  including a method note on why static analysis alone kept producing
+  dead ends here and live tracing is what actually worked. Next step
+  needs live tracing, not more static search.
 - **View screen rendering** (`docs/INVESTIGATION_dpad.md`, "Open item:
   View screen's D-pad"): the write side is fully confirmed and working;
   no renderer/consumer of `$7e21b4`/`$7e21b5` has been found yet.
