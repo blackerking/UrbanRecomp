@@ -767,6 +767,24 @@ static void apply_frame_input(uint64_t frame) {
  * apply here. Toggle with F3 (see SDL_SCANCODE_F3 above). */
 static bool s_mouse_enabled;
 
+/* Fast D-pad cursor (opt-in, F9): rather than reverse-engineer and patch
+ * the ROM's own throttled cursor cadence (see docs/INVESTIGATION_
+ * cursor_cadence.md -- $01f3, $01ff, and the deeper bank-$03 simulation-
+ * tick preemption that ultimately paces it), reuse the same host-side
+ * bypass the mouse patch above already established: while a direction is
+ * held, poke $01eb/$01ed directly via apply_mouse_delta() every frame,
+ * completely independent of the ROM's own per-frame dispatcher. This is
+ * strictly additive -- the normal D-pad bits are still sent to the game
+ * as usual (menu navigation, edge-detected list movement, etc. are
+ * untouched), this just adds extra host-driven displacement on top for
+ * the main-map cursor specifically, so holding a direction moves it at
+ * full host speed instead of whatever cadence the ROM's own cooperative
+ * scheduler happens to allow it that frame. Same caveats as the mouse
+ * patch it reuses (menu jank, no bounds-replication beyond the simple
+ * clamp already in apply_mouse_delta) -- off by default. */
+static bool s_fast_cursor_enabled;
+enum { kFastCursorStep = 4 }; /* pixels/frame while a direction is held */
+
 static void apply_mouse_delta(int dx, int dy) {
   if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
   if (dy > 127) dy = 127; else if (dy < -127) dy = -127;
@@ -1613,6 +1631,13 @@ int main(int argc, char **argv) {
         if (s_mouse_enabled) SDL_GetRelativeMouseState(NULL, NULL); /* discard stale accumulated delta */
         fprintf(stderr, "[F3] mouse cursor control %s\n", s_mouse_enabled ? "ON" : "OFF");
       }
+      /* F9: toggle the fast D-pad cursor (see apply_mouse_delta/
+       * s_fast_cursor_enabled above). Off by default -- same "opt-in,
+       * not authentic ROM behavior" reasoning as F3. */
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F9 && !ev.key.repeat) {
+        s_fast_cursor_enabled = !s_fast_cursor_enabled;
+        fprintf(stderr, "[F9] fast D-pad cursor %s\n", s_fast_cursor_enabled ? "ON" : "OFF");
+      }
       /* F4: dump WRAM to a fixed path right now, on demand -- for pinning
        * down exact WRAM byte values at a precise live moment (e.g. hold a
        * button combo, press F4, inspect $7e011b/$7e011c directly) instead
@@ -1692,12 +1717,23 @@ int main(int argc, char **argv) {
         }
       }
     }
+    const uint8_t *keys = SDL_GetKeyboardState(NULL);
     if (s_mouse_enabled) {
       int mdx = 0, mdy = 0;
       SDL_GetRelativeMouseState(&mdx, &mdy);
       if (mdx || mdy) apply_mouse_delta(mdx, mdy);
     }
-    const uint8_t *keys = SDL_GetKeyboardState(NULL);
+    if (s_fast_cursor_enabled) {
+      /* Host-driven, independent of the ROM's own cadence -- see
+       * s_fast_cursor_enabled's comment above. Diagonal holds add both
+       * axes, same as the ROM's own D-pad would. */
+      int fdx = 0, fdy = 0;
+      if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_H]) fdx -= kFastCursorStep;
+      if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_K]) fdx += kFastCursorStep;
+      if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_U]) fdy -= kFastCursorStep;
+      if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_J]) fdy += kFastCursorStep;
+      if (fdx || fdy) apply_mouse_delta(fdx, fdy);
+    }
     uint16_t input = 0;
     /* Diamond cluster U/H/J/K as an alternate D-pad, alongside arrow keys,
      * for testing (U=up, H=left, J=down, K=right). */
@@ -1719,6 +1755,12 @@ int main(int argc, char **argv) {
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
     if (keys[SDL_SCANCODE_B]) input |= kPad_Select;
+    /* Left mouse button = SNES B -- lets host-mouse cursor control (F3)
+     * actually select/interact with things, not just move the cursor.
+     * Not gated on s_mouse_enabled: useful as a plain extra B binding
+     * regardless (e.g. one hand on the mouse for pointing, click to
+     * confirm, without needing to reach for Y/Z). */
+    if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) input |= kPad_B;
     apply_frame_input(s_frames);
     g_snes->input1_currentState |= input;
 

@@ -138,7 +138,7 @@ shared `snesrecomp` runtime needed).
 |---|---|
 | D-pad | Arrow keys, or U/H/J/K (up/left/down/right) |
 | A | X |
-| B | Y or Z (either physical key position, for QWERTZ keyboards) |
+| B | Y or Z (either physical key position, for QWERTZ keyboards), or left mouse click |
 | X | S |
 | Y | A |
 | L | Q |
@@ -148,6 +148,7 @@ shared `snesrecomp` runtime needed).
 | Fast-forward (hold) | Tab |
 | Debug-menu code entry (controller 2, one-shot) | F2 |
 | Mouse cursor control (toggle) | F3 |
+| Fast D-pad cursor -- host-speed, bypasses the ROM's own cadence (toggle) | F9 |
 | Dump WRAM snapshot now (`wram_snapshot.bin`) | F4 |
 | Cheat: No Disasters (toggle, unconfirmed bit) | F5 |
 | Cheat: Needless Money (toggle, confirmed) | F6 |
@@ -185,8 +186,21 @@ can offer since it isn't limited to 8 controller inputs:
   community mouse patch (https://github.com/Selicre/simcity-mouse) --
   drives the same WRAM bytes ($7e01eb/$7e01ed) that patch identified,
   directly from real mouse movement instead of emulating an SNES mouse
-  peripheral. Off by default. Carries the same caveats upstream documents:
-  jank in menus, no button support, occasional resets to origin.
+  peripheral. Off by default. Left mouse click doubles as SNES B (see
+  "B" in the controls table above) so the mouse alone can point and
+  confirm/select. Otherwise carries the same caveats upstream documents:
+  jank in menus, occasional resets to origin.
+- **F9** toggles a fast D-pad cursor: while a direction is held, pokes
+  $01eb/$01ed directly every frame (reusing F3's own `apply_mouse_delta`)
+  instead of waiting on the ROM's own cursor cadence, which -- per
+  `docs/INVESTIGATION_cursor_cadence.md` -- is genuinely paced by the
+  game's own cooperative scheduler (a bank-$03 city-simulation tick
+  periodically pre-empting the cursor's turn), not something a simple ROM
+  patch can remove. Purely additive: normal D-pad input still reaches the
+  game as usual (menus, list navigation, etc. all still work normally),
+  this just adds extra host-driven movement on top for the main-map
+  cursor specifically. Off by default; same "not authentic ROM timing"
+  caveat as F3.
 
 Map/scenario loading ("Please wait...") does genuine procedural
 generation work rather than an artificial delay, so it isn't
