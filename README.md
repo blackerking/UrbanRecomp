@@ -207,6 +207,10 @@ per-game bring-up work -- identifying SimCity's own vblank-wait idiom well
 enough to declare it safely -- and is intentionally out of scope for this
 milestone.
 
+**TODO**: harmonise with [ar-recomp](https://github.com/DerrickGold/ar-recomp)
+-- not yet investigated in this repo; worth a look at what conventions or
+shared approach it uses before diverging further.
+
 ## Building
 
 Prerequisites: a `snesrecomp` checkout (pinned submodule, see

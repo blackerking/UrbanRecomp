@@ -489,25 +489,68 @@ reaching for early next time rather than as a last resort.
   fast-travel testing, instead of re-navigating menus or guessing
   `--input` timing on every run.
 
-## Open item: View screen's D-pad has no visible effect yet
+## View screen's D-pad: one real bug fixed, but still not visibly moving (open)
 
-`01:f0d3` (variant 6 above) is fixed, and live tracing confirms the fix is
-real: pressing a direction now reaches a 4-iteration direction-dispatch
-loop at `01:f0d3-f119`, which for each pressed direction calls a subroutine
-at `01:f17d` that reads/adjusts/clamps a value in WRAM at `$7e21b4` (or the
-companion byte at `$7e21b5` when a clamp limit is hit) and writes it back --
-all confirmed firing live via `SC_ADDR_TRACE` on the write sites
-(`01:f18c`, `01:f1ae`, `01:f1bb`). But a live before/after screenshot
-comparison while repeatedly pressing a direction showed no visible change
-beyond normal per-frame animation. So `$7e21b4`/`$7e21b5` is a genuine,
-now-live piece of game state that isn't (yet) known to be read by anything
-that renders -- either it feeds a rendering path we haven't traced, or the
-renderer reads a different/cached copy of whatever position this
-represents. Given the View screen's only other known problem (the tilted
-map not rendering) turned out to be a missing-HDMA engine gap (see
-`docs/INVESTIGATION_hdma.md`), the next step here is probably the same
-kind of hunt: SC_GFX_TRACE or a live bsnes comparison to find what actually
-reads `$7e21b4`/`$7e21b5` for rendering.
+**Status: partially resolved.** The `$7e21b5` stomping bug described below
+is real, confirmed, and fixed -- `$7e21b5` now updates and persists
+exactly like `$7e21b4` always did. But live user testing after the fix
+still shows no clean visible movement, just flickering (matching the
+original report for this screen from before any of this session's work:
+"glitches a little bit when arrow pad is used, but it doesn't move") --
+for *both* axes, including `$7e21b4`, which was never broken at the WRAM
+level. So there's still a separate, unfound problem in the actual
+rendering path: something needs to read `$7e21b4`/`$7e21b5` and turn it
+into a moved sprite/scroll/window position, and nothing in the entire ROM
+does that as a plain memory read (confirmed via the live
+`SC_VIEW_WATCH` watch, which catches every addressing mode). Leading
+theory, not yet confirmed: the connection is via DMA (which bypasses
+CPU-level memory-read hooks entirely, unlike a `LDA`), tying into the
+same OAM-icon-rebuild DMA machinery `00:c0fb`'s loop sets up -- worth
+checking with `SC_GFX_TRACE` for DMA channel setups that reference this
+WRAM region as a source address, or a live bsnes read-breakpoint on
+`$7e21b4` for a real hardware ground truth. The write-side fix below is
+still real and worth keeping either way; it's just not sufficient on its
+own.
+
+`01:f0d3` (variant 6 above) was already fixed and live tracing confirmed
+the write side was real: pressing a direction reaches a 4-iteration
+direction-dispatch loop at `01:f0d3-f119`, calling a subroutine at
+`01:f17d` that reads/adjusts/clamps a value in WRAM at `$7e21b4` (Left/
+Right, via `01:f189`/`f190`) or `$7e21b5` (Up/Down, via `01:f19a`/`f1bf`)
+and writes it back. But nothing visibly changed on screen.
+
+**Root cause, found via deterministic `--load-state`/`--input` testing
+plus a new live memory watch (`SC_VIEW_WATCH=1` in `src/main.c`, catches
+every addressing mode including dynamic/indirect ones a static opcode
+scan can miss)**: `$7e21b4` (Left/Right) was never actually broken --
+confirmed live, it cleanly decrements frame-over-frame while held (e.g.
+`7d->7a->77->74->...`). `$7e21b5` (Up/Down) was the real problem: a
+universal, always-on per-frame routine at `00:c0fb`
+(`SEP #$20; LDA #$e0; STA $7e21b5`, part of a loop at `00:8aa8` that
+rebuilds a whole row of UI icon sprites into OAM via DMA every frame, on
+*every* screen -- confirmed also firing on the classic map, not View-
+specific) unconditionally resets `$7e21b5` to a fixed `$e0` every single
+frame, stomping whatever `01:f1bf` just computed before anything could
+read the update. Confirmed live holding Down: `01:f1bf` computes a real
+new value (e.g. `$dc`), but `01:f1a7` (the *only* reader of `$7e21b5`
+anywhere in the ROM -- confirmed via the same live watch, on every
+screen) only ever observed the reset value `$e0`, never the update. A
+static byte-pattern scan for `LDA $7e21b4`/`$7e21b5` had turned up only
+one match total, and it was a red herring (an unrelated read-modify-write
+increment in bank 5) -- this needed the live watch to find the real
+consumer and the real saboteur, neither of which a static scan alone
+would have surfaced.
+
+**Fix**: NOP out just the one `STA $7e21b5` instruction (4 bytes,
+`EA EA EA EA`) inside `00:c0fb`, leaving its six sibling table-slot
+writes (`$7e21b9`/`bd`/`c1`/`d5`/`d9`/`dd`, part of the same per-frame
+icon rebuild) completely untouched -- as surgical as a byte patch gets.
+Safe because `$7e21b5` has exactly one consumer in the whole ROM (the
+View screen's own Up/Down check, confirmed via the live watch across
+multiple screens); nothing else reads it, so skipping this one reset
+can't leave stale data visible anywhere else. Confirmed live: `$7e21b5`
+now cleanly decrements the same way `$7e21b4` already did. Zero
+regression on the full `--qualify` baseline.
 
 **Autonomous static-analysis update**: searched the ROM for absolute/long
 references to `$21b4`/`$21b5`. Most hits in "high" banks (0c-0f) are false

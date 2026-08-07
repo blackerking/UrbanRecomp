@@ -124,6 +124,10 @@ static uint64_t s_nmi_serviced;
  *                           frames of execution. */
 static bool s_gfx_trace;
 static uint32_t s_gfx_trace_hits;
+static bool s_view_watch; /* cached SC_VIEW_WATCH check -- see bus_read/bus_write;
+                            * getenv() is NOT cheap enough to call unconditionally
+                            * on every single memory access (this is what caused a
+                            * qualify hang/severe slowdown before being cached). */
 static uint32_t s_dbg_live_hits;
 static uint64_t s_io_trace_until;
 static int s_pc_capture_after = -1;
@@ -184,6 +188,20 @@ static uint8_t bus_read(void *mem, uint32_t adr) {
       s_read_watch_hits++;
     }
   }
+  /* SC_VIEW_WATCH=1: live read watch on $7e21b4/$7e21b5 (the View screen's
+   * D-pad-adjusted position -- write side confirmed working, but nothing
+   * visibly renders; see docs/INVESTIGATION_dpad.md "Open item"). Catches
+   * *every* addressing mode (including dynamic/indirect), unlike a static
+   * opcode-pattern scan, which only found the value's own read-modify-
+   * write increment, not a genuine external consumer. */
+  if (s_view_watch && bank == 0x7e && (reg == 0x21b4 || reg == 0x21b5)) {
+    static uint32_t s_view_watch_hits;
+    if (s_view_watch_hits < 400) {
+      fprintf(stderr, "[viewwatch f=%llu] pc=%02x:%04x READ $7e%04x = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, reg, v);
+      s_view_watch_hits++;
+    }
+  }
   return v;
 }
 static void bus_write(void *mem, uint32_t adr, uint8_t v) {
@@ -196,6 +214,14 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
        reg == 0x4218 || reg == 0x4219 || reg == 0x421a || reg == 0x421b))
     fprintf(stderr, "[io f=%llu] WRITE %04x = %02x\n",
             (unsigned long long)s_frames, reg, v);
+  if (s_view_watch && bank == 0x7e && (reg == 0x21b4 || reg == 0x21b5)) {
+    static uint32_t s_view_write_hits;
+    if (s_view_write_hits < 400) {
+      fprintf(stderr, "[viewwatch f=%llu] pc=%02x:%04x WRITE $7e%04x = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, reg, v);
+      s_view_write_hits++;
+    }
+  }
   if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
       getenv("SC_CADENCE_WATCH") &&
       (reg == 0x01eb || reg == 0x01ec || reg == 0x01ed || reg == 0x01ee || reg == 0x007c)) {
@@ -937,6 +963,7 @@ int main(int argc, char **argv) {
     if (e && *e) { s_pc_trace_at_frame = strtoull(e, NULL, 0); s_pc_capture_after = -2; } }
   { const char *e = getenv("SC_ADDR_TRACE"); if (e && *e) parse_addr_trace(e); }
   { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
+  { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_PC_BITMAP_BANK");
     if (e && *e) s_pc_bitmap_bank = !strcmp(e, "all") ? -2 : (int)strtol(e, NULL, 16); }
   { const char *e = getenv("SC_PC_BITMAP_START"); if (e && *e) s_pc_bitmap_start_frame = strtoull(e, NULL, 0); }
@@ -1419,6 +1446,52 @@ int main(int argc, char **argv) {
    * a pending direction to re-issue, and the primary path alone doesn't
    * make up the difference). Left unpatched; the two gates interact in a
    * way that isn't a simple "remove the delay" fix like $01f3 was. */
+
+  /* View screen D-pad fix (docs/INVESTIGATION_dpad.md "View screen's
+   * D-pad: FIXED"): the write side ($7e21b4 for Left/Right, $7e21b5 for
+   * Up/Down, both driven by 01:f189/f190 and 01:f19a/f1bf) was already
+   * confirmed working in an earlier session, but nothing visibly moved.
+   * Root cause, found via deterministic --load-state/--input testing plus
+   * a live memory watch (SC_VIEW_WATCH=1) that catches every addressing
+   * mode -- unlike a static opcode scan, which only turned up $7e21b5's
+   * own read-modify-write increment in unrelated bank 5 code, not a
+   * genuine consumer: $7e21b4 (Left/Right) already works correctly
+   * end-to-end (confirmed live: cleanly decrements frame over frame while
+   * held, e.g. 7d->7a->77->74->...). $7e21b5 (Up/Down) does not: a
+   * universal, always-on per-frame routine at 00:c0fb (`SEP #$20;
+   * LDA #$e0; STA $7e21b5`, part of a loop at 00:8aa8 that rebuilds a
+   * whole row of UI icon sprites into OAM via DMA every frame, on every
+   * screen -- not View-specific, confirmed also firing on the classic
+   * map) unconditionally resets $7e21b5 to a fixed $e0 every single
+   * frame, stomping whatever 01:f1bf just wrote before anything can read
+   * the new value. Confirmed live holding Down: 01:f1bf computes a real
+   * new value (e.g. $dc), but 01:f1a7 (the only reader of $7e21b5
+   * anywhere in the ROM -- verified via the same live watch, on every
+   * screen, not just View) only ever observes the reset value $e0, never
+   * the update.
+   *
+   * Fix: NOP out just this one STA (4 bytes, EA EA EA EA), leaving its
+   * six sibling table-slot writes ($7e21b9/bd/c1/d5/d9/dd, part of the
+   * same per-frame icon rebuild) completely untouched -- as surgical as a
+   * byte patch gets. Safe because $7e21b5 has exactly one consumer in the
+   * entire ROM (the View screen's own Up/Down check); nothing else reads
+   * it, on any screen, so skipping this one reset can't leave stale data
+   * visible anywhere else. (A first attempt at this looked like it hung
+   * the full 10800-frame --qualify baseline -- turned out to be an
+   * unrelated false alarm from heavy host system load that session, not
+   * this patch: a 90s-timeout retest completed in 40s with byte-identical
+   * baseline output. Re-verify with a generous timeout if this is ever
+   * in doubt again.) */
+  {
+    uint32_t off = 0x40fb; /* 00:c0fb's STA $7e21b5 (long), file offset = addr-0x8000 (bank 0) */
+    if (off + 3 < rom_size && rom_data[off] == 0x8f && rom_data[off+1] == 0xb5 &&
+        rom_data[off+2] == 0x21 && rom_data[off+3] == 0x7e) {
+      rom_data[off] = rom_data[off+1] = rom_data[off+2] = rom_data[off+3] = 0xea; /* NOP x4 */
+      fprintf(stderr, "view fix: patched 00:c0fb STA $7e21b5 -> NOP (stop stomping the Up/Down View cursor)\n");
+    } else {
+      fprintf(stderr, "view fix: 00:c0fb site NOT patched (byte mismatch)\n");
+    }
+  }
 
   g_snes = snes_init(g_ram);
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
