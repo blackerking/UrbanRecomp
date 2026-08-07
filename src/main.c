@@ -1365,6 +1365,26 @@ int main(int argc, char **argv) {
             patched, (int)(sizeof(kCursorDelaySites) / sizeof(kCursorDelaySites[0])));
   }
 
+  /* Cursor cadence, part 2 -- INVESTIGATED, NOT APPLIED. The $01f3 delay
+   * above turned out to be only the first of two gates in series. $01f3
+   * ==0 unlocks a second flag, $01ff: a shared "step pending" lock across
+   * both axes, set to a per-direction bitmask (e.g. 0x0800 for Up, 0x0100
+   * for Right) by the direction handlers (01:c145 etc.) right after every
+   * step, cleared only by the shared post-step tail at 01:c2d4
+   * (`AND #$0007; BEQ` -- only unlocks once the cursor's new clamped
+   * position is a multiple of 8, i.e. roughly 1-in-4 calls, since each
+   * step moves 2 units). Tried the same fix idea as $01f3 (widen the
+   * AND mask so it always unlocks) and confirmed live it's a *regression*:
+   * $01ff isn't purely wasted time -- while it's set, a second ladder at
+   * 01:c195 bypasses it entirely by re-testing whichever direction bit is
+   * still set in $01ff and re-issuing that same step directly, which is
+   * *also* real, useful step throughput (measured: holding Right alone,
+   * removing the lock dropped the total step rate from 48/100 frames down
+   * to 25/100 -- the bypass path stops firing once $01ff no longer holds
+   * a pending direction to re-issue, and the primary path alone doesn't
+   * make up the difference). Left unpatched; the two gates interact in a
+   * way that isn't a simple "remove the delay" fix like $01f3 was. */
+
   g_snes = snes_init(g_ram);
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;

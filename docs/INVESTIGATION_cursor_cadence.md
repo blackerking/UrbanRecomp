@@ -152,24 +152,51 @@ If this turns out to feel *too* fast once played interactively, the
 reset value (currently `0`) is a single tunable byte at both sites --
 easy to dial back up (e.g. to `1`) rather than fully reverting.
 
-**IMPORTANT -- this is only half the picture.** `docs/REVERSE_ENGINEERING_
+**Follow-up: the full picture, decompiled.** `docs/REVERSE_ENGINEERING_
 cursor_movement.md` documents a *separate* mechanism, `$01ed` (not
-`$01eb`) written via `01:c214`/`01:c1ca`, landing via `01:c221`/`01:c1d5`
--- and that investigation's "UPDATE 4" is decisive, live-bsnes-confirmed:
-**real hardware steps `$01ed` every single frame while held, with zero
-gaps; this recomp only does so in ~4-frame-active/~16-frame-idle bursts,
-and every individual branch condition along that call chain was
-independently confirmed to match real hardware's own values.** That
-investigation concluded the bug is *not* a ROM branch/byte issue at all
--- it's upstream, in how often this recomp's interpreter invokes the
-whole per-frame dispatcher (`01:89a0`) in the first place, i.e. a genuine
-interpreter-level scheduling/cycle-accounting gap, not something a ROM
-data patch can fix. My `01:c2b1`/`$01eb`/`$01f3` finding above is a
-different, independently-confirmed mechanism (direct ROM-code countdown,
-not a scheduling gap) -- fixing it does not address `$01ed`'s bug. If
-`$01eb` and `$01ed` are the same on-screen cursor's X/Y coordinates,
-**one axis may now feel noticeably snappier than the other** until
-`$01ed`'s root cause (a real recomp bug, not intended pacing) is also
-found. See that doc's "Where this points for a real fix" for the
-concrete next step (per-frame opcode/cycle-count comparison, DMA/APU
-catchup timing) -- a materially harder investigation than this one.
+`$01eb`), and its "UPDATE 4" is a decisive, live-bsnes-confirmed claim:
+real hardware steps `$01ed` every single frame while held, zero gaps,
+while this recomp bursts. A first deterministic re-measurement (holding
+plain Up, tracing only the "primary" path `01:c132`) found just 11/100
+frames vs. `$01eb`'s 48/100 -- an alarming gap that looked like it
+confirmed the old doc's "genuine interpreter scheduling bug, not a ROM
+issue" conclusion.
+
+**That first re-measurement was incomplete.** Both `$01eb` and `$01ed`
+are gated by a *second* lock beyond `$01f3`: `$01ff`, a shared
+"step-pending" flag set to a per-direction bitmask (`0x0800`=Up,
+`0x0400`=Down, `0x0200`=Left, `0x0100`=Right) by each direction's step
+handler, and only cleared by a shared tail at `01:c2d4`
+(`AND #$0007; BEQ`) when the cursor's new position is a multiple of 8 --
+roughly 1-in-4 calls, since each step moves 2 units. `01:c0fd` gates the
+*entire* downstream chain (both axes) on `$01ff==0`. But there's a
+**second, parallel ladder at `01:c195`** that runs when `$01ff` is
+*not* clear: it re-tests whichever direction bit is still sitting in
+`$01ff` and re-issues that exact step directly (`JSR $c1cb`/`$c214` for
+Up/Down, `JMP $c2a1`/`$c250` for Right/Left) -- a legitimate bypass, not
+dead code. Once this bypass is included, the real total is **`$01ed`:
+41/100, `$01eb`: 48/100** -- much closer than 11 vs. 48, and both
+governed by the identical shared mechanism. Verified by tracing `01:c195`
+and `01:c1cb`/`01:c2b1` together in the same run and confirming the
+counts sum correctly (`primary + bypass == total`).
+
+**Tried removing the `$01ff` lock too** (same idea as the `$01f3` fix --
+widen `01:c2d4`'s `AND #$0007` to `AND #$0000` so it always unlocks).
+This is a confirmed **regression**, not an improvement: with `$01ff`
+always clearing immediately, the `01:c195` bypass never finds a pending
+direction to re-issue and stops contributing, and the primary path alone
+doesn't make up the difference -- measured total step rate *dropped* to
+25/100 for both axes. Reverted; not applied.
+
+**Where this leaves things**: `$01eb`/`$01ed` are both real, now
+well-understood, ROM-code-driven mechanisms (not a mysterious
+interpreter-timing gap) -- but the remaining ~50-per-100 shortfall from
+real hardware's "every frame" behavior traces back further than either
+`$01f3` or `$01ff`: to the outer per-frame dispatcher's own invocation
+rate (`01:c0f5`, `01:89a0`), which itself only runs ~49/100 frames.
+*That* is genuinely the same question `docs/REVERSE_ENGINEERING_
+cursor_movement.md`'s "UPDATE 4" pointed at -- why doesn't this whole
+subsystem get invoked every frame -- and it remains open. The two fixes
+applied here (`$01f3`) plus the two investigated-and-reverted attempts
+(`$01ff`) narrowed the gap considerably (measured, live-confirmed
+"feels a lot faster") without resolving that deeper question.
