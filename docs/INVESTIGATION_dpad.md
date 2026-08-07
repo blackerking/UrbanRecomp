@@ -512,6 +512,46 @@ WRAM region as a source address, or a live bsnes read-breakpoint on
 still real and worth keeping either way; it's just not sufficient on its
 own.
 
+**Follow-up: chased the DMA theory, hit a genuine wall.** `SC_GFX_TRACE`
+while holding a direction on the View screen found DMA channel 0
+transferring 544 bytes from `$7e2000` to `$2104` (the OAM data port)
+every single frame -- the shadow OAM buffer for all 128 sprites.
+`$7e21b4`/`$7e21b5` sit exactly at offset `0x1b4` into it: **sprite
+#109's X and Y bytes**. This looked like the answer -- except a
+before/after WRAM dump of the *other* sprites sharing that default
+position (`$7d`/`$e0`) showed sprites 124-127 (a real, 4-tile 16x16 icon
+with actual graphics -- tiles `00/02/06/04`, `attr=$38`, unlike sprite
+109's blank `tile=$00`/`attr=$00`) staying **completely frozen** while
+sprite 109 correctly tracked the D-pad. They only shared a coincidental
+default position, not an actual connection -- confirmed by searching the
+View screen's own code (`01:f000`-`f250`) for any reference to what
+gates sprites 124-127 (a flag at `$0b03`, found via the same DMA/OAM
+tracing: a routine at `00:c189` resets sprites 124-127's Y to `$e0`
+every ~4 frames unless `$0b03` is nonzero) -- zero references found.
+Sprite 109 is genuinely unused/idle OAM space that the View screen's
+Left/Right and Up/Down logic happens to borrow as scratch storage; it
+has no bearing on what's actually drawn.
+
+Exhaustively reconfirmed after this dead end: `$7e21b4`/`$7e21b5` have
+exactly 4 consumers in the *entire* ROM -- `01:f189`/`f190` and
+`01:f19a`/`f1bf` themselves (plus the now-fixed `00:c0fb` stomp).
+Nothing else reads or writes them, anywhere, via any addressing mode.
+Static analysis has now produced and personally disproven three
+plausible-looking leads on this specific question (the stale
+`$7e21b4` static-scan read, the sprite-109 OAM coincidence, the `$0b03`
+jump-table guess) -- the same "confirmed live, not by guessing" lesson
+this document's Method Note already drew from the fast-travel
+investigation applies again here. **Concrete next step, matching what
+actually worked for fast travel**: a live bsnes capture of the View
+screen with a direction held, watching whether *anything* visibly moves
+there on real hardware either. If nothing does, this is very likely
+dead/unfinished code in this ROM revision, not a recomp bug, and the
+`$7e21b5` stomp fix (still real, still worth keeping) was simply
+unrelated to the visible symptom. If something *does* move on real
+hardware, a read-breakpoint on whatever WRAM byte changes at that moment
+is the fastest way to find the real position variable -- almost
+certainly not `$7e21b4`/`$7e21b5`.
+
 `01:f0d3` (variant 6 above) was already fixed and live tracing confirmed
 the write side was real: pressing a direction reaches a 4-iteration
 direction-dispatch loop at `01:f0d3-f119`, calling a subroutine at
