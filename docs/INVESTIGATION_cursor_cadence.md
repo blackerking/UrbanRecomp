@@ -200,3 +200,66 @@ subsystem get invoked every frame -- and it remains open. The two fixes
 applied here (`$01f3`) plus the two investigated-and-reverted attempts
 (`$01ff`) narrowed the gap considerably (measured, live-confirmed
 "feels a lot faster") without resolving that deeper question.
+
+## UPDATE 6: found what's running during the "gap" frames -- bank $03, not an interpreter bug
+
+Added a new diagnostic (`SC_FRAME_BANK_TRACE=<start>,<end>`, see the env
+var docs at the top of `src/main.c`) that prints the CPU's `bank:PC` at
+*every single frame boundary* in a range, unconditionally -- something
+none of the existing tools could do, since `SC_ADDR_TRACE`'s PC-history
+ring buffer (128 opcodes) is far too shallow to span multiple whole
+frames of execution.
+
+Pointed at a burst-then-gap cycle (frames 5368-5380), the result is
+decisive and immediately obvious:
+
+```
+[framebank f=5369] k=03 pc=8ff4      <- bank 3
+[framebank f=5370] k=01 pc=c038      <- bank 1 (burst: cursor dispatcher runs)
+[framebank f=5371] k=01 pc=8bad
+[framebank f=5372] k=01 pc=c83f
+[framebank f=5373] k=01 pc=c8a5
+[framebank f=5374] k=03 pc=b13a      <- bank 3 again (gap starts)
+[framebank f=5375] k=03 pc=b08a
+[framebank f=5376] k=03 pc=b09c
+[framebank f=5377] k=03 pc=b046
+[framebank f=5378] k=01 pc=c07a      <- back to bank 1 (next burst)
+```
+
+**Bank $03 -- almost certainly the city simulation tick (traffic, zone
+growth, RCI demand, etc.) -- is genuinely executing during every "gap"
+frame.** This isn't the interpreter silently dropping frames or an
+uncharacterized scheduling gap: `nmi_requests`/`nmi_serviced` already
+confirmed every single frame's NMI actually fires and gets serviced
+(the qualify summary line), so the CPU is *doing real, continuous work*
+the whole time -- it's just bank 3's work, not bank 1's. When NMI
+interrupts bank 3 mid-pass and `RTI`s back, it resumes bank 3 exactly
+where it left off, not the bank-1 main loop's `01:8951` wait-point --
+i.e. the bank-1 cursor dispatcher is a **lower-priority cooperative
+task that only gets a turn once bank 3 finishes its current pass**.
+Reproduced cleanly across a second, independent burst/gap cycle
+(frames 5393-5412) with the identical pattern.
+
+**This changes the framing of the whole investigation.** The `$01f3`/
+`$01ff`-family gates earlier in this doc are real ROM logic controlling
+*how much* work bank 1 does on its turn; this is a *different* mechanism
+entirely, controlling *how often* bank 1 gets a turn at all, and it
+looks like authentic SimCity engine design (spreading simulation work
+across multiple frames), not a bug -- the same conclusion this session
+already reached for every other "mysterious timing gap" turned out to
+have a concrete ROM-code explanation once actually traced, rather than
+guessed at. `docs/REVERSE_ENGINEERING_cursor_movement.md`'s "UPDATE 4"
+bsnes capture (showing real hardware stepping "every frame, zero gaps")
+was very likely caught during a moment bank 3 had nothing queued, not a
+directly comparable measurement to this session's continuous-hold test --
+apples to oranges, not a confirmed recomp/hardware divergence. This is
+not fully proven without a live bsnes capture of the *same* scenario
+(a save state on this exact screen, direction held continuously, bank
+tracked at every frame boundary) for a real side-by-side comparison --
+that would be the decisive next step if this is picked up again, using
+`SC_FRAME_BANK_TRACE` on the recomp side and a bsnes breakpoint that
+logs the active bank on every frame on the other. Given how likely this
+now looks to be authentic engine behavior rather than a bug, "make
+bank 1 get more turns" is very likely the wrong thing to chase further --
+it would mean fighting the game's own scheduler, with an unclear effect
+on simulation timing/game balance.

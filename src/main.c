@@ -107,7 +107,21 @@ static uint64_t s_nmi_serviced;
  *                           ($211b-$2114), HDMAEN ($420c), and every HDMA
  *                           channel's control/dest/addr regs ($43x0-$43xa)
  *                           -- for finding whether/how a screen sets up
- *                           Mode 7 + HDMA (e.g. the tilted "View" map). */
+ *                           Mode 7 + HDMA (e.g. the tilted "View" map).
+ * SC_FRAME_BANK_TRACE=<start-frame>,<end-frame>
+ *                           log the CPU's bank:PC at every frame boundary
+ *                           in that range, unconditionally (not gated on
+ *                           reaching any particular PC) -- for finding
+ *                           what's actually executing during frames a
+ *                           lower-priority per-frame task doesn't get a
+ *                           turn on. This is what found bank $03 (the city
+ *                           simulation tick) cooperatively pre-empting the
+ *                           bank $01 cursor dispatcher for several frames
+ *                           at a time -- see docs/INVESTIGATION_cursor_
+ *                           cadence.md. PC-history alone can't answer this
+ *                           kind of question: its ring buffer is far too
+ *                           shallow (128 opcodes) to span multiple whole
+ *                           frames of execution. */
 static bool s_gfx_trace;
 static uint32_t s_gfx_trace_hits;
 static uint32_t s_dbg_live_hits;
@@ -402,7 +416,28 @@ static void handle_pos_stuff(void) {
   if (snes->hPos == 1364) {
     snes->hPos = 0;
     snes->vPos++;
-    if (snes->vPos == 262) { snes->vPos = 0; s_frames++; }
+    if (snes->vPos == 262) {
+      snes->vPos = 0;
+      s_frames++;
+      /* SC_FRAME_BANK_TRACE=<start>,<end>: print the CPU bank:PC at every
+       * frame boundary in that range -- for finding what's actually
+       * executing during "gap" frames a lower-priority per-frame task
+       * (like the cursor dispatcher) doesn't get a turn on, instead of
+       * guessing from PC-history (too shallow to span multiple frames). */
+      { const char *fbt = getenv("SC_FRAME_BANK_TRACE");
+        if (fbt && *fbt) {
+          static uint64_t s_fbt_start, s_fbt_end;
+          static bool s_fbt_parsed;
+          if (!s_fbt_parsed) {
+            sscanf(fbt, "%llu,%llu", (unsigned long long *)&s_fbt_start, (unsigned long long *)&s_fbt_end);
+            s_fbt_parsed = true;
+          }
+          if (s_frames >= s_fbt_start && s_frames <= s_fbt_end)
+            fprintf(stderr, "[framebank f=%llu] k=%02x pc=%04x\n",
+                    (unsigned long long)s_frames, g_cpu->k, g_cpu->pc);
+        }
+      }
+    }
   }
 }
 
