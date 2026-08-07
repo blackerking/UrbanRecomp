@@ -46,3 +46,8 @@ _*
 # ROM's runtime state
 wram_snapshot.bin
 *.wram
+
+# Save states (numbered-slot hotkeys / --load-state) -- full emulator
+# snapshots derived from the copyrighted ROM's runtime state, generated
+# locally per-debugging-session
+savestate_*.bin

@@ -102,12 +102,11 @@ investigation, including the six distinct bug variants found and the live
 bsnes tracing that pinned down the last few.
 
 **Known remaining limitations:** the View screen's D-pad now genuinely
-updates its underlying game state but nothing visible changes yet. The
-"fast travel" modifier (holding Y or A while moving, for a faster/bigger
-scroll jump) is confirmed broken on this recomp -- works correctly on
-real-hardware-accurate bsnes running the same ROM, but does nothing here
-beyond showing the directional cursor indicators. Both tracked in the
-same doc.
+updates its underlying game state but nothing visible changes yet --
+tracked in the same doc. The map's "fast travel" modifier (holding B or
+X while moving, for a faster/bigger scroll jump) is **fixed** -- a 9th,
+previously-unpatched site in the same D-pad bug family (see
+`docs/INVESTIGATION_dpad.md` "Fast travel: FIXED").
 
 ### Graphics/text export tool
 
@@ -145,7 +144,7 @@ shared `snesrecomp` runtime needed).
 | L | Q |
 | R | E |
 | Start | Enter |
-| Select | Shift |
+| Select | B |
 | Fast-forward (hold) | Tab |
 | Debug-menu code entry (controller 2, one-shot) | F2 |
 | Mouse cursor control (toggle) | F3 |
@@ -154,6 +153,17 @@ shared `snesrecomp` runtime needed).
 | Cheat: Needless Money (toggle, confirmed) | F6 |
 | Cheat: Valve Max (toggle, confirmed) | F7 |
 | Cheat: Water Reclaim (toggle, unconfirmed bit) | F8 |
+| Save state to slot 1-9/0 | Shift+1 .. Shift+9, Shift+0 |
+| Load state from slot 1-9/0 | 1 .. 9, 0 |
+
+Save states (`savestate_<digit>.bin`, gitignored) capture the full emulator
+state -- WRAM, CPU registers, and every device model -- so a specific
+scenario (on the map screen, cursor visible, a particular button held) can
+be set up once by hand and then reloaded instantly and deterministically
+for repeated testing, instead of re-navigating menus or guessing `--input`
+timing on every run. `--load-state <path>` loads one headlessly at startup
+(before `--qualify` or the windowed loop begins), so a fixed `--input`
+sequence can be replayed against an already-positioned scenario.
 
 A/R advance the title screen itself. To reach the mode-select menu (rather
 than auto-continuing into gameplay), press Start or A roughly 10 seconds

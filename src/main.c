@@ -192,6 +192,41 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
       s_wram_watch_hits++;
     }
   }
+  /* Dedicated $011b/$011c write watch (separate counter from the mouse-
+   * cursor watch above so the two don't compete for the same hit budget).
+   * Added to find what, if anything, writes over the edge-detector's
+   * (00:92c7) correct per-frame data in between its write and the
+   * fast-travel modifier check (01:c01e) reading it as zero four frames
+   * out of five -- see docs/INVESTIGATION_dpad.md "Fast travel". Paired
+   * with the existing readwatch above (same two addresses), so a single
+   * SC_CADENCE_WATCH run gives every read AND write to both bytes, in
+   * order, across consecutive frames. */
+  if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
+      getenv("SC_CADENCE_WATCH") &&
+      (reg == 0x011b || reg == 0x011c)) {
+    static uint32_t s_011b_write_hits;
+    if (s_011b_write_hits < 400) {
+      fprintf(stderr, "[011bwrite f=%llu] pc=%02x:%04x $%04x = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, reg, v);
+      s_011b_write_hits++;
+    }
+  }
+  /* $d7 write watch: the dispatcher-select state machine (see ROM_MAP.md
+   * `$00d7` entry) -- `01:8b3b` branches on it to pick the default
+   * cursor-sprite dispatcher ($d7==0, only reaches the B/X reason-1 path)
+   * vs. the second dispatcher at `01:8c55` ($d7==1, "the one that actually
+   * handles Y+direction (fast travel)"). Every trace this session (bsnes
+   * and this recomp) has shown $d7==0 throughout a held Y+direction --
+   * this watch is to find whether/when anything ever writes it to 1. */
+  if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame &&
+      getenv("SC_CADENCE_WATCH") && reg == 0x00d7) {
+    static uint32_t s_d7_write_hits;
+    if (s_d7_write_hits < 200) {
+      fprintf(stderr, "[d7write f=%llu] pc=%02x:%04x $d7 = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, v);
+      s_d7_write_hits++;
+    }
+  }
   if (s_gfx_trace && hw &&
       (reg == 0x2105 || (reg >= 0x211b && reg <= 0x2114) || reg == 0x420c ||
        (reg >= 0x4300 && reg <= 0x437f && (reg & 0x0f) <= 0x0a))) {
@@ -512,6 +547,57 @@ static bool write_wram_dump(const char *path) {
   return fclose(f) == 0 && ok;
 }
 
+/* ── save states -- for reproducing a specific screen/input scenario (e.g.
+ * "on the map, cursor visible, nothing else held") instantly and
+ * deterministically, instead of re-navigating menus by hand or by guessed
+ * --input timing every single test run. snes_saveload() already covers the
+ * full device model (cpu/apu/dma/ppu/cart + WRAM, since g_ram is snes->ram);
+ * interp816_saveload() separately covers the actual CPU registers this
+ * Phase-1 host runs on (snes->cpu is an unused legacy AOT-tier struct, not
+ * what interp816 drives). s_frames is saved too so frame-numbered tooling
+ * (SC_ADDR_TRACE's @start-frame, --input's start:duration) stays meaningful
+ * across a load instead of resetting to 0. Host-only UI state (mouse
+ * toggle, etc.) is deliberately not saved -- reloading shouldn't change
+ * host input mode out from under you. */
+typedef struct { SaveLoadInfo base; FILE *f; bool ok; } FileSli;
+static void file_sli_write(SaveLoadInfo *sli, void *data, size_t n) {
+  FileSli *fs = (FileSli *)sli;
+  if (fs->ok && fwrite(data, 1, n, fs->f) != n) fs->ok = false;
+}
+static void file_sli_read(SaveLoadInfo *sli, void *data, size_t n) {
+  FileSli *fs = (FileSli *)sli;
+  if (fs->ok && fread(data, 1, n, fs->f) != n) fs->ok = false;
+}
+
+static bool save_state(const char *path) {
+  FILE *f = fopen(path, "wb");
+  if (!f) return false;
+  FileSli fs;
+  fs.base.func = file_sli_write;
+  fs.f = f;
+  fs.ok = true;
+  snes_saveload(g_snes, &fs.base);
+  interp816_saveload(g_cpu, &fs.base);
+  fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  bool ok = fs.ok;
+  return fclose(f) == 0 && ok;
+}
+
+static bool load_state(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  FileSli fs;
+  fs.base.func = file_sli_read;
+  fs.f = f;
+  fs.ok = true;
+  snes_saveload(g_snes, &fs.base);
+  interp816_saveload(g_cpu, &fs.base);
+  fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  bool ok = fs.ok;
+  fclose(f);
+  return ok;
+}
+
 static uint8_t *read_file(const char *path, uint32_t *size_out) {
   FILE *f = fopen(path, "rb");
   if (!f) return NULL;
@@ -808,6 +894,7 @@ static int run_qualification(uint64_t frames) {
 
 int main(int argc, char **argv) {
   const char *rom_path = "simcity.sfc";
+  const char *load_state_path = NULL;
   uint64_t qualify_frames = 0;
   int scale = 3;
   { const char *e = getenv("SC_IO_TRACE"); if (e && *e) s_io_trace_until = strtoull(e, NULL, 0); }
@@ -839,6 +926,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid --input2 event; expected start:duration:hexmask\n");
         return 2;
       }
+    } else if (!strcmp(argv[i], "--load-state") && i + 1 < argc) {
+      load_state_path = argv[++i];
     } else if (argv[i][0] != '-') {
       rom_path = argv[i];
     }
@@ -909,6 +998,40 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "dpad fix: patched %d/%d LDA $011b -> LDA $011a sites\n",
             patched, (int)(sizeof(kSites) / sizeof(kSites[0])));
+
+    /* Ninth site, same bug family, found via deterministic --load-state +
+     * --input testing plus a targeted raw byte-pattern scan (this one was
+     * missed by the original 8-site sweep because its shape doesn't match
+     * `AD xx xx 29 00 0F`): `01:8d36` does `LDA $011b` (16-bit) `; SEP #$20
+     * ; XBA ; AND #$0f ; BEQ ...`. The XBA swaps A's bytes before the 8-bit
+     * AND, so the AND actually tests what was the *high* byte of the
+     * load -- $011c, the dead nibble -- not $011b's real direction bits.
+     * This routine (`01:8d26`, the B/X-held per-frame cursor-sprite
+     * dispatcher, reached via `$c5`==1) is also the one whose tail
+     * unconditionally writes `$01c1` (`STA $01c1` right after the AND) and
+     * dispatches to the 4 per-direction handlers (`b2f9`/`b1f6`/`b166`/
+     * `b030`) that lead into `01:afbe`/`afc6` (the confirmed `INC $01bd`
+     * scroll increment, gated on `$01c1` bit 0) -- see
+     * docs/INVESTIGATION_dpad.md "Fast travel". With this AND always
+     * testing a hardware-dead nibble, the `BEQ` always takes, so neither
+     * the direction dispatch nor the `$01c1` write ever run, for *any*
+     * held direction -- confirmed live: with only the D-pad fixes below
+     * this block applied, holding B/X + any direction never reached
+     * `b2f9`/`b1f6`/`b166`/`b030`/`afbe` even once in 300 held frames.
+     * Same fix as the 8 sites above: repoint the load's low byte from
+     * $011b to $011a, so $011b lands as the *high* byte of the 16-bit
+     * load -- which XBA then swaps into A's low byte, exactly where this
+     * site's unmodified `AND #$0f`/`STA $01c1`/dispatch ladder already
+     * expects real direction bits. */
+    {
+      uint32_t off = 0x8d37; /* 01:8d36's low operand byte, file offset = addr (bank 1) */
+      if (off < rom_size && rom_data[off] == 0x1b) {
+        rom_data[off] = 0x1a;
+        fprintf(stderr, "dpad fix: patched 01:8d36 LDA $011b -> LDA $011a (9th site)\n");
+      } else {
+        fprintf(stderr, "dpad fix: 01:8d36 site NOT patched (byte mismatch)\n");
+      }
+    }
 
     /* Same bug, direct-page variant: `LDA $c9 (dp); AND #$0f00; ...` at
      * 01:cc24 and 01:e8f4 -- $c9 is the edge-detected ("just pressed")
@@ -1207,6 +1330,41 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* Cursor step-cadence speed tweak (docs/INVESTIGATION_cursor_cadence.md)
+   * -- NOT part of the D-pad bug family above, and unlike those, not
+   * confirmed to differ from real hardware. This is a deliberate design
+   * constant, not a "wrong nibble"-style bug: found via the same
+   * deterministic --load-state/--input testing that cracked fast travel,
+   * tracing the real cursor-position writer (`01:c2b1: STA $01eb`, not the
+   * stale `01:c214` the old investigation notes guessed) back to a
+   * countdown-delay gate at `01:c0dd`: `LDA $01f3 (16-bit); BEQ +4 (fall
+   * through if zero); DEC $01f3; RTS (bail if nonzero)`. After a
+   * successful step, two mirror-image sites (the increment and decrement
+   * direction handlers) both reset it with the identical `LDA #$0003;
+   * STA $01f3` -- confirmed live: 15/35 calls bail on a nonzero `$01f3`,
+   * the other 20/35 fall through and write `$01eb`, exactly matching this
+   * gate. Same constant in both symmetric sites reads as intentional
+   * pacing, not a bug -- lowering it here is a speed tweak, matching the
+   * spirit of the existing fast-forward feature and the "for a future
+   * speed mod" framing the old investigation doc already used, not a
+   * claim that real hardware behaves differently. */
+  {
+    static const uint32_t kCursorDelaySites[] = {
+      0xc2e0, /* 01:c2df's immediate operand low byte -- increment handler */
+      0xc3c9, /* 01:c3c8's immediate operand low byte -- decrement handler */
+    };
+    int patched = 0;
+    for (size_t i = 0; i < sizeof(kCursorDelaySites) / sizeof(kCursorDelaySites[0]); i++) {
+      uint32_t off = kCursorDelaySites[i];
+      if (off < rom_size && rom_data[off] == 0x03) {
+        rom_data[off] = 0x00;
+        patched++;
+      }
+    }
+    fprintf(stderr, "cursor cadence: patched %d/%d step-delay reset sites ($01f3: 3 -> 0)\n",
+            patched, (int)(sizeof(kCursorDelaySites) / sizeof(kCursorDelaySites[0])));
+  }
+
   g_snes = snes_init(g_ram);
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;
@@ -1219,6 +1377,22 @@ int main(int argc, char **argv) {
 
   g_cpu = interp816_init(NULL, bus_read, bus_write);
   interp816_reset(g_cpu);
+
+  /* --load-state <path>: overwrite the just-reset boot state with a
+   * previously captured save state (see save_state/load_state and the
+   * numbered-slot hotkeys below) -- lets a --qualify run, or the windowed
+   * host, start already positioned on a specific screen/scenario instead
+   * of from cold boot, so a fixed --input sequence can be replayed against
+   * it deterministically. Applied after reset/loadRom so it fully
+   * supersedes them rather than racing anything. */
+  if (load_state_path) {
+    if (!load_state(load_state_path)) {
+      fprintf(stderr, "cannot load state '%s'\n", load_state_path);
+      return 1;
+    }
+    fprintf(stderr, "loaded state '%s', now at frame %llu\n",
+            load_state_path, (unsigned long long)s_frames);
+  }
 
   if (qualify_frames) {
     return run_qualification(qualify_frames);
@@ -1352,6 +1526,43 @@ int main(int argc, char **argv) {
                   (g_ram[0x0425] & bit) ? "ON" : "OFF", g_ram[0x0425]);
         }
       }
+      /* Numbered save-state slots: Shift+1..Shift+0 saves slot 1-9/0,
+       * plain 1..0 loads it -- 10 slots so a specific scenario (e.g. "on
+       * the map screen, cursor visible, nothing held") can be captured
+       * once interactively and then reloaded instantly and deterministically
+       * for repeated testing, instead of re-navigating menus (or guessing
+       * --input timing) every run. SNES Select is bound to B (not Shift)
+       * below specifically so holding Shift for a save/load never also
+       * feeds a Select press into the game at that exact moment -- a save
+       * state should capture "nothing else held," not "Select held". */
+      if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+        static const struct { SDL_Scancode sc; char digit; } kSlotKeys[] = {
+          { SDL_SCANCODE_1, '1' }, { SDL_SCANCODE_2, '2' }, { SDL_SCANCODE_3, '3' },
+          { SDL_SCANCODE_4, '4' }, { SDL_SCANCODE_5, '5' }, { SDL_SCANCODE_6, '6' },
+          { SDL_SCANCODE_7, '7' }, { SDL_SCANCODE_8, '8' }, { SDL_SCANCODE_9, '9' },
+          { SDL_SCANCODE_0, '0' },
+        };
+        for (size_t i = 0; i < sizeof(kSlotKeys) / sizeof(kSlotKeys[0]); i++) {
+          if (ev.key.keysym.scancode != kSlotKeys[i].sc) continue;
+          char path[32];
+          snprintf(path, sizeof(path), "savestate_%c.bin", kSlotKeys[i].digit);
+          if (ev.key.keysym.mod & KMOD_SHIFT) {
+            if (save_state(path))
+              fprintf(stderr, "[state] saved slot %c -> %s at frame %llu\n",
+                      kSlotKeys[i].digit, path, (unsigned long long)s_frames);
+            else
+              fprintf(stderr, "[state] failed to save slot %c -> %s\n", kSlotKeys[i].digit, path);
+          } else {
+            if (load_state(path))
+              fprintf(stderr, "[state] loaded slot %c <- %s, now at frame %llu\n",
+                      kSlotKeys[i].digit, path, (unsigned long long)s_frames);
+            else
+              fprintf(stderr, "[state] failed to load slot %c <- %s (not saved yet?)\n",
+                      kSlotKeys[i].digit, path);
+          }
+          break;
+        }
+      }
     }
     if (s_mouse_enabled) {
       int mdx = 0, mdy = 0;
@@ -1376,7 +1587,10 @@ int main(int argc, char **argv) {
     if (keys[SDL_SCANCODE_Q]) input |= kPad_L;
     if (keys[SDL_SCANCODE_E]) input |= kPad_R;
     if (keys[SDL_SCANCODE_RETURN]) input |= kPad_Start;
-    if (keys[SDL_SCANCODE_RSHIFT] || keys[SDL_SCANCODE_LSHIFT]) input |= kPad_Select;
+    /* Select is bound to B (not Shift) so Shift is free for the
+     * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
+     * Select press into the game every time a state is saved/loaded. */
+    if (keys[SDL_SCANCODE_B]) input |= kPad_Select;
     apply_frame_input(s_frames);
     g_snes->input1_currentState |= input;
 

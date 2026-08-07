@@ -1,8 +1,15 @@
-# Cursor step cadence (investigation notes, for a future speed mod)
+# Cursor step cadence (root-caused and tweaked)
 
-Status: **not yet root-caused**. These are working notes from a live
-tracing session, kept here so a future session (or mod) can pick up
-without repeating the same wrong turns.
+Status: **root cause found, speed tweak applied**. The addresses in the
+"What's confirmed live" section below (`$01ed`, `01:c1ca`/`01:c214`) were
+never actually confirmed as the real mechanism -- they were a first
+static guess later shown to be entered from `01:c3d1`, but the exact
+path from there was never fully traced in that session. Superseded by
+"Resolution" at the end, found via the same deterministic
+`--load-state`/`--input` testing that cracked fast travel. Keeping the
+original notes above it for the method-note value (the same "confirm
+the actual PC, don't trust a correlated sample" lesson bit twice here
+too, on a second unrelated variable this time -- see "Resolution").
 
 ## Symptom
 
@@ -101,13 +108,68 @@ increments/decrements `$01eb,X` once per `LSR`/`BCC` pass through that
 loop -- not yet cross-checked against the main map's mechanism above to
 see if they share any common timing source.
 
-## Suggested next step
+## Resolution
 
-Static tracing plus once-per-frame sampling has now produced two
-plausible-looking but wrong theories in a row here. Given how effective it
-was for the hardest D-pad bugs (Map Select, the name-entry keyboard), the
-next step should probably be a **live bsnes comparison session**: set a
-write-breakpoint on `$01ed` on real hardware-accurate emulation while
-holding a direction, and read out the actual call stack / surrounding
-values at the moment of each step, rather than continuing to reconstruct
-control flow from static bytes plus scattered live samples.
+Found via deterministic testing (a user-captured save state on the map
+screen + `--load-state` + `--input <frame>:<duration>:<hexmask>`, holding
+plain Right with zero live-keyboard jitter), plus the same `$011b`/`$011c`
+write-watch infrastructure added for the fast-travel investigation
+(`SC_CADENCE_WATCH`).
+
+**Real write site**: `01:c2b1: STA $01eb` (16-bit) -- not `$01ed`/`01:c214`
+as the notes above guessed. `$01eb` is the on-screen cursor's own X
+position (the same byte the host-mouse patch drives), separate from
+`$01bd` (map scroll-X). Confirmed by binary-searching hit counts down the
+call chain (`01:8c52`→`897f`→`8985`→`899a`→`899d`→`c3cf`→`c0dd`→`c2b1`,
+each stage's `SC_ADDR_TRACE` hit count over a fixed 100-frame window)
+until the count dropped, which localized the gate to `01:c0dd`:
+
+```
+01:c0f0  LDA $01f3     ; 16-bit
+01:c0f2  BEQ +4         ; fall through (continue toward the step) if 0
+01:c0f4  DEC $01f3
+01:c0f5  RTS            ; bail (no step this call) if $01f3 was nonzero
+```
+
+Confirmed directly: 15/35 calls bailed here, the other 20/35 fell through
+and reached `01:c2b1`'s write, exactly matching the outer call count.
+Two mirror-image sites (`01:c2df`/`c3c8`, the increment and decrement
+direction handlers) both reset the counter identically after a step:
+`LDA #$0003; STA $01f3`.
+
+**Not the same bug class as the D-pad/fast-travel fixes**: this is a
+plain countdown-delay constant, symmetric across both direction handlers
+-- reads as deliberate pacing, not a "wrong nibble"/wrong-byte artifact.
+Treated as a speed tweak rather than a bug fix: `src/main.c` patches both
+`LDA #$0003` sites to `LDA #$0000`, removing the extra delay while
+leaving the underlying step size (+/-2) and the outer call cadence
+(itself gated by something upstream, not touched) alone. Measured
+effect: the dead pause between step-bursts dropped from ~17 frames to
+~5 frames in the same 100-frame deterministic test (48 `$01eb` writes
+vs. 20 before). Zero regression on the full `--qualify` baseline.
+
+If this turns out to feel *too* fast once played interactively, the
+reset value (currently `0`) is a single tunable byte at both sites --
+easy to dial back up (e.g. to `1`) rather than fully reverting.
+
+**IMPORTANT -- this is only half the picture.** `docs/REVERSE_ENGINEERING_
+cursor_movement.md` documents a *separate* mechanism, `$01ed` (not
+`$01eb`) written via `01:c214`/`01:c1ca`, landing via `01:c221`/`01:c1d5`
+-- and that investigation's "UPDATE 4" is decisive, live-bsnes-confirmed:
+**real hardware steps `$01ed` every single frame while held, with zero
+gaps; this recomp only does so in ~4-frame-active/~16-frame-idle bursts,
+and every individual branch condition along that call chain was
+independently confirmed to match real hardware's own values.** That
+investigation concluded the bug is *not* a ROM branch/byte issue at all
+-- it's upstream, in how often this recomp's interpreter invokes the
+whole per-frame dispatcher (`01:89a0`) in the first place, i.e. a genuine
+interpreter-level scheduling/cycle-accounting gap, not something a ROM
+data patch can fix. My `01:c2b1`/`$01eb`/`$01f3` finding above is a
+different, independently-confirmed mechanism (direct ROM-code countdown,
+not a scheduling gap) -- fixing it does not address `$01ed`'s bug. If
+`$01eb` and `$01ed` are the same on-screen cursor's X/Y coordinates,
+**one axis may now feel noticeably snappier than the other** until
+`$01ed`'s root cause (a real recomp bug, not intended pacing) is also
+found. See that doc's "Where this points for a real fix" for the
+concrete next step (per-frame opcode/cycle-count comparison, DMA/APU
+catchup timing) -- a materially harder investigation than this one.

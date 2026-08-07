@@ -9,11 +9,11 @@ Hard) screen, the Comprehensive/Information map overlay (both scrolling
 and the cursor), and the View screen (the watch icon). Confirmed by
 interactive testing on every screen, and independently cross-checked
 against real hardware-accurate emulation (bsnes) partway through the
-investigation. Two known remaining gaps: the map's "fast travel" modifier
-(X or Y held while moving, for a bigger/faster scroll jump) is not yet
-fixed, and the View screen's D-pad now genuinely updates its underlying
-WRAM state (confirmed live) but nothing visible changes on screen yet --
-see "Open items" at the bottom for both.
+investigation. The map's "fast travel" modifier (B or X held while
+moving, for a bigger/faster scroll jump) is now **also fixed** -- see
+"Fast travel" below. One known remaining gap: the View screen's D-pad
+now genuinely updates its underlying WRAM state (confirmed live) but
+nothing visible changes on screen yet -- see "Open items" at the bottom.
 
 ## Root cause
 
@@ -219,10 +219,23 @@ Two different techniques, used together:
   `ppmdiff.py`) still current; see "Pitfalls" above for `dis65816.py`'s
   known SEP/REP tracking gap.
 
-## Fast travel: root cause found (with live bsnes tracing), fix not yet attempted
+## Fast travel: FIXED
 
-**Status: broken, root cause identified and confirmed live in this
-recomp specifically -- not yet fixed.** Everything below this point
+**Status: fixed and confirmed end-to-end.** See "Resolution" below for
+the final root cause and fix -- it turned out to be neither the
+mechanism nor the modifier button described in the investigation history
+immediately below, both of which were reasonable conclusions from live
+tracing at the time but didn't survive a later, more controlled test.
+Keeping the full history rather than deleting it, since the dead ends
+are informative about how not to chase this class of bug (see "Method
+note" further down) and about how even *live* tracing can mislead when
+the input source itself (a human hand on a keyboard) isn't fully
+controlled.
+
+### Investigation history (superseded, kept for the method-note value)
+
+**Status at the time: broken, root cause identified and confirmed live
+in this recomp specifically -- not yet fixed.** Everything below this point
 superseded a long chain of earlier static-only theories (dispatcher
 `$c5` reason codes, the `$d7` dispatcher-select state machine, a
 speculated `01:9dcc` task-scheduler) that all turned out to be dead
@@ -327,6 +340,102 @@ holding the fast-travel modifier, to see what runs *between* the
 correct-data moment (like frame 1421) and the next `01:c01e` check that
 reads it as zero.
 
+### Resolution
+
+The breakthrough was switching from live keyboard/bsnes testing to
+**fully deterministic** testing: numbered save-state slots (new
+`Shift+1..0`/`1..0` hotkeys, `--load-state`) let a specific scenario (on
+the map screen) be captured once, then `--input <frame>:<duration>:
+<hexmask>` reproduces an exact button hold with zero live-input timing
+jitter -- no human hand, no SDL polling gaps, no keyboard scan-rate
+limits.
+
+**First surprise**: with `$011b`/`$011c` genuinely held (via `--input`,
+not a physical key) and a dedicated write+read watch on both addresses
+(`SC_CADENCE_WATCH`, extended this session -- see "Tooling fixes"),
+`01:c01e` read the correct, nonzero value on *every single hit* across
+hundreds of frames. The "scheduling race" theory above -- that something
+clears `$011b` between the edge-detector's write and this periodic read
+-- does not reproduce under deterministic input. It's retracted; the
+original "always reads `$0000`" observation was very likely a live
+keyboard-timing artifact (a human can't hold two keys down with
+frame-perfect precision across a ~4-frame window), not a real bug.
+
+**Second surprise**: holding SNES Y+direction (via `--input`, mask
+`kPad_Y|kPad_Up`) never sets `$c5` to `1` -- it's `0` (no-op) or `2`
+(the Y-alone "toggle advisor" reason, unrelated to movement) instead.
+Re-deriving the `$011b`/`$011c` bit layout carefully against this
+project's *own* already-verified D-pad-fix comments (`src/main.c` lines
+~854-890, cross-checked across 9 real screens via interactive testing)
+settled it: `$011b` (low byte) = `B/Y/Select/Start/Up/Down/Left/Right`,
+`$011c` (high byte) = `A/X/L/R` + a hardware-dead low nibble. The
+`$011b AND #$4080` check that gates reason code `1` (at `01:8bd6`) tests
+bit 7 of the low byte (`$011b`, = **B**) and bit 6 of the high byte
+(`$011c`, = **X**) -- **B or X, not Y or A**. The "holding SNES Y or A
+fires `01:afc6`" claim earlier in this doc was a mislabeling from an
+earlier live bsnes session (this project has a long history of
+recomp-keymap-vs-bsnes-keymap and QWERTY/QWERTZ mixups -- see the
+"Errors and fixes" pattern throughout this session's own transcript);
+whatever that session actually held was very likely B or X, not Y/A.
+
+**Root cause, finally**: holding B/X+direction *does* reach `01:8d26`
+(reason 1, confirmed: `$c5`=1, 200/200 hits under a deterministic
+300-frame B+Up hold) -- but `01:8d26`'s own direction-nibble read, at
+`01:8d36`, has **the exact same "wrong nibble" bug** as the 8 sites this
+project's `main.c` D-pad fix already patches at load time, just in a
+different instruction shape that the original byte-pattern scan
+(`AD xx xx 29 00 0F`) didn't match:
+
+```
+01:8d36  LDA $011b     ; 16-bit: low=$011b, high=$011c
+01:8d39  SEP #$20      ; switch to 8-bit A
+01:8d3b  XBA           ; swap A's bytes -- A's low byte is now $011c
+01:8d3c  AND #$0f      ; tests $011c's low nibble -- hardware-dead, always 0
+01:8d3e  BEQ $8d8c     ; always taken
+01:8d40  STA $01c1     ; (unreached) would store the real direction nibble
+```
+
+The `XBA` after the 16-bit `LDA $011b` swaps `$011c` (the dead nibble)
+into the position the 8-bit `AND #$0f` tests, instead of `$011b` (where
+the real D-pad bits live). Since the `AND` is always zero, the `BEQ`
+always takes -- so `$01c1` never gets written and none of the 4
+per-direction handlers (`b2f9`/`b1f6`/`b166`/`b030`) ever run, for *any*
+held direction. `01:afbe` (the actual `$01bd`/`$01bf` scroll-increment
+bit-ladder, previously misdescribed as gating on "`$01c1` bit 0" when
+it's really a 4-bit ladder over `$01c1`'s low nibble) is downstream of
+this and never fires either -- not because of anything wrong with
+`$01c1`'s own read/gate logic, but because it never gets written in the
+first place.
+
+**Fix** (`src/main.c`, same D-pad-fix block, "Ninth site" comment): same
+technique as the other 8 sites -- repoint the `LDA $011b` at `01:8d36`
+to `LDA $011a`, so `$011a` (irrelevant, discarded by the `AND #$0f`
+after XBA) lands as the load's low byte and `$011b` lands as the high
+byte, which `XBA` then swaps into A's low byte where the existing,
+unmodified `AND #$0f`/`STA $01c1`/dispatch ladder already expects real
+direction bits.
+
+**Confirmed end-to-end** via the same deterministic method: holding
+B+Up now reaches `b2f9` (227/300 hits) and `01:afbe` (200/200 hits,
+trace budget cap), and `01:afd8` (`DEC $01bf`, Up's specific ladder
+rung) fires repeatedly; a WRAM dump before vs. ~13 hits later shows
+`$01bf`/`$01c0` (scroll-Y, 16-bit) going from `0x0006` to `0xfffa` --
+genuinely decrementing. B+Right similarly reaches `01:afc6` (90/300
+hits). Zero regression on the full 10800-frame `--qualify` baseline
+(identical `logic_changes`/`audio_samples`/`audio_active_frames`/
+`video_changes` to the numbers already documented in `README.md`).
+
+Whether real SNES Y/A are *also* supposed to trigger some form of fast
+travel through a different, still-unfound path is now a separate, lower-
+priority open question -- the `$011b AND #$4080` gate reads like a
+deliberate "B or X held" check (matching the same "deliberate
+non-direction gate" pattern already noted at `01:8958`/`01:8c68`/
+`02:a4ec` elsewhere in this file), not a bug, so there's no specific
+reason to expect a parallel Y/A path exists. The `01:8c55`
+second-dispatcher lead (gated on `$d7==1`) remains unconfirmed: a
+targeted scan of all 9 `STA $d7` sites in the ROM found none of them
+execute even once across 300 deterministic frames of held Y+direction.
+
 ### Method note: what actually worked vs. what didn't
 
 Every static-only theory this session produced (the `$c5` dispatcher
@@ -362,6 +471,23 @@ reaching for early next time rather than as a last resort.
   above: a live snapshot at a specific instant, cross-referenced against
   `SC_ADDR_TRACE` hits in the *same* session, showed `$011b` holding
   correct data at a moment the periodic trace never landed on.
+- `SC_CADENCE_WATCH`'s write-side watch now also covers `$011b`/`$011c`
+  themselves (previously only the mouse-cursor bytes), paired with the
+  existing read-side watch on the same two addresses -- one run now
+  shows every read *and* write to both bytes, in order, across
+  consecutive frames. This is the concrete tool the "next step" above
+  calls for (a live trace of every write site touching `$011b`, not just
+  the known `92c7` one), to find what clears it between the
+  edge-detector's write and `01:c01e`'s once-every-~4-frames read.
+- Added numbered save-state slots (**Shift+1..Shift+0** to save,
+  **1..0** to load, see the README controls table) plus a headless
+  `--load-state <path>` flag. Captures the full emulator snapshot (WRAM +
+  CPU registers + every device model, via the shared runner's own
+  `snes_saveload`/`interp816_saveload`) so a specific scenario -- on the
+  map screen, cursor visible, nothing else held -- can be set up once by
+  hand and then reloaded instantly and deterministically for repeated
+  fast-travel testing, instead of re-navigating menus or guessing
+  `--input` timing on every run.
 
 ## Open item: View screen's D-pad has no visible effect yet
 
