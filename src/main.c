@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 
 #include <SDL.h>
 
@@ -508,7 +509,28 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * automatically, without needing Tab held. Also covers the Nintendo
  * LC_LZ5-style decompressor at 00:90dd (confirmed live: fires repeatedly
  * during the same map/scenario-load wait, decompressing tile/text data --
- * see tools/extract_graphics.py and docs/REFERENCE_third_party_optimization_patch.md). */
+ * see tools/extract_graphics.py and docs/REFERENCE_third_party_optimization_patch.md).
+ *
+ * DEFAULT OFF as of the settings-menu work -- this fired during ordinary
+ * gameplay, not just the load screen, and the resulting intermittent 6x
+ * bursts made the game feel rough and badly worsened the known
+ * fast-forward audio-delay problem (see the revert note in the main loop).
+ * Measured with SC_ADDR_TRACE on the three trigger PCs against real
+ * gameplay save states: on the classic map screen it fired sporadically
+ * (~4 times in 2000 frames, each arming a 20-frame boost), but on the
+ * View screen it fired roughly every 10-13 frames -- i.e. that screen sat
+ * in effectively *continuous* turbo, since each hit re-arms the holdoff
+ * before the previous one expires.
+ *
+ * Root cause of the false positives: 00:824b is the shared checksum/hash
+ * accumulator, not map-generation-specific code -- the game calls it
+ * during normal simulation too. It's also redundant as a trigger, since
+ * 03:d862 (the map-gen loop that calls it) is itself already a trigger,
+ * so it's dropped from the trigger set entirely rather than merely gated.
+ * The two remaining triggers are genuinely load-specific. Toggle the
+ * feature from the F10 settings menu ("AUTO TURBO ON LOAD"); Tab-held
+ * manual fast-forward is unaffected either way. */
+static bool s_auto_turbo_enabled; /* off by default -- see above */
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
 #define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
 
@@ -519,8 +541,8 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
-    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x824b) ||
-        (cpu->k == 0x00 && cpu->pc == 0x90dd))
+    if (s_auto_turbo_enabled &&
+        ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd)))
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
     if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame && s_addr_trace_armed) {
       uint32_t pc = ((uint32_t)cpu->k << 16) | cpu->pc;
@@ -599,6 +621,34 @@ static bool write_ppm(const char *path) {
     if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); return false; }
   }
   return fclose(f) == 0;
+}
+
+/* Dumps the actual composited SDL renderer output (game frame + any host
+ * overlay drawn on top, e.g. the settings menu) rather than just the raw
+ * SNES framebuffer write_ppm() above captures -- used by SC_MENU_PREVIEW
+ * (see main()) for headless visual verification of overlay UI, the same
+ * kind of screenshot a windowed browser dev-tools check gives for web UI,
+ * which this native SDL window otherwise has no equivalent of. */
+static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
+  int w = 0, h = 0;
+  SDL_GetRendererOutputSize(renderer, &w, &h);
+  if (w <= 0 || h <= 0) return false;
+  uint32_t *buf = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
+  if (!buf) return false;
+  bool ok = SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, buf, w * 4) == 0;
+  if (ok) {
+    FILE *f = fopen(path, "wb");
+    if (f) {
+      fprintf(f, "P6\n%d %d\n255\n", w, h);
+      for (int i = 0; i < w * h; i++) {
+        uint8_t rgb[3] = { (uint8_t)(buf[i] >> 16), (uint8_t)(buf[i] >> 8), (uint8_t)buf[i] };
+        if (fwrite(rgb, 1, 3, f) != 3) { ok = false; break; }
+      }
+      ok = fclose(f) == 0 && ok;
+    } else ok = false;
+  }
+  free(buf);
+  return ok;
 }
 
 static bool write_wram_dump(const char *path) {
@@ -732,6 +782,42 @@ static bool queue_debug_menu_code(uint64_t start_frame) {
   return true;
 }
 
+/* SC_FREEZE=<addr>:<val>[,<addr>:<val>...] -- hold WRAM bytes at fixed
+ * values every frame, the same thing a bsnes "freeze"/cheat does. Both
+ * addresses and values are hex; addresses are WRAM offsets (so $7e01ed is
+ * just `1ed`). Applied once per emulated frame, so it survives the ROM
+ * rewriting the byte itself -- unlike a one-shot poke after --load-state.
+ *
+ * This exists because "is byte X the thing gating behaviour Y?" keeps
+ * being the decisive question in this project's investigations, and until
+ * now the only ways to answer it were a ROM byte-patch (changes the code,
+ * not the state) or asking the user to drive bsnes by hand. */
+#define SC_FREEZE_MAX 16
+static struct { uint32_t addr; uint8_t val; } s_freezes[SC_FREEZE_MAX];
+static int s_freeze_count;
+
+static void parse_freezes(const char *spec) {
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%s", spec);
+  for (char *tok = strtok(buf, ","); tok && s_freeze_count < SC_FREEZE_MAX;
+       tok = strtok(NULL, ",")) {
+    unsigned a = 0, v = 0;
+    if (sscanf(tok, "%x:%x", &a, &v) == 2 && a < sizeof(g_ram)) {
+      s_freezes[s_freeze_count].addr = a;
+      s_freezes[s_freeze_count].val = (uint8_t)v;
+      s_freeze_count++;
+      fprintf(stderr, "freeze: $%05x = %02x\n", a, v);
+    } else {
+      fprintf(stderr, "freeze: bad spec '%s' (want hexaddr:hexval)\n", tok);
+    }
+  }
+}
+
+static void apply_freezes(void) {
+  for (int i = 0; i < s_freeze_count; i++)
+    g_ram[s_freezes[i].addr] = s_freezes[i].val;
+}
+
 static void apply_frame_input(uint64_t frame) {
   uint16_t input = 0;
   for (uint32_t i = 0; i < s_input_event_count; i++) {
@@ -800,6 +886,229 @@ static void apply_mouse_delta(int dx, int dy) {
   g_ram[0x01ed] = (uint8_t)y;
 }
 
+/* ── minimal in-game settings menu ───────────────────────────────────────
+ * Follows the pattern researched from ar-recomp (ActRaiser recomp)'s
+ * settings_overlay.c/settings.c/config.c (see task #20/#34): a single
+ * descriptor table (SettingDesc[]) drives a generic renderer/input
+ * handler instead of hand-coding a screen per toggle, and the menu is a
+ * pure host-side SDL overlay drawn after the game's own frame is already
+ * composited -- it never touches SNES VRAM/PPU state directly (only the
+ * settings' own target fields, which the game already reads every frame
+ * regardless of whether this menu exists). While open, run_one_frame() is
+ * skipped and the last rendered game frame is simply re-presented every
+ * host iteration, the same freeze-and-redraw approach ar-recomp's own
+ * overlay uses.
+ *
+ * ar-recomp's own overlay decodes the ROM's actual dialog font/frame
+ * graphics for an in-theme look -- skipped here as purely cosmetic
+ * ActRaiser-specific work (not something SimCity's ROM has an equivalent
+ * of anyway). This uses a small hand-authored 3x5 bitmap font instead,
+ * the same kind of fallback ar-recomp itself falls back to when ROM font
+ * decoding isn't available. It only covers the character set this menu's
+ * own labels currently use -- add glyphs to kFont as new labels need
+ * them. Not yet ported from ar-recomp's design: the Int/Enum setting
+ * kinds (nothing here needs a ranged/enumerated value yet), the
+ * apply-kind taxonomy (every setting here is effectively PASSIVE --  the
+ * game already polls these fields itself every frame), and settings.ini
+ * persistence (all of these already persist their own way, e.g. save
+ * states, or are meant to be session-only toggles like the cheats). */
+
+typedef enum { kSettingBool, kSettingBit, kSettingAction } SettingKind;
+
+typedef struct {
+  const char *label;
+  SettingKind kind;
+  void *field;           /* bool* (kSettingBool) or uint8_t* (kSettingBit) */
+  uint8_t mask;           /* kSettingBit only */
+  void (*action)(void);   /* kSettingAction only */
+} SettingDesc;
+
+static bool setting_get(const SettingDesc *d) {
+  switch (d->kind) {
+    case kSettingBool: return *(bool *)d->field;
+    case kSettingBit:  return (*(uint8_t *)d->field & d->mask) != 0;
+    default: return false;
+  }
+}
+
+static void setting_activate(SettingDesc *d) {
+  switch (d->kind) {
+    case kSettingBool: *(bool *)d->field = !*(bool *)d->field; break;
+    case kSettingBit:  *(uint8_t *)d->field ^= d->mask; break;
+    case kSettingAction: if (d->action) d->action(); break;
+  }
+}
+
+static void menu_action_save_slot1(void) {
+  if (save_state("savestate_1.bin"))
+    fprintf(stderr, "[menu] saved slot 1 -> savestate_1.bin at frame %llu\n",
+            (unsigned long long)s_frames);
+  else
+    fprintf(stderr, "[menu] failed to save slot 1\n");
+}
+
+static void menu_action_load_slot1(void) {
+  if (load_state("savestate_1.bin"))
+    fprintf(stderr, "[menu] loaded slot 1 <- savestate_1.bin, now at frame %llu\n",
+            (unsigned long long)s_frames);
+  else
+    fprintf(stderr, "[menu] failed to load slot 1 (not saved yet?)\n");
+}
+
+/* This table is the whole "extension" mechanism, mirroring ar-recomp's own
+ * randomizer/HD-replacements pattern: each row is one self-contained
+ * feature plugged in via a single field pointer or action callback, with
+ * no separate plugin/registration system needed. Adding a new toggle or
+ * action means adding one row here -- render_settings_menu() below never
+ * needs to change. */
+static SettingDesc s_settings[] = {
+  /* Labels are kept short enough that the longest one plus its ON/OFF
+   * value still fits the menu box at the current font size -- see
+   * render_settings_menu()'s width math. */
+  { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL },
+  { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL },
+  { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL },
+  { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL },
+  { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL },
+  { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL },
+  { "CHEAT WATER",           kSettingBit,  &g_ram[0x0425],         0x08, NULL },
+  { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1 },
+  { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1 },
+};
+#define kSettingCount (sizeof(s_settings) / sizeof(s_settings[0]))
+
+static bool s_menu_open;
+static int s_menu_selected;
+
+/* SC_MENU_PREVIEW=1: force the settings menu open from frame 1, let a
+ * handful of iterations render (so the window/renderer is definitely
+ * live), dump the composited output to menu_preview.ppm via
+ * write_renderer_ppm(), then exit -- headless visual verification of the
+ * overlay UI without needing to click into the actual window. */
+static bool s_menu_preview;
+static int s_menu_preview_countdown = 5;
+
+/* 5x5 bitmap font, one row per byte (bit4=leftmost col .. bit0=rightmost).
+ * Coarse but complete for A-Z/0-9, so a label can't silently render a
+ * blank for a glyph nobody added yet.
+ *
+ * The width went 3 -> 4 -> 5 over three rounds of SC_MENU_PREVIEW
+ * screenshot review, each time because letters with interior diagonal
+ * strokes were unreadable at the narrower size and *only* the rendered
+ * image showed it: at 3 wide 'N' read as an hourglass, and at 4 wide both
+ * 'M' and 'W' collapsed into something indistinguishable from 'H' (so
+ * "MOUSE" read as "HOUSE" and "MONEY" as "HONEY"). 5 is the first width
+ * where M/N/W each get a real interior stroke with a blank column on
+ * either side. Don't narrow this again without re-checking the preview. */
+typedef struct { char ch; uint8_t rows[5]; } FontGlyph;
+static const FontGlyph kFont[] = {
+  {' ', {0,0,0,0,0}},
+  {'0', {14,17,17,17,14}}, {'1', {4,12,4,4,14}},   {'2', {14,17,2,4,31}},
+  {'3', {30,1,14,1,30}},   {'4', {17,17,31,1,1}},  {'5', {31,16,30,1,30}},
+  {'6', {14,16,30,17,14}}, {'7', {31,1,2,4,8}},    {'8', {14,17,14,17,14}},
+  {'9', {14,17,15,1,14}},
+  {'A', {14,17,31,17,17}}, {'B', {30,17,30,17,30}}, {'C', {15,16,16,16,15}},
+  {'D', {30,17,17,17,30}}, {'E', {31,16,30,16,31}}, {'F', {31,16,30,16,16}},
+  {'G', {15,16,19,17,15}}, {'H', {17,17,31,17,17}}, {'I', {31,4,4,4,31}},
+  {'J', {7,2,2,18,12}},    {'K', {17,18,28,18,17}}, {'L', {16,16,16,16,31}},
+  {'M', {17,27,21,17,17}}, {'N', {17,25,21,19,17}}, {'O', {14,17,17,17,14}},
+  {'P', {30,17,30,16,16}}, {'Q', {14,17,21,18,13}}, {'R', {30,17,30,18,17}},
+  {'S', {15,16,14,1,30}},  {'T', {31,4,4,4,4}},     {'U', {17,17,17,17,14}},
+  {'V', {17,17,17,10,4}},  {'W', {17,17,21,27,17}}, {'X', {17,10,4,10,17}},
+  {'Y', {17,10,4,4,4}},    {'Z', {31,2,4,8,31}},
+};
+#define kFontCount (sizeof(kFont) / sizeof(kFont[0]))
+
+static const uint8_t *font_glyph_rows(char c) {
+  for (size_t i = 0; i < kFontCount; i++)
+    if (kFont[i].ch == c) return kFont[i].rows;
+  return kFont[0].rows; /* unknown char -> blank */
+}
+
+/* Draws text at (x,y) in real renderer pixels, each font pixel drawn as a
+ * `px`x`px` filled square. Uppercases input so call sites can write labels
+ * in whatever case is convenient. */
+static void draw_text(SDL_Renderer *renderer, int x, int y, int px, const char *s) {
+  int cx = x;
+  for (const char *p = s; *p; p++) {
+    char c = (char)toupper((unsigned char)*p);
+    const uint8_t *rows = font_glyph_rows(c);
+    for (int row = 0; row < 5; row++)
+      for (int col = 0; col < 5; col++)
+        if (rows[row] & (1 << (4 - col))) {
+          SDL_Rect r = { cx + col * px, y + row * px, px, px };
+          SDL_RenderFillRect(renderer, &r);
+        }
+    cx += 6 * px; /* 5 cols of glyph + 1 col of spacing */
+  }
+}
+
+static int text_width(int px, const char *s) {
+  int n = (int)strlen(s);
+  return n > 0 ? n * 6 * px - px : 0;
+}
+
+static void render_settings_menu(SDL_Renderer *renderer) {
+  int out_w = 0, out_h = 0;
+  SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+
+  const int px = 4;            /* font pixel size, in real screen pixels */
+  const int line_h = 6 * px;   /* glyph height (5) + 1 row of spacing */
+  const int pad = 3 * px;
+  int menu_w = out_w * 3 / 4;
+  int menu_h = pad * 2 + line_h * ((int)kSettingCount + 6 + (s_menu_preview ? 4 : 0));
+  int menu_x = (out_w - menu_w) / 2;
+  int menu_y = (out_h - menu_h) / 2;
+
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+  SDL_Rect bg = { menu_x, menu_y, menu_w, menu_h };
+  SDL_RenderFillRect(renderer, &bg);
+  SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+  SDL_RenderDrawRect(renderer, &bg);
+
+  int ty = menu_y + pad;
+  draw_text(renderer, menu_x + pad, ty, px, "SETTINGS");
+  ty += line_h * 2;
+
+  for (size_t i = 0; i < kSettingCount; i++) {
+    SettingDesc *d = &s_settings[i];
+    bool selected = ((int)i == s_menu_selected);
+    SDL_SetRenderDrawColor(renderer, 255, selected ? 255 : 255, selected ? 0 : 255, 255);
+    draw_text(renderer, menu_x + pad, ty, px, d->label);
+    if (d->kind != kSettingAction) {
+      const char *val = setting_get(d) ? "ON" : "OFF";
+      int label_w = text_width(px, d->label);
+      draw_text(renderer, menu_x + pad + label_w + 8 * px, ty, px, val);
+    }
+    ty += line_h;
+  }
+
+  ty += line_h / 2;
+  SDL_SetRenderDrawColor(renderer, 180, 180, 180, 255);
+  draw_text(renderer, menu_x + pad, ty, px - 1, "UP DOWN SELECT");
+  ty += line_h - px;
+  draw_text(renderer, menu_x + pad, ty, px - 1, "ENTER TOGGLE");
+  ty += line_h - px;
+  draw_text(renderer, menu_x + pad, ty, px - 1, "F10 CLOSE");
+
+  /* Under SC_MENU_PREVIEW only: render the full glyph set so a single
+   * preview screenshot verifies every character, not just the ones the
+   * current labels happen to use. Two missing glyphs ('P', then 'B')
+   * already shipped as blanks precisely because nothing exercised them
+   * until a label needed them. */
+  if (s_menu_preview) {
+    ty += line_h;
+    draw_text(renderer, menu_x + pad, ty, px - 1, "ABCDEFGHIJKLM");
+    ty += line_h - px;
+    draw_text(renderer, menu_x + pad, ty, px - 1, "NOPQRSTUVWXYZ");
+    ty += line_h - px;
+    draw_text(renderer, menu_x + pad, ty, px - 1, "0123456789");
+  }
+
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
 /* ── generic activity qualification (--qualify N): the same pass/fail bar
  * as snesrecomp/cosim/ref_driver.c's standalone mode -- "goes through the
  * attract demo without logic, video, or audio errors" made concrete and
@@ -826,6 +1135,7 @@ static int run_qualification(uint64_t frames) {
   uint64_t stall_run = 0, stall_max = 0;
   for (uint64_t f = 0; f < frames; f++) {
     apply_frame_input(f);
+    apply_freezes();
     if (!run_one_frame()) {
       fprintf(stderr, "qualify: opcode guard tripped at frame %llu (hang/runaway)\n",
               (unsigned long long)f);
@@ -982,6 +1292,9 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_ADDR_TRACE"); if (e && *e) parse_addr_trace(e); }
   { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
+  { const char *e = getenv("SC_MENU_PREVIEW");
+    if (e && *e) { s_menu_preview = true; s_menu_open = true; } }
+  { const char *e = getenv("SC_FREEZE"); if (e && *e) parse_freezes(e); }
   { const char *e = getenv("SC_PC_BITMAP_BANK");
     if (e && *e) s_pc_bitmap_bank = !strcmp(e, "all") ? -2 : (int)strtol(e, NULL, 16); }
   { const char *e = getenv("SC_PC_BITMAP_START"); if (e && *e) s_pc_bitmap_start_frame = strtoull(e, NULL, 0); }
@@ -1638,6 +1951,30 @@ int main(int argc, char **argv) {
         s_fast_cursor_enabled = !s_fast_cursor_enabled;
         fprintf(stderr, "[F9] fast D-pad cursor %s\n", s_fast_cursor_enabled ? "ON" : "OFF");
       }
+      /* F10: settings menu (see the "minimal in-game settings menu" block
+       * above) -- toggles a host-side overlay listing this project's
+       * existing toggles/actions in one generic, table-driven list instead
+       * of each needing its own memorized hotkey. */
+      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F10 && !ev.key.repeat) {
+        s_menu_open = !s_menu_open;
+        fprintf(stderr, "[F10] settings menu %s\n", s_menu_open ? "OPEN" : "CLOSED");
+      }
+      if (s_menu_open && ev.type == SDL_KEYDOWN) {
+        switch (ev.key.keysym.scancode) {
+          case SDL_SCANCODE_UP:
+            s_menu_selected = (s_menu_selected - 1 + (int)kSettingCount) % (int)kSettingCount;
+            break;
+          case SDL_SCANCODE_DOWN:
+            s_menu_selected = (s_menu_selected + 1) % (int)kSettingCount;
+            break;
+          case SDL_SCANCODE_RETURN:
+          case SDL_SCANCODE_LEFT:
+          case SDL_SCANCODE_RIGHT:
+            setting_activate(&s_settings[s_menu_selected]);
+            break;
+          default: break;
+        }
+      }
       /* F4: dump WRAM to a fixed path right now, on demand -- for pinning
        * down exact WRAM byte values at a precise live moment (e.g. hold a
        * button combo, press F4, inspect $7e011b/$7e011c directly) instead
@@ -1762,6 +2099,7 @@ int main(int argc, char **argv) {
      * confirm, without needing to reach for Y/Z). */
     if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) input |= kPad_B;
     apply_frame_input(s_frames);
+    apply_freezes();
     g_snes->input1_currentState |= input;
 
     /* Fast-forward: hold Tab to simulate several SNES frames per rendered/
@@ -1784,22 +2122,30 @@ int main(int argc, char **argv) {
     const char *frame_time_thresh_env = getenv("SC_FRAME_TIME");
     uint64_t frame_t0 = frame_time_thresh_env ? SDL_GetPerformanceCounter() : 0;
 
+    /* While the settings menu is open, freeze the game -- skip advancing
+     * the emulator entirely and just keep re-presenting the last rendered
+     * frame every host iteration, same freeze-and-redraw approach ar-recomp's
+     * own settings overlay uses (see the menu block above). s_video_pixels
+     * (and therefore `texture` below) simply isn't touched this iteration,
+     * so whatever was last rendered stays on screen underneath the overlay. */
     bool guard_tripped = false;
-    for (int ffi = 0; ffi < frames_this_iter; ffi++) {
-      if (!run_one_frame()) {
-        fprintf(stderr, "frame %llu: opcode guard tripped (hang/runaway) -- stopping\n",
-                (unsigned long long)s_frames);
-        guard_tripped = true;
-        break;
-      }
-      /* Extra fast-forward frames still need input re-armed exactly like
-       * the top of this loop does every iteration: apply_frame_input()
-       * resets input1_currentState to 0 (or any scripted qualify-mode
-       * input) before the live keyboard state is OR'd back in -- skipping
-       * the reset here would let stale bits accumulate across frames. */
-      if (ffi + 1 < frames_this_iter) {
-        apply_frame_input(s_frames);
-        g_snes->input1_currentState |= input;
+    if (!s_menu_open) {
+      for (int ffi = 0; ffi < frames_this_iter; ffi++) {
+        if (!run_one_frame()) {
+          fprintf(stderr, "frame %llu: opcode guard tripped (hang/runaway) -- stopping\n",
+                  (unsigned long long)s_frames);
+          guard_tripped = true;
+          break;
+        }
+        /* Extra fast-forward frames still need input re-armed exactly like
+         * the top of this loop does every iteration: apply_frame_input()
+         * resets input1_currentState to 0 (or any scripted qualify-mode
+         * input) before the live keyboard state is OR'd back in -- skipping
+         * the reset here would let stale bits accumulate across frames. */
+        if (ffi + 1 < frames_this_iter) {
+          apply_frame_input(s_frames);
+          g_snes->input1_currentState |= input;
+        }
       }
     }
     if (guard_tripped) break;
@@ -1862,7 +2208,26 @@ int main(int argc, char **argv) {
      * same pacing model as snesrecomp/cosim/ref_driver.c's deterministic
      * consumer, queued to the SDL audio device instead of discarded. */
     if (audio_dev) {
-      audio_acc += (double)have.freq / 60.0988;
+      /* Don't accrue playback debt for wall-clock time the emulator wasn't
+       * actually running: while the settings menu is open no frames are
+       * simulated, so no samples are produced and there is nothing to pace
+       * against. (This is the immediate half of the fix below.) */
+      if (!s_menu_open) audio_acc += (double)have.freq / 60.0988;
+      /* Hard-clamp the accumulator to exactly the drain condition's upper
+       * bound, which is also audio_buf's capacity. Without this, ANY stall
+       * of two or more host iterations where the ring hasn't refilled --
+       * menu open, a slow frame, an ordinary underrun -- pushes audio_acc
+       * past 1024 and the `wantN <= 1024` test below then fails forever,
+       * since audio_acc is only ever decremented *inside* that branch.
+       * That's a self-latching permanent-silence trap: two bad frames and
+       * sound never returns for the rest of the session, with no error and
+       * no recovery path. Clamping converts it into what an underrun
+       * should be -- a brief dropout that self-corrects on the next frame.
+       * (Found via the F10 menu, which reproduced it every single time by
+       * construction; it is a pre-existing bug the menu merely made
+       * trivial to hit, and a strong candidate for the long-standing
+       * intermittent audio complaints tracked separately.) */
+      if (audio_acc > 1024.0) audio_acc = 1024.0;
       int wantN = (int)audio_acc;
       Dsp *dsp = g_snes->apu->dsp;
       uint32_t available = dsp->sampleWrite - dsp->sampleRead;
@@ -1901,6 +2266,15 @@ int main(int argc, char **argv) {
     SDL_UnlockTexture(texture);
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, texture, NULL, NULL);
+    if (s_menu_open) render_settings_menu(renderer);
+
+    if (s_menu_preview && --s_menu_preview_countdown <= 0) {
+      if (write_renderer_ppm(renderer, "menu_preview.ppm"))
+        fprintf(stderr, "[SC_MENU_PREVIEW] dumped menu_preview.ppm\n");
+      else
+        fprintf(stderr, "[SC_MENU_PREVIEW] failed to dump menu_preview.ppm\n");
+      quit = true;
+    }
 
     next_frame_deadline += (uint64_t)(kTargetFrameSeconds * (double)SDL_GetPerformanceFrequency());
     uint64_t now = SDL_GetPerformanceCounter();

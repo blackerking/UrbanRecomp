@@ -51,3 +51,4 @@ wram_snapshot.bin
 # snapshots derived from the copyrighted ROM's runtime state, generated
 # locally per-debugging-session
 savestate_*.bin
+menu_preview.ppm

@@ -156,6 +156,7 @@ shared `snesrecomp` runtime needed).
 | Cheat: Water Reclaim (toggle, unconfirmed bit) | F8 |
 | Save state to slot 1-9/0 | Shift+1 .. Shift+9, Shift+0 |
 | Load state from slot 1-9/0 | 1 .. 9, 0 |
+| Settings menu (toggle) | F10 |
 
 Save states (`savestate_<digit>.bin`, gitignored) capture the full emulator
 state -- WRAM, CPU registers, and every device model -- so a specific
@@ -201,11 +202,38 @@ can offer since it isn't limited to 8 controller inputs:
   this just adds extra host-driven movement on top for the main-map
   cursor specifically. Off by default; same "not authentic ROM timing"
   caveat as F3.
+- **F10** opens a settings menu (host-side overlay, not an SNES screen)
+  listing this project's own toggles/cheats/save-load actions in one
+  generic list -- Up/Down to select, Left/Right/Enter to toggle or
+  activate, F10 again to close. The game freezes while it's open (the
+  last frame just stays on screen). Pattern researched from ar-recomp
+  (ActRaiser recomp)'s settings system: a single table of
+  label/type/target-pointer rows drives a generic renderer/input handler
+  instead of one hand-coded screen per setting, so adding a new toggle
+  later is one line in `src/main.c`'s `s_settings[]`, not a new UI. Covers
+  a handful of existing toggles for now (mouse cursor, fast cursor, auto
+  turbo, the four debug cheat bits, save/load slot 1); everything else
+  above still needs its own hotkey.
 
 Map/scenario loading ("Please wait...") does genuine procedural
 generation work rather than an artificial delay, so it isn't
 patched out -- hold fast-forward (Tab) while it's on screen to blow
 through it in a couple seconds instead.
+
+There used to be an *automatic* fast-forward that detected the load
+screen and applied the same speed-up without Tab. It's now **off by
+default** ("AUTO TURBO" in the F10 menu re-enables it), because one of
+its three trigger addresses (`00:824b`) turned out to be the game's
+shared checksum/hash routine rather than map-generation-specific code,
+so it also fired during ordinary play -- each hit arming a 20-frame 6x
+burst. Measured with `SC_ADDR_TRACE` against real gameplay save states:
+sporadic on the classic map screen (~4 hits per 2000 frames), but
+roughly every 10-13 frames on the View screen, i.e. that screen sat in
+effectively continuous turbo. That made the game feel rough and badly
+worsened the known fast-forward audio-delay problem. `00:824b` has also
+been dropped from the trigger set entirely (it was redundant anyway --
+`03:d862`, the map-gen loop that *calls* it, is itself a trigger), so
+the feature behaves sanely if switched back on.
 
 ## Next phase: AOT/CpuState hybrid tier
 
