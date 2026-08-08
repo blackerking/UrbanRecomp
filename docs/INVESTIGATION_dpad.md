@@ -489,9 +489,122 @@ reaching for early next time rather than as a last resort.
   fast-travel testing, instead of re-navigating menus or guessing
   `--input` timing on every run.
 
-## View screen's D-pad: one real bug fixed, but still not visibly moving (open)
+## View screen's D-pad: FIXED -- 10th site in the dead-nibble family (`01:8c6b`)
 
-**Status: partially resolved.** The `$7e21b5` stomping bug described below
+**This is the fix that actually made the View screen respond to the
+D-pad.** It is separate from, and supersedes in practical importance, the
+sprite-109 cursor dead-end documented immediately below (which remains
+accurate: that *cursor* is still unrenderable -- but the cursor was never
+what "moving the View screen" meant).
+
+User report that cracked it: on this recomp the View screen scrolled only
+while holding B or X, whereas *the original cartridge scrolls on the
+D-pad alone*. That points at `01:8c68`, which computes the reason code
+stored to `$c5` -- the value that selects the `01:8d26` dispatcher, whose
+tail `01:afe0` writes the real PPU scroll `$0137`/`$0139`:
+
+```
+01:8c68  AD 1B 01   LDA $011b      ; 16-bit: low = $011b, high = $011c
+01:8c6b  29 80 4F   AND #$4f80
+01:8c6e  F0 05      BEQ $8c75
+01:8c70  A9 01 00   LDA #$0001     ; reason code 1
+```
+
+Decomposing the mask:
+
+| term | tests | real? |
+|---|---|---|
+| `$0080` | `$011b` bit 7 = B | yes |
+| `$4000` | `$011c` bit 6 = X | yes |
+| `$0f00` | `$011c` bits 0-3 | **no -- hardware-dead nibble** |
+
+That `$0f00` term is this ROM's D-pad-bug signature. The author plainly
+meant "B **or** X **or any direction**", but the direction bits live in
+`$011b` bits 0-3 -- the *low* byte -- so the term is structurally dead and
+only B/X ever set the reason code. These notes previously dismissed this
+site as "a deliberate non-direction gate ... left alone"; the `$0f00`
+term is what makes that reading untenable.
+
+**Fix:** widen the mask's low half, `AND #$4f80` -> `AND #$4f8f`, so
+`$011b` bits 0-3 also satisfy it. One byte (file offset `0x8c6c`).
+Deliberately *not* the usual `$011b`->`$011a` shift used elsewhere in this
+family: that would move B's `$0080` test onto `$011a` and X's onto `$011b`
+bit 6 (Y), breaking both real button checks.
+
+Verified with `--load-state` + `--input` against the View screen save
+state (reason code `$c5` now becomes 1 for a bare direction, and the real
+scroll registers move):
+
+| input | `$0137` | `$0139` | `$c5` |
+|---|---|---|---|
+| none  | `90` | `20` | `00` |
+| up    | `d8` | `20` | `01` |
+| down  | `58` | `20` | `01` |
+| left  | `90` | `c8` | `01` |
+| right | `90` | `d8` | `01` |
+
+Screenshots confirm the tilted map visibly scrolls in all four
+directions with the perspective and desk framing intact. Scope is
+correct: `01:8c68` is only reached via `01:8c55`, the `$d7`==1
+dispatcher, so the normal map screen (`$d7`==0, which routes through
+`01:c0dd`) is untouched -- re-verified by injecting directions into the
+normal-map save state and confirming `$c5`, scroll and cursor all behave
+exactly as before. `--qualify 400` still passes.
+
+## View screen's *cursor sprite*: unrenderable by construction (separate dead end)
+
+**Status: closed.** The position data is live and (mostly) correct; there
+is simply no sprite for it to draw. Established by loading the View
+screen save state and injecting each direction deterministically
+(`--load-state` + `--input`), then reading sprite 109's *entire* OAM
+shadow entry rather than only the two position bytes:
+
+| input | X (`$21b4`) | Y (`$21b5`) | tile (`$21b6`) | attr (`$21b7`) | X-high |
+|---|---|---|---|---|---|
+| none  | `80` | `e0` | `00` | `00` | 1 |
+| left  | `d8` | `e0` | `00` | `00` | 1 |
+| right | `28` | `e0` | `00` | `00` | 1 |
+| down  | `80` | `d0` | `00` | `00` | 1 |
+
+These are end-of-frame values -- precisely what DMA channel 0 copies to
+real OAM -- so they are what the PPU actually sees. Two independent,
+individually sufficient reasons the cursor can never appear:
+
+1. **`tile=$00`, `attr=$00`**: no cursor graphic is ever assigned to
+   sprite 109. It draws tile 0 with palette 0.
+2. **X-high = 1** (bit 2 of the high-OAM byte `$221b`, set every frame by
+   `00:c0fb`'s icon-rebuild loop via `AND #$03 / ORA #$54`): the sprite's
+   real X is `256 + $21b4` = 384-472, entirely off a 256-pixel screen.
+
+Sprites 124-127, previously suspected of being the "real" icon, are all
+`X=80 Y=e0 tile=00 attr=00` -- blank and parked. Freezing their `$0b03`
+gate to 1 (so `00:c189` stops re-hiding them) changes nothing on screen,
+confirming they are not the cursor either.
+
+**Conclusion:** the View screen's cursor is unfinished/vestigial in this
+ROM revision. `01:f189`/`f190`/`f19a`/`f1bf` faithfully compute and clamp
+a position into sprite 109's OAM slot, but nothing ever gives that slot a
+tile or brings it on-screen. This is not a recomp bug, and no host-side
+fix is warranted -- making it visible would mean *authoring* a cursor
+(assigning a tile, clearing the X-high bit), i.e. a new feature, not a
+correction. The `$7e21b5` stomp fix below remains correct and worth
+keeping (it makes the Up/Down value persist as designed); it was simply
+never sufficient, because the sprite was unrenderable regardless.
+
+**Secondary finding, left open:** Up is asymmetric with Down. Holding
+Down moves `$21b5` `e0`->`d0`, but holding Up leaves it at `e0`. Left and
+Right both work (`80`->`d8`/`28`). So the Up handler
+(`01:f19a`/`f1bf` region) has a real bug of its own -- currently moot,
+since nothing renders the result, but worth fixing if the cursor is ever
+given graphics.
+
+Everything from here down is the original investigation, kept for the
+reasoning trail (including two leads that looked right and were
+disproven).
+
+---
+
+**Earlier status: partially resolved.** The `$7e21b5` stomping bug described below
 is real, confirmed, and fixed -- `$7e21b5` now updates and persists
 exactly like `$7e21b4` always did. But live user testing after the fix
 still shows no clean visible movement, just flickering (matching the

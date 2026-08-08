@@ -1721,6 +1721,46 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dpad fix: 01:f0d3 site NOT patched (byte mismatch)\n");
       }
     }
+
+    /* View screen (and any other `$d7`==1 mode): make the D-pad alone
+     * scroll, not just B/X. `01:8c68` does `LDA $011b` (16-bit) `; AND
+     * #$4f80 ; BEQ ... ; LDA #$0001` -- the reason code stored to `$c5`
+     * that selects the `01:8d26` dispatcher, whose tail (`01:afe0`)
+     * writes the real PPU scroll `$0137`/`$0139`. Breaking the mask down
+     * against a 16-bit read of `$011b` (low byte `$011b`, high byte
+     * `$011c`):
+     *   $0080 -> $011b bit 7      = B          (real)
+     *   $4000 -> $011c bit 6      = X          (real)
+     *   $0f00 -> $011c bits 0-3   = the hardware-dead nibble
+     * That last term is this ROM's D-pad bug signature: the author
+     * plainly meant "B or X *or any direction*", but the direction bits
+     * live in `$011b` bits 0-3 -- the *low* byte -- so the term is
+     * structurally dead and only B/X ever set the reason code. Confirmed
+     * by user testing: on this recomp the View screen only scrolls while
+     * holding B or X, whereas the original cartridge scrolls on the
+     * D-pad alone.
+     *
+     * This site was previously (wrongly) dismissed in these notes as "a
+     * deliberate non-direction gate ... left alone" -- the `$0f00` term
+     * is what makes that reading untenable.
+     *
+     * Fix: widen the mask's low half, `AND #$4f80` -> `AND #$4f8f`, so
+     * `$011b` bits 0-3 (Right/Left/Down/Up) also satisfy it. One byte.
+     * Deliberately NOT the usual `$011b`->`$011a` shift used elsewhere in
+     * this family: that would move B's own `$0080` test onto `$011a` and
+     * X's onto `$011b` bit 6 (Y), breaking both real button checks. Only
+     * reached via `01:8c55`, i.e. the `$d7`==1 dispatcher, so the normal
+     * map screen (`$d7`==0, which routes through `01:c0dd` instead) is
+     * untouched. */
+    {
+      uint32_t off = 0x8c6c; /* 01:8c6b's immediate, low byte; bank 1 offset = addr */
+      if (off < rom_size && rom_data[off] == 0x80) {
+        rom_data[off] = 0x8f;
+        fprintf(stderr, "view fix: patched 01:8c6b AND #$4f80 -> AND #$4f8f (D-pad alone scrolls)\n");
+      } else {
+        fprintf(stderr, "view fix: 01:8c6b site NOT patched (byte mismatch)\n");
+      }
+    }
   }
 
   /* Cursor step-cadence speed tweak (docs/INVESTIGATION_cursor_cadence.md)
