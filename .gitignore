@@ -52,3 +52,9 @@ wram_snapshot.bin
 # locally per-debugging-session
 savestate_*.bin
 menu_preview.ppm
+
+# Local visual reference, kept for designing a future project logo. The
+# official SimCity wordmark is Maxis/Nintendo artwork, so it stays local
+# and is deliberately not distributed with this repository -- same
+# reasoning as the ROM and the save states above.
+logo.png
