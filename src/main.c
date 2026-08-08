@@ -869,7 +869,18 @@ static bool s_mouse_enabled;
  * patch it reuses (menu jank, no bounds-replication beyond the simple
  * clamp already in apply_mouse_delta) -- off by default. */
 static bool s_fast_cursor_enabled;
-enum { kFastCursorStep = 4 }; /* pixels/frame while a direction is held */
+/* Pixels/frame while a direction is held. Adjustable (F10 menu ->
+ * "CURSOR SPEED") rather than fixed, because the stock cursor's real
+ * pacing turns out to be the game's own cooperative scheduler and can't
+ * be tuned ROM-side: traced live, bank $03 (the city simulation) holds
+ * the CPU for ~4 consecutive frames at a time, during which the bank-1
+ * cursor dispatcher never runs at all, so the cursor steps its 2 pixels
+ * only on the bank-1 frames -- a 4-on/4-off duty cycle averaging ~1
+ * px/frame (~4s to cross the screen). That is authentic behaviour, not a
+ * recomp defect, and is presumably why the cartridge shipped with SNES
+ * Mouse support. This host-side nudge is the practical remedy. */
+static int s_fast_cursor_step = 4;
+static const int kFastCursorSteps[] = { 2, 4, 8, 16 };
 
 static void apply_mouse_delta(int dx, int dy) {
   if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
@@ -913,14 +924,16 @@ static void apply_mouse_delta(int dx, int dy) {
  * persistence (all of these already persist their own way, e.g. save
  * states, or are meant to be session-only toggles like the cheats). */
 
-typedef enum { kSettingBool, kSettingBit, kSettingAction } SettingKind;
+typedef enum { kSettingBool, kSettingBit, kSettingAction, kSettingCycle } SettingKind;
 
 typedef struct {
   const char *label;
   SettingKind kind;
-  void *field;           /* bool* (kSettingBool) or uint8_t* (kSettingBit) */
+  void *field;           /* bool* (Bool), uint8_t* (Bit), int* (Cycle) */
   uint8_t mask;           /* kSettingBit only */
   void (*action)(void);   /* kSettingAction only */
+  const int *values;      /* kSettingCycle only: allowed values, cycled in order */
+  int value_count;
 } SettingDesc;
 
 static bool setting_get(const SettingDesc *d) {
@@ -936,6 +949,13 @@ static void setting_activate(SettingDesc *d) {
     case kSettingBool: *(bool *)d->field = !*(bool *)d->field; break;
     case kSettingBit:  *(uint8_t *)d->field ^= d->mask; break;
     case kSettingAction: if (d->action) d->action(); break;
+    case kSettingCycle: {
+      int *v = (int *)d->field;
+      int i = 0;
+      for (; i < d->value_count; i++) if (d->values[i] == *v) break;
+      *v = d->values[(i + 1) % d->value_count]; /* not-found wraps to values[1] */
+      break;
+    }
   }
 }
 
@@ -965,15 +985,17 @@ static SettingDesc s_settings[] = {
   /* Labels are kept short enough that the longest one plus its ON/OFF
    * value still fits the menu box at the current font size -- see
    * render_settings_menu()'s width math. */
-  { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL },
-  { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL },
-  { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL },
-  { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL },
-  { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL },
-  { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL },
-  { "CHEAT WATER",           kSettingBit,  &g_ram[0x0425],         0x08, NULL },
-  { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1 },
-  { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1 },
+  { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
+  { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
+  { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
+    kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
+  { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
+  { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
+  { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
+  { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL, NULL, 0 },
+  { "CHEAT WATER",           kSettingBit,  &g_ram[0x0425],         0x08, NULL, NULL, 0 },
+  { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1, NULL, 0 },
+  { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1, NULL, 0 },
 };
 #define kSettingCount (sizeof(s_settings) / sizeof(s_settings[0]))
 
@@ -1077,7 +1099,14 @@ static void render_settings_menu(SDL_Renderer *renderer) {
     SDL_SetRenderDrawColor(renderer, 255, selected ? 255 : 255, selected ? 0 : 255, 255);
     draw_text(renderer, menu_x + pad, ty, px, d->label);
     if (d->kind != kSettingAction) {
-      const char *val = setting_get(d) ? "ON" : "OFF";
+      char numbuf[16];
+      const char *val;
+      if (d->kind == kSettingCycle) {
+        snprintf(numbuf, sizeof(numbuf), "%d", *(int *)d->field);
+        val = numbuf;
+      } else {
+        val = setting_get(d) ? "ON" : "OFF";
+      }
       int label_w = text_width(px, d->label);
       draw_text(renderer, menu_x + pad + label_w + 8 * px, ty, px, val);
     }
@@ -2105,10 +2134,10 @@ int main(int argc, char **argv) {
        * s_fast_cursor_enabled's comment above. Diagonal holds add both
        * axes, same as the ROM's own D-pad would. */
       int fdx = 0, fdy = 0;
-      if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_H]) fdx -= kFastCursorStep;
-      if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_K]) fdx += kFastCursorStep;
-      if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_U]) fdy -= kFastCursorStep;
-      if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_J]) fdy += kFastCursorStep;
+      if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_H]) fdx -= s_fast_cursor_step;
+      if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_K]) fdx += s_fast_cursor_step;
+      if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_U]) fdy -= s_fast_cursor_step;
+      if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_J]) fdy += s_fast_cursor_step;
       if (fdx || fdy) apply_mouse_delta(fdx, fdy);
     }
     uint16_t input = 0;
