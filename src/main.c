@@ -813,9 +813,26 @@ static void parse_freezes(const char *spec) {
   }
 }
 
+/* Scenario override: 0 = off, otherwise hold $0040 (the scenario index)
+ * at this value every frame. The Select Scenario screen can only produce
+ * indices 0-5 -- 03:de0e computes `$40 = $54*3 + $52`, a 2x3 grid -- but
+ * the ROM's own deadline table at $03c5b3 has EIGHT entries, and both
+ * extra scenarios are genuinely present in this ROM: index 6 is Las Vegas
+ * (start 2096, 10-year limit, deadline 2106), whose briefing screen,
+ * artwork and full text all load correctly once the index is forced;
+ * index 7 carries the sentinel deadline $ffff (no time limit) and the
+ * win/lose evaluator at 03:c548 deliberately returns without writing a
+ * result for it -- i.e. free play. Holding the index is exactly how the
+ * hidden scenario was confirmed, and is far less invasive than
+ * restructuring the selection grid. Set it, then start a scenario as
+ * normal. */
+static int s_scenario_override;
+static const int kScenarioOverrides[] = { 0, 6, 7 };
+
 static void apply_freezes(void) {
   for (int i = 0; i < s_freeze_count; i++)
     g_ram[s_freezes[i].addr] = s_freezes[i].val;
+  if (s_scenario_override) g_ram[0x0040] = (uint8_t)s_scenario_override;
 }
 
 static void apply_frame_input(uint64_t frame) {
@@ -989,6 +1006,8 @@ static SettingDesc s_settings[] = {
   { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
+  { "SCENARIO OVR",          kSettingCycle, &s_scenario_override,  0,    NULL,
+    kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])) },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
