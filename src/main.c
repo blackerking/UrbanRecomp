@@ -829,10 +829,58 @@ static void parse_freezes(const char *spec) {
 static int s_scenario_override;
 static const int kScenarioOverrides[] = { 0, 6, 7 };
 
+/* Population override, for exercising the population milestone messages.
+ * Population is 32-bit little-endian at $0BA5 (low word) + $0BA7 (high
+ * word) -- both halves matter, since the city-class ladder at 03:81d8
+ * tests the high word first. Held every frame while active, because the
+ * simulation rewrites population continuously and a one-shot poke would
+ * be overwritten before the milestone check next runs.
+ *
+ * -1 means off. 0 is a real selectable value (it is one of the levels
+ * worth testing), which is why "off" cannot just be 0 here.
+ *
+ * The values are the class thresholds from 03:81d8 -- 2000/10000/50000/
+ * 100000/500000 -- plus 600000, which is NOT a threshold in the ROM (no
+ * such constant exists in any encoding) but is included precisely so the
+ * claim can be tested in-game rather than argued from disassembly. */
+static int s_pop_override = -1;
+static const int kPopOverrides[] = { -1, 0, 2000, 10000, 50000, 100000, 500000, 600000 };
+
+/* City class override ($0deb, 0-5 = Village/Town/City/Capital/Metropolis/
+ * Megalopolis). This is what the milestone triggers actually test, and
+ * setting population alone does NOT move it: measured, $0deb stayed at 3
+ * for 2500 frames with population frozen at 500000. $0deb is persistent
+ * state rather than a per-frame derivation -- 03:c96e loads it from SRAM
+ * $700036 on save-load, and 03:ce94 seeds it per scenario from the table
+ * at $03cee9. The ladder at 03:81d8 that derives it from population runs
+ * only occasionally. So to exercise the milestone messages, drive this
+ * directly. -1 = off. */
+static int s_class_override = -1;
+static const int kClassOverrides[] = { -1, 0, 1, 2, 3, 4, 5 };
+
+/* The milestone messages are one-shot: each is guarded by a latch byte
+ * that the trigger increments when it fires (03:c350 -> $0cbd, 03:c369 ->
+ * $0cbf, 03:c3b4 -> $0cc1, 03:c396 -> $0cc3). Zeroing them re-arms every
+ * milestone so a message can be made to fire again on demand -- otherwise
+ * a population override only ever works once per session. */
+static void menu_action_clear_milestones(void) {
+  g_ram[0x0cbd] = 0; g_ram[0x0cbf] = 0;
+  g_ram[0x0cc1] = 0; g_ram[0x0cc3] = 0;
+  fprintf(stderr, "[menu] cleared milestone latches $0cbd/$0cbf/$0cc1/$0cc3\n");
+}
+
 static void apply_freezes(void) {
   for (int i = 0; i < s_freeze_count; i++)
     g_ram[s_freezes[i].addr] = s_freezes[i].val;
   if (s_scenario_override) g_ram[0x0040] = (uint8_t)s_scenario_override;
+  if (s_pop_override >= 0) {
+    uint32_t p = (uint32_t)s_pop_override;
+    g_ram[0x0ba5] = (uint8_t)p;
+    g_ram[0x0ba6] = (uint8_t)(p >> 8);
+    g_ram[0x0ba7] = (uint8_t)(p >> 16);
+    g_ram[0x0ba8] = (uint8_t)(p >> 24);
+  }
+  if (s_class_override >= 0) g_ram[0x0deb] = (uint8_t)s_class_override;
 }
 
 static void apply_frame_input(uint64_t frame) {
@@ -1013,6 +1061,11 @@ static SettingDesc s_settings[] = {
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
   { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL, NULL, 0 },
   { "CHEAT WATER",           kSettingBit,  &g_ram[0x0425],         0x08, NULL, NULL, 0 },
+  { "SET POP",               kSettingCycle, &s_pop_override,        0,    NULL,
+    kPopOverrides, (int)(sizeof(kPopOverrides) / sizeof(kPopOverrides[0])) },
+  { "SET CLASS",             kSettingCycle, &s_class_override,      0,    NULL,
+    kClassOverrides, (int)(sizeof(kClassOverrides) / sizeof(kClassOverrides[0])) },
+  { "CLR MILESTONE",         kSettingAction, NULL, 0, menu_action_clear_milestones, NULL, 0 },
   { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1, NULL, 0 },
   { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1, NULL, 0 },
 };
@@ -1121,8 +1174,13 @@ static void render_settings_menu(SDL_Renderer *renderer) {
       char numbuf[16];
       const char *val;
       if (d->kind == kSettingCycle) {
-        snprintf(numbuf, sizeof(numbuf), "%d", *(int *)d->field);
-        val = numbuf;
+        int cv = *(int *)d->field;
+        if (cv < 0) {
+          val = "OFF"; /* negative sentinel, so 0 stays a real selectable value */
+        } else {
+          snprintf(numbuf, sizeof(numbuf), "%d", cv);
+          val = numbuf;
+        }
       } else {
         val = setting_get(d) ? "ON" : "OFF";
       }
@@ -1770,6 +1828,41 @@ int main(int argc, char **argv) {
       }
     }
 
+    /* Bank loan dialog (the "we can loan you $10000 ... Yes / No" popup):
+     * make Left/Right move between Yes and No. 11th site in the dead-nibble
+     * family, found by recording which code actually executes on that screen
+     * (SC_PC_BITMAP_BANK=all) and intersecting it with every `LDA $ca`/
+     * `LDA $011c`/`LDA $0124` in the code banks -- exactly one unpatched hit,
+     * `02:a6e9`. The block is:
+     *   02:a6e9  LDA $ca        ; edge-detect HIGH byte (mirrors $4219)
+     *   02:a6eb  BMI $a713      ; bit 7 = A  -> confirm (this already works)
+     *   02:a6ed  AND #$03       ; bits 0-1 of $ca -- HARDWARE-DEAD nibble
+     *   02:a6ef  BEQ $a750      ; so this always takes: Left/Right never act
+     *   02:a6f1  ...            ; save $0b17 (the Yes/No index), re-read
+     *   02:a6f8  LDA $ca        ; ...$ca & 3, set index to 0 or 1, beep on change
+     * Right/Left are bits 0-1 of `$c9`, the edge-detect LOW byte, so both
+     * reads are repointed `$ca` -> `$c9` (2 bytes total).
+     *
+     * TRADE-OFF, deliberate and worth knowing: the `BMI` at `02:a6eb` reads
+     * bit 7 of whatever this same load fetched -- that is A in `$ca` but B in
+     * `$c9`. So this patch also moves the dialog's confirm button from A to B.
+     * There is no room to preserve both: keeping A would need a 16-bit load
+     * (low=$c9 for the directions, high=$ca for the BMI), which turns the
+     * 2-byte `AND #$03` into a 3-byte `AND #$0003` with no spare byte to take
+     * it from. Fixing the reported bug (cursor cannot move) was judged worth
+     * one button moving; revisit if A-to-confirm matters more. */
+    static const uint32_t kLoanSites[] = {
+      0x126ea, /* 02:a6e9's operand -- file = addr + 0x8000 for bank 2 */
+      0x126f9, /* 02:a6f8's operand */
+    };
+    int loanPatched = 0;
+    for (size_t i = 0; i < sizeof(kLoanSites) / sizeof(kLoanSites[0]); i++) {
+      uint32_t off = kLoanSites[i];
+      if (off < rom_size && rom_data[off] == 0xca) { rom_data[off] = 0xc9; loanPatched++; }
+    }
+    fprintf(stderr, "dpad fix: patched %d/2 bank-loan LDA $ca(dp) -> LDA $c9(dp) sites\n",
+            loanPatched);
+
     /* View screen (and any other `$d7`==1 mode): make the D-pad alone
      * scroll, not just B/X. `01:8c68` does `LDA $011b` (16-bit) `; AND
      * #$4f80 ; BEQ ... ; LDA #$0001` -- the reason code stored to `$c5`
@@ -2180,12 +2273,19 @@ int main(int argc, char **argv) {
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
     if (keys[SDL_SCANCODE_B]) input |= kPad_Select;
-    /* Left mouse button = SNES B -- lets host-mouse cursor control (F3)
+    /* Left mouse button = SNES X -- lets host-mouse cursor control (F3)
      * actually select/interact with things, not just move the cursor.
-     * Not gated on s_mouse_enabled: useful as a plain extra B binding
-     * regardless (e.g. one hand on the mouse for pointing, click to
-     * confirm, without needing to reach for Y/Z). */
-    if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) input |= kPad_B;
+     * Not gated on s_mouse_enabled: useful as a plain extra binding
+     * regardless (one hand on the mouse for pointing, click to act,
+     * without reaching for the keyboard). Was bound to B originally; the
+     * user asked for X after playing with it. */
+    if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) input |= kPad_X;
+    /* Don't feed the keyboard to the game while the settings menu is open:
+     * the menu navigates with Up/Down/Left/Right/Enter, which are also the
+     * SNES D-pad and Start bindings. The game is frozen so nothing acts on
+     * them immediately, but whatever is held on the frame the menu closes
+     * would otherwise leak straight through as a real button press. */
+    if (s_menu_open) input = 0;
     apply_frame_input(s_frames);
     apply_freezes();
     g_snes->input1_currentState |= input;
