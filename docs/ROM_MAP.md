@@ -1,5 +1,15 @@
 # SimCity (SNES, US) ROM map
 
+> **CORRECTION:** entries below that describe `$011c`/`$ca`/`$0124` low
+> nibbles as "hardware-guaranteed zero" and treat `AND #$0f00` direction
+> checks as buggy were written against a runner defect, not the ROM. The
+> auto-joypad halves were transposed (`$4218` = A/X/L/R + zero nibble,
+> `$4219` = D-pad); fixed in snesrecomp b48daf4, compensating patches
+> removed in 164a611. `LDA $011b (16-bit) / AND #$0f00` is the correct way
+> to read the D-pad. Rows describing *what a routine does* remain valid;
+> rows calling that routine buggy do not. See task #51.
+
+
 Consolidated reference for everything mapped out during this project's
 investigations. This is a living document -- addresses/meanings here
 reflect the current best understanding, not certainty; confidence is
@@ -38,9 +48,9 @@ this ROM).
 | `$007a`-`$007e` | Scratch block used by a table-driven update loop at `00:94fd`-`95d8` (indexed via `$0b4d`) | Low, not traced in detail |
 | `$007c`/`$7c` (dp) | **Reused scratch, not a single-purpose variable** -- among other uses, `00:cdec` treats it as a tight busy-loop delay counter (32 decrements within one frame); a red herring for the cadence investigation, see `docs/REVERSE_ENGINEERING_cursor_movement.md` | High (the "don't trust this" lesson is confirmed) |
 | `$00c5`/`$c5` (dp) | "Reason code" written by the main-map cursor dispatcher when B/X (`1`) or Y (`2`, only when no direction also held) is held, right before an early `RTS` (`01:8c52`). Consumer: `01:897f` reads it right after the write and dispatches via a jump table at `01:88ef` (`ASL A; TAX; JSR (table,X)`, opcode `0xFC`). Reason `1` (B/X) lands at `01:8d26`, which updates the animated hand-**cursor sprite** (OAM writes to `$7e2840+`/`$7e3040+`/`$7e3840+`) *and*, now that `01:8d36`'s direction-nibble read is fixed (see `01:8d26` below), correctly dispatches to a per-direction handler and calls `01:afbe`/`afc6` -- the actual map-scroll increment. **Fast travel confirmed fixed** -- see `docs/INVESTIGATION_dpad.md` "Fast travel" | High (dispatch mechanism itself, confirmed working end-to-end) |
-| `$011b` | `$4218` mirror (held-state). **Real D-pad + B/Y/Select/Start bits live in the low/high nibbles here** -- bit layout: bit0=Right,1=Left,2=Down,3=Up,4=Start,5=Select,6=Y,7=B. **Confirmed genuinely written** by the shared edge-detector (`00:928f-92cb`, `92c7: STA $011b,X`) with real `$4218,X`-sourced data, same call that also populates `$c9,X`/`$0123,X` (both confirmed working elsewhere). An earlier same-session theory that `01:c01e`'s periodic (~4-frame) read showing `$0000` was a "scheduling race" (something clearing `$011b` between the edge-detector's write and this read) was **retracted**: deterministic testing (save state + `--input`, no live-keyboard jitter) shows `$011b`/`$011c` read correctly at `01:c01e` on every single hit -- the earlier "always zero" observation was a live-input-timing artifact, not a real bug. The actual fast-travel blocker was downstream, at `01:8d36` (see `01:8d26`) -- see `docs/INVESTIGATION_dpad.md` "Fast travel" | High (population mechanism, confirmed; read path also confirmed correct under deterministic input) |
-| `$011c` | `$4219` mirror (held-state). Bits 4-7 = R/L/X/A (real); **bits 0-3 are hardware-guaranteed zero** | High |
-| `$011a` | One byte before `$011b` -- the D-pad fix family's standard "shift the 16-bit load back one byte" target, so a load spanning `$011a`/`$011b` puts real direction bits where a buggy ladder expected zeroed `$011c` bits | High |
+| `$011b` | `$4218` mirror (held-state). **Per hardware this is the LOW half: bit7=A, bit6=X, bit5=L, bit4=R, bits0-3 = controller ID (always zero).** It does NOT hold the D-pad. Written by the shared edge-detector `00:928f-92cb` (`92c7: STA $011b,X`) from real `$4218,X` data, same call that populates `$c9,X`/`$0123,X`. NOTE: this row previously claimed the D-pad lived here -- that was a consequence of the runner transposing `$4218`/`$4219` (fixed, snesrecomp b48daf4); see the correction header in `INVESTIGATION_dpad.md` | High |
+| `$011c` | `$4219` mirror (held-state). **Per hardware this is the HIGH half and holds the D-pad: bit7=B, bit6=Y, bit5=Select, bit4=Start, bit3=Up, bit2=Down, bit1=Left, bit0=Right.** A 16-bit `LDA $011b` puts this byte in the high half, so `AND #$0f00` tests Up/Down/Left/Right -- that idiom is correct ROM code, not a bug | High |
+| `$011a` | One byte before `$011b`. Was the target of the removed "shift the load back one byte" patches, which existed only to compensate for the runner's transposed joypad halves. No longer used; kept here so the address is not mistaken for meaningful game state | High |
 | `$0123`/`$0124` | Absolute (non-direct-page) mirror pair, same relationship as `$011b`/`$011c` | High |
 | `$01bd`/`$01bf` | Map scroll-X / scroll-Y, **confirmed** (corrects the earlier `$01bd`/`$01be` guess -- no code anywhere in the ROM touches `$01be`; the real pair is 2 bytes apart). Clamped by `01:a0c4` against bounds in `$01c5`-`$01cb`; also the destination of the "warp to absolute tile coordinate" routine `01:a640`. No modifier-dependent step size found at either site -- still not the fast-travel mechanism | High |
 | `$01c1` | Referenced in early SC_DEBUG tooling; role not documented | Low |

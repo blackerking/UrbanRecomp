@@ -78,35 +78,49 @@ for the derivation, verified empirically per-button. Fixed, and confirmed
 working end-to-end by interactive testing for all 8 discrete buttons
 (A/B/X/Y/L/R/Start/Select).
 
-### D-pad fixed (genuine stock-ROM bug, not a recomp issue)
+### D-pad: there was never a stock-ROM bug (runner defect, now fixed)
 
-The D-pad produced zero effect anywhere in the stock ROM -- confirmed dead
-on this recomp and then independently re-confirmed on real
-hardware-accurate emulation (bsnes), ruling out a recomp-side bug. Root
-cause: multiple direction-check sites throughout the ROM read the wrong
-half of the 16-bit edge/held-state word -- the low nibble of the byte they
-read is hardware-guaranteed zero on any real SNES (unconnected
-controller-port pins), so those checks can never fire, on this recomp or on
-real hardware. `src/main.c` applies a small, targeted set of ROM data
-patches at load time (game-specific, never touching the shared snesrecomp
-runtime) that repoint each read at the real edge byte instead. Fixed and
-confirmed working by interactive testing across every affected screen: map
-scrolling, the build cursor, the toolbar, in-game menus, the Information
-panel, the mode-select (start) menu, Scenario Select, Save, Tax, the
-Load/Save/Exit menu, the Map Select scenario-number picker, the
-city-name-entry on-screen keyboard, the Select-game-level (Easy/Medium/
-Hard) screen, the Comprehensive/Information map overlay, and the View
-screen (the watch icon). See
-[`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) for the full
-investigation, including the six distinct bug variants found and the live
-bsnes tracing that pinned down the last few.
+Earlier revisions of this README claimed the stock ROM shipped a
+"D-pad bug family" affecting a dozen screens, fixed by ROM patches. **That
+was wrong.** The ROM was correct; the runner was not.
 
-**Known remaining limitations:** the View screen's D-pad now genuinely
-updates its underlying game state but nothing visible changes yet --
-tracked in the same doc. The map's "fast travel" modifier (holding B or
-X while moving, for a faster/bigger scroll jump) is **fixed** -- a 9th,
-previously-unpatched site in the same D-pad bug family (see
-`docs/INVESTIGATION_dpad.md` "Fast travel: FIXED").
+`snesrecomp`'s `snes.c` returned the two halves of the auto-joypad read
+transposed. Per hardware the joypad word is
+
+```
+bits 15-8 : B, Y, Select, Start, Up, Down, Left, Right
+bits  7-0 : A, X, L, R, 0, 0, 0, 0     (low nibble = controller ID)
+```
+
+so `$4218` carries A/X/L/R plus four always-zero bits, and `$4219` carries
+the D-pad. Returning them the wrong way round put the D-pad in `$011b` and
+left `$011c` -- the byte the game actually tests -- reading zero.
+`LDA $011b (16-bit) / AND #$0f00` is simply *how you read the D-pad*: it
+tests `$011c` bits 0-3. It only looked like a per-site bug because the
+emulator was feeding it the wrong byte.
+
+Eleven compensating ROM patches were written against that single defect.
+With the runner corrected the two compensations cancel -- applying both
+kills input again -- so the patches have been removed. Measured on the
+bank-loan dialog (its handler depends on exactly one patched site), holding
+Right: patches applied leaves the selection stuck, patches removed moves it,
+on stock ROM code. Holding Left now yields `$011b=00 / $011c=02`, Left in
+`$011c` bit 1, exactly as the hardware layout specifies.
+
+The fix lives in the `snesrecomp` submodule and affects every game built on
+that runner. It surfaced because a sibling project (Metal Marines) hit the
+identical pattern and refused to accept that two unrelated commercial games
+shipped the same input bug -- which was the tell here too, and was missed
+for a long time. Eleven independent sites appearing to share one bug is an
+anomaly to explain, not corroboration to lean on.
+
+[`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) is kept as the
+trail of that mistake; note it still argues the old model in most places
+and is being re-derived.
+
+Two ROM patches remain, both unrelated to input and each standing on its own
+evidence: the `$01f3` cursor step-delay tweak and the `00:c0fb` `$7e21b5`
+stomp fix.
 
 ### Graphics/text export tool
 
@@ -123,7 +137,7 @@ text.
 
 ### HDMA execution was entirely missing (also fixed)
 
-Separately from the D-pad bug family: this project's cycle-accurate
+Unrelated to the joypad-register defect above: this project's cycle-accurate
 execution mode never actually ran HDMA transfers at all (only plain DMA was
 wired up), so any HDMA-driven visual effect in this ROM silently did
 nothing -- most visibly, the View screen's tilted "photograph on a table"

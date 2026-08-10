@@ -1,4 +1,32 @@
-# D-pad investigation (resolved)
+# D-pad investigation
+
+> ## CORRECTION (read this first)
+>
+> **There was never a stock-ROM "D-pad bug family".** The ROM was correct;
+> the runner was not. `snesrecomp`'s `snes.c` returned the two halves of the
+> auto-joypad read transposed. Per hardware the joypad word is
+> `bits 15-8 = B,Y,Select,Start,Up,Down,Left,Right` and
+> `bits 7-0 = A,X,L,R,0,0,0,0`, so `$4218` carries A/X/L/R plus four
+> always-zero bits and `$4219` carries the D-pad. Returning them the wrong
+> way round put the D-pad in `$011b` and left `$011c` -- the byte the game
+> actually tests -- reading zero.
+>
+> `LDA $011b (16-bit) / AND #$0f00` is simply **how you read the D-pad**: it
+> tests `$011c` bits 0-3. Every "dead nibble" site described below is correct
+> ROM code. The eleven compensating patches this document argues for have been
+> removed; with the runner fixed, applying them kills input again.
+>
+> Fixed in `snesrecomp` b48daf4; patches removed in 164a611.
+>
+> **Everything below still argues the old, wrong model** and is retained only
+> as the trail of the mistake. Individual *observations* (which routine runs on
+> which screen, what a given variable does) are mostly still valid; the
+> *diagnosis* attached to them is not. See task #51 for the re-derivation list.
+>
+> Method lesson: eleven independent sites appearing to share one bug is an
+> anomaly demanding explanation, not evidence accumulating. The count itself
+> was the signal, and it was read backwards.
+
 
 Status: **fixed**. The D-pad now works on every screen tested: map
 scrolling, the build cursor, the toolbar, in-game menus, the Information

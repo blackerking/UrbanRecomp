@@ -1,5 +1,15 @@
 # Cursor step cadence (root-caused and tweaked)
 
+> **NOTE:** this investigation predates the discovery that the runner
+> transposed the auto-joypad halves (`$4218` = A/X/L/R + zero nibble,
+> `$4219` = D-pad; fixed in snesrecomp b48daf4). Any reasoning here that
+> assumes `$011b` holds the D-pad is wrong. The `$01f3` step-delay finding
+> and its patch are unaffected -- that gate has nothing to do with which
+> byte the direction bits arrive in, and the patch is still applied. The
+> timing measurements (bank-$03 preemption, step rates) should be
+> re-confirmed against the corrected runner. See task #51.
+
+
 Status: **root cause found, speed tweak applied**. The addresses in the
 "What's confirmed live" section below (`$01ed`, `01:c1ca`/`01:c214`) were
 never actually confirmed as the real mechanism -- they were a first
