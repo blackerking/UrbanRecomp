@@ -15,8 +15,93 @@
 
 #include "cpu_state.h"
 
-/* 0 functions across all banks (5 decls each). */
+/* 17 functions across all banks (5 decls each). */
 
+void bank_01_897f(CpuState *cpu);  /* $01:897F alias */
+RecompReturn bank_01_897f_M0X0(CpuState *cpu);
+RecompReturn bank_01_897f_M0X1(CpuState *cpu);
+RecompReturn bank_01_897f_M1X0(CpuState *cpu);
+RecompReturn bank_01_897f_M1X1(CpuState *cpu);
+void bank_01_8c55(CpuState *cpu);  /* $01:8C55 alias */
+RecompReturn bank_01_8c55_M0X0(CpuState *cpu);
+RecompReturn bank_01_8c55_M0X1(CpuState *cpu);
+RecompReturn bank_01_8c55_M1X0(CpuState *cpu);
+RecompReturn bank_01_8c55_M1X1(CpuState *cpu);
+void bank_01_8d26(CpuState *cpu);  /* $01:8D26 alias */
+RecompReturn bank_01_8d26_M0X0(CpuState *cpu);
+RecompReturn bank_01_8d26_M0X1(CpuState *cpu);
+RecompReturn bank_01_8d26_M1X0(CpuState *cpu);
+RecompReturn bank_01_8d26_M1X1(CpuState *cpu);
+void bank_01_afbe(CpuState *cpu);  /* $01:AFBE alias */
+RecompReturn bank_01_afbe_M0X0(CpuState *cpu);
+RecompReturn bank_01_afbe_M0X1(CpuState *cpu);
+RecompReturn bank_01_afbe_M1X0(CpuState *cpu);
+RecompReturn bank_01_afbe_M1X1(CpuState *cpu);
+void bank_01_afe0(CpuState *cpu);  /* $01:AFE0 alias */
+RecompReturn bank_01_afe0_M0X0(CpuState *cpu);
+RecompReturn bank_01_afe0_M0X1(CpuState *cpu);
+RecompReturn bank_01_afe0_M1X0(CpuState *cpu);
+RecompReturn bank_01_afe0_M1X1(CpuState *cpu);
+void bank_01_b030(CpuState *cpu);  /* $01:B030 alias */
+RecompReturn bank_01_b030_M0X0(CpuState *cpu);
+RecompReturn bank_01_b030_M0X1(CpuState *cpu);
+RecompReturn bank_01_b030_M1X0(CpuState *cpu);
+RecompReturn bank_01_b030_M1X1(CpuState *cpu);
+void bank_01_b166(CpuState *cpu);  /* $01:B166 alias */
+RecompReturn bank_01_b166_M0X0(CpuState *cpu);
+RecompReturn bank_01_b166_M0X1(CpuState *cpu);
+RecompReturn bank_01_b166_M1X0(CpuState *cpu);
+RecompReturn bank_01_b166_M1X1(CpuState *cpu);
+void bank_01_b375(CpuState *cpu);  /* $01:B375 alias */
+RecompReturn bank_01_b375_M0X0(CpuState *cpu);
+RecompReturn bank_01_b375_M0X1(CpuState *cpu);
+RecompReturn bank_01_b375_M1X0(CpuState *cpu);
+RecompReturn bank_01_b375_M1X1(CpuState *cpu);
+void bank_01_c0dd(CpuState *cpu);  /* $01:C0DD alias */
+RecompReturn bank_01_c0dd_M0X0(CpuState *cpu);
+RecompReturn bank_01_c0dd_M0X1(CpuState *cpu);
+RecompReturn bank_01_c0dd_M1X0(CpuState *cpu);
+RecompReturn bank_01_c0dd_M1X1(CpuState *cpu);
+void bank_01_c434(CpuState *cpu);  /* $01:C434 alias */
+RecompReturn bank_01_c434_M0X0(CpuState *cpu);
+RecompReturn bank_01_c434_M0X1(CpuState *cpu);
+RecompReturn bank_01_c434_M1X0(CpuState *cpu);
+RecompReturn bank_01_c434_M1X1(CpuState *cpu);
+void bank_01_c616(CpuState *cpu);  /* $01:C616 alias */
+RecompReturn bank_01_c616_M0X0(CpuState *cpu);
+RecompReturn bank_01_c616_M0X1(CpuState *cpu);
+RecompReturn bank_01_c616_M1X0(CpuState *cpu);
+RecompReturn bank_01_c616_M1X1(CpuState *cpu);
+void bank_01_dd76(CpuState *cpu);  /* $01:DD76 alias */
+RecompReturn bank_01_dd76_M0X0(CpuState *cpu);
+RecompReturn bank_01_dd76_M0X1(CpuState *cpu);
+RecompReturn bank_01_dd76_M1X0(CpuState *cpu);
+RecompReturn bank_01_dd76_M1X1(CpuState *cpu);
+void bank_03_c030(CpuState *cpu);  /* $03:C030 alias */
+RecompReturn bank_03_c030_M0X0(CpuState *cpu);
+RecompReturn bank_03_c030_M0X1(CpuState *cpu);
+RecompReturn bank_03_c030_M1X0(CpuState *cpu);
+RecompReturn bank_03_c030_M1X1(CpuState *cpu);
+void bank_03_c11a(CpuState *cpu);  /* $03:C11A alias */
+RecompReturn bank_03_c11a_M0X0(CpuState *cpu);
+RecompReturn bank_03_c11a_M0X1(CpuState *cpu);
+RecompReturn bank_03_c11a_M1X0(CpuState *cpu);
+RecompReturn bank_03_c11a_M1X1(CpuState *cpu);
+void bank_03_c42a(CpuState *cpu);  /* $03:C42A alias */
+RecompReturn bank_03_c42a_M0X0(CpuState *cpu);
+RecompReturn bank_03_c42a_M0X1(CpuState *cpu);
+RecompReturn bank_03_c42a_M1X0(CpuState *cpu);
+RecompReturn bank_03_c42a_M1X1(CpuState *cpu);
+void bank_03_c50b(CpuState *cpu);  /* $03:C50B alias */
+RecompReturn bank_03_c50b_M0X0(CpuState *cpu);
+RecompReturn bank_03_c50b_M0X1(CpuState *cpu);
+RecompReturn bank_03_c50b_M1X0(CpuState *cpu);
+RecompReturn bank_03_c50b_M1X1(CpuState *cpu);
+void bank_03_c548(CpuState *cpu);  /* $03:C548 alias */
+RecompReturn bank_03_c548_M0X0(CpuState *cpu);
+RecompReturn bank_03_c548_M0X1(CpuState *cpu);
+RecompReturn bank_03_c548_M1X0(CpuState *cpu);
+RecompReturn bank_03_c548_M1X1(CpuState *cpu);
 
 /* Hand-written non-recompiled bodies still declared here.
  * These are not produced by the v2 emit pipeline but are
