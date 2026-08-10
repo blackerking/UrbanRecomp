@@ -58,3 +58,8 @@ menu_preview.ppm
 # and is deliberately not distributed with this repository -- same
 # reasoning as the ROM and the save states above.
 logo.png
+
+# Third-party reference tool (Brad Smith, rainwarrior.ca) -- no stated
+# licence, so kept local and not redistributed. Findings are recorded in
+# docs/REFERENCE_map_format.md instead.
+SimCity_map.lua
