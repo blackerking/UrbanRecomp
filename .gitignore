@@ -63,3 +63,13 @@ logo.png
 # licence, so kept local and not redistributed. Findings are recorded in
 # docs/REFERENCE_map_format.md instead.
 SimCity_map.lua
+
+# Recorded-session artifacts. Both are derived from the copyrighted ROM --
+# coverage.bin is a map of which ROM addresses executed, session_sram.bin is
+# the game's own save data -- so they stay local, same reasoning as the ROM
+# and save states above. What they were USED for is committed (the cfg
+# entry points in recomp/, and the measurements in README.md); the captures
+# themselves are not.
+coverage.bin
+session_sram.bin
+*_sram.bin
