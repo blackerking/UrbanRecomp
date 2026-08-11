@@ -57,13 +57,23 @@ found them.
 | 4 | Boston | `0c:a8e8` | `0628e8` | 249 |
 | 5 | Rio | `0d:816e` | `06816e` | 331 |
 | 6 | Las Vegas | `0d:b987` | `06b987` | 219 |
-| 7 | Mario land (bonus) | `0d:cb15` | `06cb15` | 0 |
+| 7 | free play | `0d:cb15` | `06cb15` | 0 |
 | 8 | tutorial | `0d:d131` | `06d131` | 0 |
 
 **The table has nine entries, not eight.** The arrays run `03:ce70`–`03:ce8a`
 (9 × 3 bytes) and real code only resumes at `03:ce8b`, so the ninth entry was
-being read as padding. It is a real map: `0d:d131` is exactly where index 7's
-compressed stream ends, and it decodes cleanly to a full 24000-byte map.
+being read as padding. Three independent things say it is real:
+
+- the bank column is `0d 0c 0c 0c 0c 0d 0d 0d 0d` — nine bytes, and the three
+  arrays together run out exactly at `03:ce8b`, where `REP #$30` starts real
+  code, with no room left over;
+- `0d:d131` is precisely where index 7's compressed stream ends, closing the
+  one inter-pointer gap that otherwise did not add up;
+- it decodes cleanly to a full 24000-byte map.
+
+An earlier reading took the bank column as eight entries and so stopped one
+short. Note the per-scenario tables at `03:cec9` genuinely *are* eight entries
+(see below), so eight is the right count there and the wrong one here.
 
 All nine decode. Index 6 (Las Vegas) is a desert grid city with a diagonal
 across it, so the hidden scenario is complete, not a stub.
@@ -71,16 +81,30 @@ across it, so the hidden scenario is complete, not a stub.
 Indices 7 and 8 differ in kind from 0–6, not just in content: they use **zero**
 3×3 stamps (stage 4 below) and consume exactly 12000 entries, i.e. they are
 pure terrain with no buildings placed, where every real scenario carries 200+
-building stamps. Index 7's terrain draws Mario's face (the bonus land) and
-index 8 is the **tutorial** map — both starting maps you build on, not
-scenarios you inherit, which is exactly why neither places a single building.
+building stamps. They are maps you build on rather than cities you inherit,
+which is exactly why neither places a single building.
 
-The "free play" label this table previously carried on index 7 was therefore
-wrong, and free play has no entry here at all. The likely reason is that a
-free-play map is generated rather than stored — `03:d862` is a map-generation
-loop and the "Please wait…" screen does real procedural work (see the README's
-note on auto-fast-forward) — but that link has not been verified and is not a
-claim of this document.
+Index 7 is free play, and its terrain draws **Mario's face** as an island —
+worth knowing before assuming a decode has gone wrong. Index 8 is the tutorial
+map (a lake with islands).
+
+A parallel set of per-scenario tables settles index 7's status independently of
+the artwork. `03:ce8b` seeds five values from `$0040`:
+
+| table | → | contents |
+|---|---|---|
+| `$03cec9` | `$0c0d` | `000a 0014 0005 0003 0001 0102 0180 000a` |
+| `$03ced9` | `$0b53` | **year**: 1906, 1965, 1961, 1972, 2010, 2047, 2096, 1991 |
+| `$03cee9` | `$0deb`/`$0ca5` | starting city class |
+| `$03cef9` | `$0ba5` | starting population, low word |
+| `$03cf09` | `$0ba7` | starting population, high word |
+
+The years are decisive on the ordering — 1906 San Francisco, 1965 Bern, 1961
+Tokyo, 1972 Detroit, 2010 Boston, 2047 Rio are the six canonical scenarios in
+exactly this sequence, then 2096 for Las Vegas and 1991 for index 7. These
+tables hold **eight** entries, so index 7 is an ordinary selectable mode with a
+starting year while index 8 (tutorial) is absent from them entirely and must be
+special-cased elsewhere.
 
 `tools/extract_maps.py` decodes all nine to `extracted_assets/maps/`, as both a
 raw 24000-byte `.bin` in the live `$7F0200` layout and a false-colour `.png`
@@ -161,8 +185,8 @@ useful for anything that touches the live map.
 
 Independent visual confirmation: the decoded maps render as recognisably San
 Francisco (peninsula and bay), Tokyo (bay, with the Imperial Palace grounds as a
-distinct block), Las Vegas (desert grid with the diagonal across it), Mario's
-face for index 7, and the tutorial map's lake and islands for index 8.
+distinct block), Las Vegas (desert grid with the diagonal across it), free
+play's Mario-face island, and the tutorial map's lake and islands.
 
 ### Still open
 

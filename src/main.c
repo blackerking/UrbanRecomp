@@ -790,6 +790,40 @@ static bool write_wram_dump(const char *path) {
   return fclose(f) == 0 && ok;
 }
 
+/* SC_SRAM_DUMP_PATH=<file>: dump the 32KB cart SRAM window ($700000-$707fff)
+ * at exit. SRAM is NOT part of g_ram -- it lives in the cart model -- so a
+ * WRAM dump does not capture it and it has to be read back through the bus.
+ * Wanted for the save-game/scenario-record work: the layout at $700000 is a
+ * 14-byte header (magic "SIM", flags, checksum) followed by the per-city save
+ * block, and the only practical way to check a field's meaning is to diff two
+ * dumps. */
+static bool write_sram_dump(const char *path) {
+  FILE *f = fopen(path, "wb");
+  if (!f) return false;
+  bool ok = true;
+  for (uint32_t i = 0; i < 0x8000 && ok; i++)
+    ok = fputc(snes_read(g_snes, 0x700000 + i), f) != EOF;
+  return fclose(f) == 0 && ok;
+}
+
+/* Decode of the SRAM header, printed alongside the dump -- see
+ * apply_unlock_all() for where each field comes from in the ROM. */
+static void report_sram_header(const char *when) {
+  uint8_t h[16];
+  for (int i = 0; i < 16; i++) h[i] = snes_read(g_snes, 0x700000 + i);
+  uint16_t sum = 0;
+  for (int i = 0; i < 14; i++) sum = (uint16_t)(sum + h[i]);
+  uint16_t flags = (uint16_t)(h[7] | (h[8] << 8));
+  fprintf(stderr, "[sram %s] magic=%c%c%c win=%04x (scenarios", when,
+          h[0] >= 32 ? h[0] : '?', h[1] >= 32 ? h[1] : '?',
+          h[2] >= 32 ? h[2] : '?', flags);
+  for (int i = 0; i < 8; i++) if (flags & (1u << i)) fprintf(stderr, " %d", i);
+  fprintf(stderr, "%s) stored_sum=%04x computed=%04x%s\n",
+          (flags & 0x8000) ? ", ALL" : "",
+          (uint16_t)(h[14] | (h[15] << 8)), sum,
+          (uint16_t)(h[14] | (h[15] << 8)) == sum ? "" : "  MISMATCH");
+}
+
 /* ── save states -- for reproducing a specific screen/input scenario (e.g.
  * "on the map, cursor visible, nothing else held") instantly and
  * deterministically, instead of re-navigating menus by hand or by guessed
@@ -1001,9 +1035,91 @@ static void menu_action_clear_milestones(void) {
   fprintf(stderr, "[menu] cleared milestone latches $0cbd/$0cbf/$0cc1/$0cc3\n");
 }
 
+/* Scenario completion ("win mark") flags, SRAM $700007.
+ *
+ * Setting these is what makes the SCENARIO OVR hack above redundant: the
+ * scenarios stop needing to be reached by forcing $0040, because the game
+ * itself offers them.
+ *
+ * The bitfield and everything around it were read off the ROM:
+ *
+ *   03:e30a  ORA $e334,Y     scenario index * 2 indexes a mask table at
+ *                            03:e334 -- $0001, $0002, $0004 ... $0080, so
+ *                            bit N marks scenario N complete
+ *   03:e311  AND #$003f      ...and once the low SIX bits are all set,
+ *   03:e315  CMP #$003f      03:e31c ORA #$8000 sets bit 15, the game's own
+ *                            "every scenario beaten" flag
+ *   03:e326  STA $700007     committed to SRAM
+ *   03:e36c  STA $42         and read back the other way at init, SRAM into
+ *                            the direct-page word $42
+ *
+ * Writing $700007 alone is not enough. SRAM carries a 14-byte header with a
+ * magic and a checksum, both of which the game verifies at boot (03:e411's
+ * sum loop and 03:e42d's 'S','I','M' test); a header that fails either is
+ * restored from the backup copy at $707ff0 (03:e446), which would silently
+ * undo this. So the full commit path from 03:e553 is reproduced here:
+ * recompute the checksum over $700000-$70000d into $70000e, then mirror the
+ * whole 16-byte header to $707ff0.
+ *
+ * Bits 0-6 are set, i.e. the six ordinary scenarios plus Las Vegas -- every
+ * scenario, which is what makes reaching the hidden one a normal menu
+ * selection. Indices 7 and 8 (Freeland and the tutorial) are deliberately
+ * left alone: they are not scenarios and have nothing to win.
+ *
+ * SRAM lives in the cart model (`cart->ram`), not in g_ram, so it has to go
+ * through the bus rather than a direct array write -- and it is not persisted
+ * to disk by this host, so the unlock lasts for the session and is captured
+ * by save states (which snapshot every device model), but does not survive a
+ * fresh launch on its own. */
+#define kWinMarkBits 0x007fu   /* scenarios 0-6 */
+static bool s_unlock_all;
+
+static void apply_unlock_all(void) {
+  /* Only ever modify an SRAM the game has already formatted. A header failing
+   * the magic test at 03:e42d gets restored from backup or rewritten, so
+   * flags written into a blank SRAM would simply be undone -- and measured,
+   * SRAM really is still blank well into a run: none of 03:e360/03:e40e/
+   * 03:e45b executes at all in 3600 frames from a cold boot, because the
+   * whole SRAM subsystem is only reached through a real game session. The
+   * alternative -- fabricating the magic ourselves -- would mean claiming a
+   * formatted save whose body is zeroed, so wait for the game instead. */
+  if (snes_read(g_snes, 0x700000) != 'S' ||
+      snes_read(g_snes, 0x700001) != 'I' ||
+      snes_read(g_snes, 0x700002) != 'M')
+    return;
+  uint16_t flags = (uint16_t)(snes_read(g_snes, 0x700007) |
+                              ((uint16_t)snes_read(g_snes, 0x700008) << 8));
+  uint16_t want = (uint16_t)(flags | kWinMarkBits);
+  if ((want & 0x003f) == 0x003f) want |= 0x8000;  /* 03:e31c */
+  /* Idempotent: after the first application this is two bus reads a frame and
+   * nothing else, so it never fights the game's own writes to the header. */
+  if (want == flags) return;
+
+  snes_write(g_snes, 0x700007, (uint8_t)want);
+  snes_write(g_snes, 0x700008, (uint8_t)(want >> 8));
+
+  uint16_t sum = 0;                                /* 03:e553 */
+  for (int i = 0; i < 14; i++)
+    sum = (uint16_t)(sum + snes_read(g_snes, 0x700000 + i));
+  snes_write(g_snes, 0x70000e, (uint8_t)sum);
+  snes_write(g_snes, 0x70000f, (uint8_t)(sum >> 8));
+
+  for (int i = 0; i < 16; i++)                     /* 03:e484 */
+    snes_write(g_snes, 0x707ff0 + i, snes_read(g_snes, 0x700000 + i));
+
+  /* Keep the live direct-page copy in step, so this also takes effect after
+   * 03:e36c has already run rather than only on a later re-read. */
+  g_ram[0x42] = (uint8_t)want;
+  g_ram[0x43] = (uint8_t)(want >> 8);
+
+  fprintf(stderr, "[unlock] scenario win marks $700007: %04x -> %04x "
+          "(checksum %04x)\n", flags, want, sum);
+}
+
 static void apply_freezes(void) {
   for (int i = 0; i < s_freeze_count; i++)
     g_ram[s_freezes[i].addr] = s_freezes[i].val;
+  if (s_unlock_all) apply_unlock_all();
   if (s_scenario_override) g_ram[0x0040] = (uint8_t)s_scenario_override;
   if (s_pop_override >= 0) {
     uint32_t p = (uint32_t)s_pop_override;
@@ -1188,6 +1304,7 @@ static SettingDesc s_settings[] = {
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
   { "SCENARIO OVR",          kSettingCycle, &s_scenario_override,  0,    NULL,
     kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])) },
+  { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
@@ -1529,6 +1646,12 @@ static int run_qualification(uint64_t frames) {
   fprintf(stderr, "banks_seen=%016llx\n", (unsigned long long)s_banks_seen);
   write_pc_bitmap_dump();
   write_map_trace_summary();
+  { const char *p = getenv("SC_SRAM_DUMP_PATH");
+    if (p && *p) {
+      report_sram_header("exit");
+      fprintf(stderr, write_sram_dump(p) ? "dumped SRAM to %s\n"
+                                         : "failed to write SRAM dump to %s\n", p);
+    } }
   return rc;
 }
 
@@ -1543,6 +1666,7 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_ADDR_TRACE"); if (e && *e) parse_addr_trace(e); }
   { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
   { const char *e = getenv("SC_DECOMP_TRACE"); if (e && *e) s_decomp_trace = true; }
+  { const char *e = getenv("SC_UNLOCK_ALL"); if (e && *e) s_unlock_all = true; }
   { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_MENU_PREVIEW");

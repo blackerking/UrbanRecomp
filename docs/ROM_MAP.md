@@ -102,6 +102,11 @@ confidence notes on each -- summary table only below.
 | `00:928f-92cb` | *(shared edge-detector body)* | Busy-waits on `$4212 & 1` (auto-joypad-read-in-progress) before reading each port; XORs new vs. previous value for edge-detect, writes held/edge state to `$0123,X`/`$c9,X` **and** `$011b,X` (`92c7`) -- confirmed genuinely populates `$011b` with real data, contradicting a naive "always zero" read elsewhere (see `$011b` WRAM entry) |
 | `01:afbe` | *(fast-travel scroll increment, FIXED and confirmed working)* | A 4-way `LSR`/`BCC` bit-ladder over `$01c1` (16-bit `LDA`, but only bits 0-3 tested): bit0 (Right) -> `afc6: INC $01bd`; bit1 (Left) -> `afcc: DEC $01bd`; bit2 (Down) -> `afd2: INC $01bf`; bit3 (Up) -> `afd8: DEC $01bf`. `$01bd`/`$01bf` are map scroll-X/Y. Called from the tail of `01:8d26` once `01:8d36`'s direction-nibble read is fixed (was the actual bug -- see `01:8d26`). Confirmed end-to-end via deterministic `--load-state`+`--input` testing: holding B+Right/B+Up reaches `afc6`/`afd8` respectively, and a before/after WRAM dump shows `$01bd`/`$01bf` genuinely changing |
 | `00:90dd` | *(LC_LZ5 decompressor)* | Nintendo/community-named "LC_LZ5" compression. Input bank/offset via WRAM `$0b`/`$0009`; output to **`$7E8000 + X`**, with `X` loaded from `$000e` (16-bit, so the output window reaches `$7F7FFF`) -- *not* `$7E:0000+X` as this row previously said. Reached via `COP #$00` with `A = 8`. `00:926d` handles a source bank crossing by setting `Y = $8000` and incrementing the data-bank register. See `tools/extract_graphics.py` for a reimplementation verified byte-exact against a live run, and `docs/REFERENCE_map_format.md` for the full decode |
+| `03:e2ee` | *(scenario completion / "win mark" setter)* | Gated on `$3e == 3` and `$0d87 == 2` (win). `03:e30a` ORs a mask from the table at `03:e334` (`0001, 0002 … 0080`, indexed by scenario x2) into the direct-page word `$42`; once the low **six** bits are all set, `03:e31c` also sets bit 15, the game's own "every scenario beaten" flag. `03:e326` commits `$42` to SRAM `$700007`. The fall-through vs. branch paths differ only in `X` (a message index, 10 vs 11), i.e. a different congratulation when the last scenario completes |
+| `03:e360` | *(SRAM init)* | Loads `$700007` into `$42` (`03:e36c`) and `$700009` into `$0425` (the cheat flags). Measured: none of this executes at all in 3600 frames from a cold boot -- the SRAM subsystem is only reached through a real game session |
+| `03:e411` / `03:e42d` | *(SRAM header verify)* | Checksum loop summing the **bytes** `$700000`-`$70000d` into a 16-bit total compared against `$70000e`, then a `'S'`,`'I'`,`'M'` magic test at `$700000`-`$700002`. A header failing either is restored from the backup copy at `$707ff0` (`03:e446`) |
+| `03:e553` | *(SRAM header commit)* | Recomputes the same checksum into `$70000e`, then `JSR $e484` mirrors the 16-byte header to `$707ff0`. Any host-side edit of the header must do both or be silently reverted -- see `apply_unlock_all()` in `src/main.c` |
+| `03:ce8b` | *(per-scenario seed)* | Five 8-entry word tables indexed by `$0040`: `$03cec9` -> `$0c0d`, `$03ced9` -> `$0b53` (**scenario year**: 1906/1965/1961/1972/2010/2047/2096/1991), `$03cee9` -> `$0deb`+`$0ca5` (city class), `$03cef9`/`$03cf09` -> `$0ba5`/`$0ba7` (starting population). Note these are 8 entries where the *map pointer* table at `03:ce70` is 9 |
 | `03:ce2e` | *(scenario map loader)* | Reads the scenario index from `$0040`, pulls a 24-bit map pointer out of the 9-entry struct-of-arrays table at `03:ce70`/`ce79`/`ce82`, decompresses it to `$7E8000`, then `JSR $d15f` to unpack |
 | `03:d15f` | *(scenario map unpacker)* | Three further stages -- word-level LZ (`03:d16c`), run-length expansion (`03:d1c0`), and a zero-fill plus 3x3 building-stamp walk (`03:d1fb`/`03:d210`) -- producing the live 24000-byte, 120x100 map at `$7F0200`. Fully decoded in `docs/REFERENCE_map_format.md`; `tools/extract_maps.py` reimplements the whole chain |
 | `05:9304` | *(boot map/WRAM blob copy)* | `MVN $7f,$7e` moving 32768 bytes `$7E8000` -> `$7F0000`; paired with a second at `05:9329` for `$7F8000`. Together with the two decompressions that feed them (`0d:d77c` and `0e:c242`) this fills the whole `$7F` bank at boot, before any scenario is chosen |
@@ -145,6 +150,35 @@ just the address list for quick lookup.
 | `03:d97b` | `LDA $c9(dp)` -> `$c8(dp)` | Select-game-level (Easy/Medium/Hard) |
 | `02:8525`, `02:9f37`, `02:9f43` | `LDA $011c` -> `$011b` | Comprehensive/Information map overlay (scroll + cursor) |
 | `01:f0d3` | `LDA $011c` -> `$011b` | View screen (watch icon) |
+
+## Cartridge SRAM layout (`$700000`+)
+
+SRAM is **not** part of `g_ram` -- it lives in the cart model, so WRAM dumps do
+not capture it and it has to be read back through the bus. `SC_SRAM_DUMP_PATH`
+dumps the 32KB window and prints a decoded header line.
+
+A 16-byte header, then the per-city save block. The header is checksummed and
+mirrored, so a host-side edit that updates only the field it cares about will
+be reverted at the next verify -- see `03:e411`/`03:e553` above.
+
+| Address | Meaning |
+|---|---|
+| `$700000`-`$700002` | Magic `'S'`,`'I'`,`'M'` |
+| `$700007` (16-bit) | **Scenario completion bitfield.** Bit N = scenario N won (mask table `03:e334`); bits 0-5 the six ordinary scenarios, bit 6 Las Vegas, bit 15 = "all six beaten", set by the game itself at `03:e31c`. Read into `$42` at init |
+| `$700009` | Debug-menu cheat flags, mirrored to `$0425` |
+| `$70000e` (16-bit) | Checksum: sum of the **bytes** `$700000`-`$70000d` |
+| `$700010`-`$700084` | Per-city save fields, copied one by one to WRAM by `03:c8f1` (load) / `03:cc2e` (save). Includes `$700036` -> `$0deb` (city class) and `$700070` -> `$0040` (scenario index) |
+| `$700084` +60 bytes | Array -> `$0ced` (30 words) |
+| `$7000c0` +1440 bytes | Array -> `$7f5fc0`, i.e. directly after the 24000-byte map |
+| `$700660` +1440 bytes | Array -> `$7f6560` |
+| `$707ff0`-`$707fff` | Backup copy of the 16-byte header (`03:e484` writes it, `03:e446` restores from it) |
+
+Verified against real game-written SRAM (an in-game save state): magic reads
+`SIM` and the stored checksum matches a recomputation exactly.
+
+Two save-file bases beyond the first appear at a stride of `$3ff0` (`$703ff0`
+and `$707ff0`); `03:e392`-`03:e402` reads the same field set from two of them,
+which looks like a save-slot summary. Not investigated further.
 
 ## Compressed data regions (Nintendo LC_LZ5, see `tools/extract_graphics.py`)
 

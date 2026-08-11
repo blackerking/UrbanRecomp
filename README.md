@@ -159,9 +159,11 @@ result was simply a bad file offset, not a real property of the data; the
 existing decompressor handles those streams fine when pointed at the
 right byte.
 
-The last two entries are the Mario bonus land and the tutorial map. Both
-place zero buildings, where every real scenario stamps 200+ — the tell
-that they're maps you start on rather than cities you inherit.
+The last two entries are free play and the tutorial map. Both place zero
+buildings, where every real scenario stamps 200+ — the tell that they're
+maps you start on rather than cities you inherit. Free play's terrain is
+drawn as Mario's face, which is worth knowing before assuming a decode
+has gone wrong.
 
 ### HDMA execution was entirely missing (also fixed)
 
@@ -254,8 +256,32 @@ can offer since it isn't limited to 8 controller inputs:
   instead of one hand-coded screen per setting, so adding a new toggle
   later is one line in `src/main.c`'s `s_settings[]`, not a new UI. Covers
   a handful of existing toggles for now (mouse cursor, fast cursor, auto
-  turbo, the four debug cheat bits, save/load slot 1); everything else
-  above still needs its own hotkey.
+  turbo, the four debug cheat bits, save/load slot 1, and UNLOCK
+  SCENARIOS below); everything else above still needs its own hotkey.
+
+**UNLOCK SCENARIOS** (F10 menu, or `SC_UNLOCK_ALL=1` headless) sets the
+scenario completion "win marks" the game keeps in cartridge SRAM at
+`$700007` — bits 0-6, i.e. the six ordinary scenarios plus the hidden Las
+Vegas — leaving free play and the tutorial alone, since neither is a
+scenario and neither has anything to win. Setting all six also sets the
+game's own "every scenario beaten" bit, exactly as `03:e31c` does.
+
+It writes only what the ROM's own commit path writes: the flag word, the
+header checksum at `$70000e`, and the mirrored backup copy at `$707ff0`.
+Measured on a real save: exactly 8 bytes change, the 4 header bytes and
+their 4 copies. Skipping the checksum or the backup would get the edit
+silently reverted at the next verify (`03:e411`/`03:e446`), which is the
+trap here.
+
+It deliberately does nothing until the game has formatted SRAM itself
+(magic `"SIM"` present) rather than fabricating a header — so it takes
+effect in a real session or from an in-game save state, not from a cold
+boot into the attract demo, where the SRAM subsystem never runs at all.
+SRAM isn't persisted to disk by this host, so the unlock lasts for the
+session and is captured by save states. `SC_SRAM_DUMP_PATH=<file>` dumps
+the 32KB SRAM window with a decoded header line to check it took —
+ordinary WRAM dumps can't, since SRAM lives in the cart model, not
+`g_ram`.
 
 Map/scenario loading ("Please wait...") does genuine procedural
 generation work rather than an artificial delay, so it isn't

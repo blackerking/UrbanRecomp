@@ -73,7 +73,7 @@ SCENARIOS = [
     ('boston',        0x0C, 0xA8E8),
     ('rio',           0x0D, 0x816E),
     ('las_vegas',     0x0D, 0xB987),
-    ('mario_land',    0x0D, 0xCB15),
+    ('free_play',     0x0D, 0xCB15),
     ('tutorial',      0x0D, 0xD131),
 ]
 
