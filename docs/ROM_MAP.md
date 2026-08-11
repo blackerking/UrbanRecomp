@@ -23,12 +23,15 @@ any `bank:addr` with `addr >= 0x8000` is `bank*0x8000 + (addr-0x8000)`
 
 ## Bank layout (confidence: high for 00-05, medium for 09-0f)
 
+Code lives in `00`-`03` and `05`. `04` and `06`-`0f` are data.
+
 | Bank(s) | Contents |
 |---|---|
 | `00` | Core engine: boot, NMI/joypad handling, shared edge-detector (`00:928f-92cb`), LC_LZ5 decompressor (`00:90dd`), various shared utilities |
 | `01` | Shared UI/cursor dispatch code: map cursor movement, mode-select ladder, direction-priority scanners, the `01:8b4e`+ per-frame dispatcher chain |
 | `02` | Modal screens: Tax, Save, and similar bank-2-resident popups |
 | `03` | Mode-select dispatch table (`03:d255`, 20 entries) and its handlers: Map Select, city-name-entry keyboard, Select-game-level, Scenario Select; also the map-generation tile mask/copy loop (`03:cf82-cf9d`) |
+| `04` | **Data, not code.** 0% executed across three recorded play sessions. A byte scan finds 72 `22 xx xx 04` sequences that look like `JSL` into this bank, but only six lie in code banks at all, all six target `04:8f7e` (which is **entirely zero-filled**), and none of the six ever executed -- so they are data coincidences and dead bytes, not calls. The bank's content is regularly-structured bitplane-looking data (e.g. `02 03 05 06 3f 1f 7c 0f`) in ~`$100`-spaced records |
 | `05` | Misc shared routines; at least one position-array stepper (`05:9c73`) not yet fully traced |
 | `09`-`0f` | Compressed graphics/text data (font tileset, dialog text, scenario tileset/text -- see "Compressed data regions" below) and possibly a task-scheduler jump table (`0d:~e07a`, unconfirmed) |
 

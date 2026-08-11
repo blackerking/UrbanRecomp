@@ -446,15 +446,37 @@ service number in `A` selecting one of 11 handlers. The analyzer treats
 == "COP" { return false }`), so any function containing one is truncated
 there and cannot be proven AOT-eligible.
 
-Measured on the current manifest:
+Measured on the current manifest (1068 variants):
 
-- `cop_at_*` is the **single largest LLE-only reason** (239 mentions)
-- **124 of the 328 LLE-only nodes** are blocked by a COP site
-- those account for **5,235 of the 9,797 LLE-only instructions — 53%**
+- LLE-only nodes named by a `cop_at_*` reason: **133**
+- LLE-only nodes containing a `COP` in range: **145**
+- union — COP-implicated: **159 nodes, 7,017 instructions**
+- = **69% of all LLE-only instructions**, 20% of everything analyzed
 
-It stays the top blocker as the frontier grows: the AOT share of analyzed
-instructions has held at ~71% across every step above, so adding roots
-finds more code but does not change the proportion COP costs us.
+`structural_poison` is implicated too, which is easy to miss. Poison is
+*supposed* to be width refutation — proof a given `(pc, m, x)` never
+occurs — but it is 4× enriched for COP-containing ranges against two
+controls:
+
+| node set | contains `COP #$00` in range |
+|---|---|
+| AOT-eligible (control) | 16% |
+| other LLE-only (control) | 12% |
+| **structurally poisoned** | **60%** |
+
+and 210 of the 214 poisoned nodes sit at addresses that **actually
+executed** in a recorded session, so they are real code, not data decoded
+as code.
+
+**Upper bound if this were fixed: AOT share 71.5% → ~91%.** An upper
+bound, not a promise — some nodes would fail again for other reasons once
+the decode continues past the `COP`.
+
+It stays the top blocker as the frontier grows: the AOT share has held at
+~71% across every step above, so adding roots finds more code but does not
+change the proportion COP costs us.
+[`docs/UPSTREAM_cop_syscall.md`](docs/UPSTREAM_cop_syscall.md) is a
+filing-ready write-up.
 
 Declaring the service targets as roots (done above) makes the handlers
 themselves reachable, but it cannot help the *callers*: the caller still
