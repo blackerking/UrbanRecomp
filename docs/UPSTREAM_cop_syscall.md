@@ -157,3 +157,28 @@ Two other snesrecomp defects were found from this project and reported
 separately: the transposed `$4218`/`$4219` auto-joypad halves, and HDMA never
 executing on the interpreter tier. Unlike those, this one is not a correctness
 bug — the interpreter runs `COP` fine — it is purely a static-coverage limit.
+
+### Also found: the AOT tier does not link on MSVC
+
+Separate and much smaller, but it blocks the same goal. `cpu_state.c` ships a
+fallback empty guard table:
+
+```c
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak))
+#endif
+const RamRoutineGuard g_ram_routine_guards[] = { { 0xFFFFFFFFu, 0u, 0u } };
+```
+
+MSVC has no `__attribute__((weak))`, so the `#if` leaves a *strong* definition
+that collides with the one every generated `dispatch_v2.c` emits:
+
+```
+cpu_state.obj : error LNK2005: g_ram_routine_guards already defined in dispatch_v2.obj
+cpu_state.obj : error LNK2005: g_ram_routine_guard_count already defined in dispatch_v2.obj
+```
+
+`__declspec(selectany)` is the MSVC equivalent and would make the same
+weak-fallback pattern work on all three compilers. This project currently works
+around it with `/FORCE:MULTIPLE` on a probe target, which is not something to
+ship.

@@ -98,3 +98,64 @@ if(WIN32)
             $<TARGET_FILE_DIR:SimCitySNESRecomp>
         COMMENT "Copying SDL2.dll next to SimCitySNESRecomp.exe")
 endif()
+
+# ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
+#
+# Optional target, NOT built by default and NOT part of the shipping
+# executable. It links the generated banks in src/gen against the shared
+# AOT/CpuState runtime and reports the dispatch table -- see src/aot_probe.c
+# for why this exists before touching src/main.c.
+#
+#   cmake --build build --target SimCityAOTProbe
+#
+# It is excluded from ALL so a broken or stale src/gen can never break the
+# normal build, and it is skipped entirely when src/gen has not been generated.
+file(GLOB SIMCITY_GEN_SOURCES ${CMAKE_SOURCE_DIR}/src/gen/*.c)
+if(SIMCITY_GEN_SOURCES)
+    add_executable(SimCityAOTProbe EXCLUDE_FROM_ALL
+        src/aot_probe.c
+        ${SIMCITY_GEN_SOURCES}
+        ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
+        ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
+        ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
+        ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
+        ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/host_report.c
+        ${SNESRECOMP_ROOT}/runner/src/framedump.c
+        ${SIMCITY_DEVICE_SOURCES}
+    )
+    if(MSVC)
+        # WORKAROUND, not a solution. cpu_state.c ships an empty fallback
+        # g_ram_routine_guards[] marked __attribute__((weak)) -- a GCC/Clang
+        # construct MSVC ignores -- so its definition collides with the strong
+        # one every generated dispatch_v2.c emits. The portable fix upstream is
+        # __declspec(selectany) on MSVC; until then the probe tolerates the
+        # duplicate. Do NOT carry this into the shipping target: it would also
+        # hide genuine duplicate-symbol bugs.
+        target_link_options(SimCityAOTProbe PRIVATE /FORCE:MULTIPLE)
+    endif()
+    target_include_directories(SimCityAOTProbe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/recomp
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
+        # common_rtl.c includes "config.h", which lives in the desktop runner
+        # dir rather than on the shared runner include path.
+        ${SNESRECOMP_ROOT}/runner/src/desktop
+    )
+    target_compile_definitions(SimCityAOTProbe PRIVATE SDL_MAIN_HANDLED)
+    if(NOT MSVC)
+        target_compile_options(SimCityAOTProbe PRIVATE
+            -w -Wno-implicit-function-declaration)
+    endif()
+    # config.h -> sdl_compat.h -> SDL.h, so the probe needs SDL's headers even
+    # though it opens no window.
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(SimCityAOTProbe PRIVATE SDL2::SDL2)
+    else()
+        target_include_directories(SimCityAOTProbe PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(SimCityAOTProbe PRIVATE ${SDL2_LIBRARIES})
+    endif()
+endif()
