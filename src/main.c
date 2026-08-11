@@ -638,6 +638,56 @@ static bool s_auto_turbo_enabled; /* off by default -- see above */
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
 #define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
 
+/* Post-load power dropout fix.
+ *
+ * Stock-ROM bug. Found and fixed by **Truttle1** (https://www.youtube.com/@Truttle1),
+ * whose `PowerBugPatch.bps` is what identified bit 15 as the power bit; the
+ * analysis below is a re-derivation against our own ROM, and the patch itself
+ * is not redistributed here. After loading a saved game the city reads as
+ * unpowered for a couple of seconds, and because the decline logic runs during
+ * that window the load actively costs population.
+ *
+ * Bit 15 ($8000) of each 16-bit map cell at $7F0200 is the **power** bit. The
+ * tile index is the low 10 bits (see docs/REFERENCE_map_format.md), and the
+ * upper bits are the simulation's. Corroboration from the ROM: `03:99a0`
+ * writes a building into the map as `AND #$8000 ; ... ; ORA $00`, i.e. it
+ * deliberately *preserves* bit 15 of whatever was in the cell -- exactly what
+ * you do to a flag another subsystem owns.
+ *
+ * The fix is to mark every cell powered once, immediately after a load, and
+ * let the game's own power scan clear whatever is genuinely unpowered on its
+ * next pass. `03:c8dd` is the point to do it: `03:c8c8` has just run the map
+ * unpacker (`JSR $d15f`) and `03:c8cb` the SRAM load (`JSR $c8e1`), so the map
+ * is in place.
+ *
+ * Implemented host-side rather than by porting Truttle1's bytes. That patch
+ * injects a routine into free ROM at `00:fb4c` and redirects `03:c8dd` to it;
+ * reproducing its code here would be redistributing someone else's work, which
+ * this repo does not do (same reason the Lua map viewer and the Sylt hack's
+ * data are referenced but never vendored). Doing it from C
+ * needs no free ROM space and avoids a quirk of that patch: because it
+ * replaces `STZ $003a ; RTS` with a 4-byte `JSL`, its `RTL` lands on `03:c8e1`
+ * and runs the SRAM loader a second time. That is harmless -- the loader is an
+ * idempotent copy and does not touch $7F0200-$7F5FBF -- but it is not
+ * something worth reproducing.
+ *
+ * One deliberate difference: Truttle1's patch skips the fix when `$0421`
+ * is 1. `$0421` selects the save slot (`03:c8e6` uses it to pick base
+ * `$700000` vs `$703ff0`), so that guard appears to exclude the second save
+ * slot from the fix. This applies to both slots. If that turns out to matter,
+ * this is the line to revisit. */
+static bool s_power_fix = true;
+static uint32_t s_power_fix_hits;
+
+static void apply_power_fix(void) {
+  for (int i = 0; i < 12000; i++)
+    g_ram[0x10201 + i * 2] |= 0x80;   /* $7F0200 + i*2 + 1, bit 7 = cell bit 15 */
+  if (s_power_fix_hits++ < 8)
+    fprintf(stderr, "[powerfix] marked 12000 cells powered after load "
+            "(hit #%u, frame %llu)\n", s_power_fix_hits,
+            (unsigned long long)s_frames);
+}
+
 static bool run_one_frame(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
@@ -648,6 +698,9 @@ static bool run_one_frame(void) {
     if (s_auto_turbo_enabled &&
         ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd)))
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
+    /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
+     * the map already unpacked and SRAM already restored. */
+    if (s_power_fix && cpu->k == 0x03 && cpu->pc == 0xc8dd) apply_power_fix();
     /* LC_LZ5 decompressor instrumentation -- see the SC_DECOMP_TRACE comment
      * above bus_read for the decoded calling convention and why the samples
      * are taken at 00:90eb / 00:9106 rather than at the JSR and the RTS. */
@@ -1314,6 +1367,7 @@ static SettingDesc s_settings[] = {
   { "SCENARIO OVR",          kSettingCycle, &s_scenario_override,  0,    NULL,
     kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])) },
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
+  { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },

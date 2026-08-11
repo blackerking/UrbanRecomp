@@ -165,6 +165,37 @@ maps you start on rather than cities you inherit. Free play's terrain is
 drawn as Mario's face, which is worth knowing before assuming a decode
 has gone wrong.
 
+### Post-load power dropout (stock-ROM bug, fixed)
+
+After a load the whole city reads as unpowered for several seconds, and
+since the decline logic runs during that window, loading a game actively
+costs you population.
+
+Found and fixed by **Truttle1** (<https://www.youtube.com/@Truttle1>),
+whose patch is what identified **bit 15 (`$8000`) of each 16-bit map
+cell** as the power bit. Measured here to confirm it: loading a scenario
+and sampling every 60 frames, powered cells sit at **0 for the first
+~400 frames**, then jump to 2888 and settle at 3043 — a ~6.7-second
+window with nothing powered.
+
+`FIX POWER ON LOAD` in the F10 menu (**on by default**) marks every cell
+powered once the map is in place at `03:c8dd`, letting the game's own
+power scan clear whatever is genuinely unpowered on its next pass.
+
+Implemented host-side in C rather than by porting Truttle1's bytes — this
+repo doesn't vendor third-party work, and doing it from C needs no free
+ROM space. It also avoids a quirk of that patch: because it replaces
+`STZ $003a ; RTS` with a 4-byte `JSL`, its `RTL` lands on `03:c8e1` and
+runs the SRAM loader a second time (harmless — an idempotent copy that
+doesn't touch `$7F0200`, so the power bits survive).
+
+**Caveat**: the trigger point `03:c8dd` is taken from Truttle1's patch,
+which is tested and works. This project's own headless harness has not
+managed to reach that address (the mode-freeze technique doesn't get
+there), so the fix's activation has *not* been independently observed
+here — only its effect is understood. Verify in play; toggle it off in
+the F10 menu to compare.
+
 ### HDMA execution was entirely missing (also fixed)
 
 Unrelated to the joypad-register defect above: this project's cycle-accurate

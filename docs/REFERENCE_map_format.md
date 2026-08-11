@@ -28,6 +28,23 @@ tp = read_u16_le(TILE_ADDR + v*2)          ; index -> background tile
 tu = read_u16_le(TILU_ADDR + v*2)          ; index -> overlay tile
 ```
 
+### The upper bits of a live cell
+
+The stored map uses only the low 10 bits. In the **live** buffer the simulation
+owns the top bits, so a live cell is not directly comparable to a decoded one:
+
+| bit | meaning |
+|---|---|
+| 15 (`$8000`) | **power** — set on powered cells. Identified by Truttle1 (<https://www.youtube.com/@Truttle1>) and confirmed here by measurement (below). `03:99a0` writes a building as `AND #$8000 ; … ; ORA $00`, i.e. deliberately preserving this bit, which is what you do to a flag another subsystem owns |
+| 14 (`$4000`) | set by `03:99ac` on the `Y == 8` element while writing a 3×3 block (the building's centre), and OR'd across a scan loop at `03:82ec`. Meaning not pinned down |
+| 9-0 | tile index |
+
+Measured after loading a scenario, sampling every 60 frames: powered cells stay
+at **0 for the first ~400 frames**, then jump to 2888 and settle at 3043. That
+~6.7-second window with the whole city reading unpowered is the post-load power
+dropout players see — and because the decline logic runs during it, the load
+costs population. See the README for the fix.
+
 Overlay value `0x300` means "empty" and is skipped. The overlay tile for a cell
 is drawn offset by −1,−1, i.e. it overlaps the cell up and left of itself.
 
