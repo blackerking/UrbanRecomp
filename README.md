@@ -376,7 +376,31 @@ means concretely.
 |---|---|---|---|---|
 | architectural vectors only | 26 | 314 | — | — |
 | \+ screen-mode + map-path entries | 60 | 383 | 254 | 129 |
-| \+ COP service entries | 71 | **411** | **275** (11,421 insns) | 136 (4,805 insns) |
+| \+ COP service entries | 71 | 411 | 275 (11,421 insns) | 136 (4,805 insns) |
+| \+ power scan | 72 | 412 | 275 | 137 |
+| **\+ entries confirmed by execution** | **441** | **997** | **669** (24,244 insns) | 328 (9,797 insns) |
+
+### The play-session loop is what actually moves this
+
+The last row more than doubled the frontier in one step, and it came from
+playing the game rather than from reading it:
+
+```bash
+SC_PC_BITMAP_BANK=all SC_PC_BITMAP_PATH=coverage.bin ./build/Release/SimCitySNESRecomp.exe simcity.sfc
+```
+
+Play — build, save, load, open every window — then close the window; the
+bitmap is written on exit. Cross-referencing it against the manifest finds
+addresses that an **executed** `JSR`/`JSL` actually called and that the
+analyzer's closure does not already cover. One ~5-minute session over a
+small city produced **369** such entries.
+
+Execution coverage from that session was 22,284 ROM bytes (11.3% of the
+code banks `00`-`05`), up from 6,284 measured headlessly — and 61% of what
+executed was outside the analyzer's coverage, which is why the yield was
+so large. Repeating this with sessions that reach different screens
+(disasters, the remaining overlays, bank `04`, which showed 0% executed)
+should keep paying until it saturates.
 
 The two things that moved it were both **indirect dispatch tables read
 straight out of the ROM**, which is exactly what a static closure cannot
@@ -396,10 +420,13 @@ there and cannot be proven AOT-eligible.
 
 Measured on the current manifest:
 
-- `cop_at_*` is the **single largest LLE-only reason** (165 mentions, 93
-  distinct COP sites named)
-- **69 of the 136 LLE-only nodes** are blocked by a COP site
-- those account for **3,151 of the 4,805 LLE-only instructions — 66%**
+- `cop_at_*` is the **single largest LLE-only reason** (239 mentions)
+- **124 of the 328 LLE-only nodes** are blocked by a COP site
+- those account for **5,235 of the 9,797 LLE-only instructions — 53%**
+
+It stays the top blocker as the frontier grows: the AOT share of analyzed
+instructions has held at ~71% across every step above, so adding roots
+finds more code but does not change the proportion COP costs us.
 
 Declaring the service targets as roots (done above) makes the handlers
 themselves reachable, but it cannot help the *callers*: the caller still

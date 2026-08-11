@@ -2408,5 +2408,14 @@ int main(int argc, char **argv) {
   SDL_Quit();
   write_pc_bitmap_dump();
   write_map_trace_summary();
+  /* Same SRAM dump the headless path does -- a real play session is the only
+   * way to get SRAM with actual saved cities in it, so it is worth capturing
+   * from the windowed exit too. */
+  { const char *p = getenv("SC_SRAM_DUMP_PATH");
+    if (p && *p) {
+      report_sram_header("exit");
+      fprintf(stderr, write_sram_dump(p) ? "dumped SRAM to %s\n"
+                                         : "failed to write SRAM dump to %s\n", p);
+    } }
   return 0;
 }
