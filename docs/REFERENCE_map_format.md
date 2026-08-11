@@ -188,11 +188,37 @@ Francisco (peninsula and bay), Tokyo (bay, with the Imperial Palace grounds as a
 distinct block), Las Vegas (desert grid with the diagonal across it), free
 play's Mario-face island, and the tutorial map's lake and islands.
 
-### Still open
+### Confirmed against the live game
 
-The map load has not yet been watched end-to-end in the emulator, because none
-of the save states sits at scenario selection and no navigation route to it was
-built. Everything above is derived from the ROM's own routines plus a
-byte-exact oracle for stage 1, and every internal consistency check closes — but
-a live `$7F0200` capture during a real scenario load would still be worth having
-before generating *new* map content, and is the natural next step.
+Closed with save states captured by hand at the scenario-select screen, on a
+freshly loaded San Francisco, and on a freshly loaded free play, then diffing
+each live `$7F0200` against this decode:
+
+| map | result |
+|---|---|
+| free play | **24000 / 24000 bytes identical — 100.00%** |
+| San Francisco | 11910/12000 cells exact; 10-bit tile index agrees on 11974/12000 (99.78%) |
+
+Free play matching to the byte is the strong result: it had just been loaded and
+the simulation had not yet altered it, so it is a clean comparison and the decode
+reproduces the game's own buffer exactly.
+
+San Francisco's residual is fully accounted for and is not decode error:
+
+- **64 cells differ only in bit 14** (`$4000`). That is a live simulation status
+  flag on the cell, not part of the stored map — consistent with the format
+  above, which takes the tile index as `value & $03FF` and leaves the upper bits
+  to the game.
+- **26 cells differ in the tile index itself**, i.e. the simulation had already
+  mutated them. Running the same state on for 90 more frames raises the count
+  (90 → 299 differing cells), which is what ongoing simulation looks like and
+  what a decode error would *not* do.
+
+### Free play uses the stored map, not the generator
+
+Also settled by that capture: free play (index 7) loads `0d:cb15` through the
+ordinary path — its live map matched this decode byte for byte, with the map
+seed `$0b27`-`$0b29` all zero. So the procedural generator at `03:d840` (a real
+PRNG-driven terrain generator, see `docs/ROM_MAP.md`) is *not* what produces the
+free-play map, despite both existing. Which mode does drive the generator is not
+established here.
