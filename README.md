@@ -355,6 +355,50 @@ been dropped from the trigger set entirely (it was redundant anyway --
 `03:d862`, the map-gen loop that *calls* it, is itself a trigger), so
 the feature behaves sanely if switched back on.
 
+## AOT frontier: where the static coverage actually stops
+
+`tools/regen.sh` reports the analyzer's static frontier, and it is worth
+tracking as the real progress metric for this project — the interpreter
+runs everything today, so this number is what "static recompilation"
+means concretely.
+
+| | roots | exact variants | AOT-eligible | LLE-only |
+|---|---|---|---|---|
+| architectural vectors only | 26 | 314 | — | — |
+| \+ screen-mode + map-path entries | 60 | 383 | 254 | 129 |
+| \+ COP service entries | 71 | **411** | **275** (11,421 insns) | 136 (4,805 insns) |
+
+The two things that moved it were both **indirect dispatch tables read
+straight out of the ROM**, which is exactly what a static closure cannot
+follow: the 23-entry screen-handler table behind `03:d289`'s
+`JMP ($d255,X)`, and the 11-entry COP service table behind `00:8211`'s
+`JSR ($8223,X)`. Neither was guessed; both were decoded and cross-checked
+(COP service 8 is the LC_LZ5 decompressor, matching every
+`LDA #$0008 ; COP #$00` call site in the ROM).
+
+### The blocker: `COP` is this game's syscall instruction
+
+This ROM uses `COP #$00` as a general syscall — **309 call sites**, with a
+service number in `A` selecting one of 11 handlers. The analyzer treats
+`COP` as a decode terminator (`insn.rs`: `if insn.mnem == "BRK" || insn.mnem
+== "COP" { return false }`), so any function containing one is truncated
+there and cannot be proven AOT-eligible.
+
+Measured on the current manifest:
+
+- `cop_at_*` is the **single largest LLE-only reason** (165 mentions, 93
+  distinct COP sites named)
+- **69 of the 136 LLE-only nodes** are blocked by a COP site
+- those account for **3,151 of the 4,805 LLE-only instructions — 66%**
+
+Declaring the service targets as roots (done above) makes the handlers
+themselves reachable, but it cannot help the *callers*: the caller still
+has an unprovable edge mid-function. Reaching high static coverage on this
+game needs the framework to model `COP #$imm` as a call-with-return
+through the COP vector, the way it already models JSL dispatch helpers
+with inline tables. That is an upstream `snesrecomp` change, not something
+this repo can fix in a cfg.
+
 ## Next phase: AOT/CpuState hybrid tier
 
 To actually run the AOT-compiled banks `tools/regen.sh` already produces
