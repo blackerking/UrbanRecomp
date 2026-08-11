@@ -590,10 +590,12 @@ static uint8_t s_addr_trace_last_ed = 0xff;
 
 /* Auto-fast-forward during map/scenario generation. Found live (bsnes
  * trace, user-captured): 03:d862 is a 10-iteration loop (X counts 9..0)
- * calling the checksum/hash accumulator at 00:824b/00:824f, which folds
- * scenario parameters ($0b27-$0b29) into a rolling pair of WRAM
- * accumulators ($59/$5b/$5d) -- almost certainly part of procedural
- * map/seed generation. This is genuine, real computation, not a dumb
+ * calling the PRNG at 00:824b/00:824f, after seeding it from the map seed
+ * ($0b27-$0b29) into a rolling pair of WRAM state words ($59/$5b/$5d).
+ * Confirmed procedural map generation: 01:f1f1 draws a random byte from
+ * that PRNG and branches ~34%/66% into five distinct terrain-feature
+ * routines. (The iteration count is seed-derived, 1-32, not the fixed 10
+ * this comment used to claim.) This is genuine, real computation, not a dumb
  * idle-delay loop (confirmed: our interpreter already finishes every
  * frame's work in far under the 16.67ms budget -- SC_FRAME_TIME never
  * fires -- so the "wait" is the ROM deliberately spreading this work
@@ -617,7 +619,14 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * in effectively *continuous* turbo, since each hit re-arms the holdoff
  * before the previous one expires.
  *
- * Root cause of the false positives: 00:824b is the shared checksum/hash
+ * Root cause of the false positives: 00:824b is the game's PRNG (see the
+ * ROM_MAP entry -- an additive generator over $59/$5b, taking no input,
+ * which is what rules out the "checksum" reading these comments used to
+ * carry), so it is called constantly throughout ordinary simulation, not
+ * just during map generation. Same conclusion as before -- it is a bad
+ * trigger -- but for a much more obvious reason. The older wording below is
+ * kept only because the decision it justified still stands:
+ * 00:824b is the shared checksum/hash
  * accumulator, not map-generation-specific code -- the game calls it
  * during normal simulation too. It's also redundant as a trigger, since
  * 03:d862 (the map-gen loop that calls it) is itself already a trigger,

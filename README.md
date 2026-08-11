@@ -310,7 +310,10 @@ There used to be an *automatic* fast-forward that detected the load
 screen and applied the same speed-up without Tab. It's now **off by
 default** ("AUTO TURBO" in the F10 menu re-enables it), because one of
 its three trigger addresses (`00:824b`) turned out to be the game's
-shared checksum/hash routine rather than map-generation-specific code,
+**PRNG** — called constantly throughout ordinary simulation — rather
+than map-generation-specific code (earlier revisions of this README
+called it a "shared checksum/hash routine"; it takes no input and only
+advances `$59`/`$5b`, so it was never a checksum),
 so it also fired during ordinary play -- each hit arming a 20-frame 6x
 burst. Measured with `SC_ADDR_TRACE` against real gameplay save states:
 sporadic on the classic map screen (~4 hits per 2000 frames), but
