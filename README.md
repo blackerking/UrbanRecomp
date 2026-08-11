@@ -379,7 +379,8 @@ means concretely.
 | \+ COP service entries | 71 | 411 | 275 (11,421 insns) | 136 (4,805 insns) |
 | \+ power scan | 72 | 412 | 275 | 137 |
 | \+ entries confirmed by execution (session 1) | 441 | 997 | 669 (24,244 insns) | 328 (9,797 insns) |
-| **\+ a second session (disasters, overlays)** | **469** | **1038** | **695** (24,838 insns) | 343 (10,085 insns) |
+| \+ a second session (disasters, overlays) | 469 | 1038 | 695 (24,838 insns) | 343 (10,085 insns) |
+| **\+ a third (every scenario, dialogs, endings)** | **487** | **1068** | **720** (25,448 insns) | 348 (10,150 insns) |
 
 ### The play-session loop is what actually moves this
 
@@ -401,23 +402,33 @@ code banks `00`-`05`), up from 6,284 measured headlessly — and 61% of what
 executed was outside the analyzer's coverage, which is why the yield was
 so large.
 
-**It saturates fast.** A second session reached 5,815 addresses the first
-never did (union: 28,099 bytes, 14.3% of the code banks) but yielded only
-**28** new entry points, because the first session's roots had already let
-the closure reach most of that code statically. Two sessions is most of
-the value; a third would want to target something genuinely different.
+**It saturates fast.** Three sessions, each deliberately targeting
+different ground:
+
+| session | new addresses reached | new entry points |
+|---|---|---|
+| 1 — build, save, load, windows | 22,284 | **369** |
+| 2 — disasters, overlays, other scenarios | 5,815 | 28 |
+| 3 — every scenario, dialogs, endings | 1,641 | 18 |
+
+The first session found almost everything. Later sessions still reached
+genuinely new code, but the first session's roots had already let the
+closure prove most of it statically, so the marginal yield collapsed.
+Union coverage is 29,740 bytes, 15.1% of the code banks.
 
 Against the union of both sessions, of everything that actually executed:
 
 | | share of executed addresses |
 |---|---|
-| inside an AOT-eligible node | 56.8% |
-| inside an LLE-only node | 41.6% |
-| not analyzed at all | 13.3% |
+| inside an AOT-eligible node | 57.1% |
+| inside an LLE-only node | 41.4% |
+| not analyzed at all | 13.4% |
 
 So roughly **four in ten executed instructions still fall in code the
 analyzer refuses to compile** — and that is the COP problem below, not a
-shortage of roots.
+shortage of roots. The AOT share of analyzed instructions has sat at
+**~71% across every step of this table**, from 314 variants to 1068:
+seeding roots grows the total and has never once moved the ratio.
 
 The two things that moved it were both **indirect dispatch tables read
 straight out of the ROM**, which is exactly what a static closure cannot
