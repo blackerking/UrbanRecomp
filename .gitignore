@@ -70,6 +70,6 @@ SimCity_map.lua
 # and save states above. What they were USED for is committed (the cfg
 # entry points in recomp/, and the measurements in README.md); the captures
 # themselves are not.
-coverage.bin
+coverage*.bin
 session_sram.bin
 *_sram.bin

@@ -378,12 +378,13 @@ means concretely.
 | \+ screen-mode + map-path entries | 60 | 383 | 254 | 129 |
 | \+ COP service entries | 71 | 411 | 275 (11,421 insns) | 136 (4,805 insns) |
 | \+ power scan | 72 | 412 | 275 | 137 |
-| **\+ entries confirmed by execution** | **441** | **997** | **669** (24,244 insns) | 328 (9,797 insns) |
+| \+ entries confirmed by execution (session 1) | 441 | 997 | 669 (24,244 insns) | 328 (9,797 insns) |
+| **\+ a second session (disasters, overlays)** | **469** | **1038** | **695** (24,838 insns) | 343 (10,085 insns) |
 
 ### The play-session loop is what actually moves this
 
-The last row more than doubled the frontier in one step, and it came from
-playing the game rather than from reading it:
+The big step here came from playing the game rather than from reading it:
+
 
 ```bash
 SC_PC_BITMAP_BANK=all SC_PC_BITMAP_PATH=coverage.bin ./build/Release/SimCitySNESRecomp.exe simcity.sfc
@@ -398,9 +399,25 @@ small city produced **369** such entries.
 Execution coverage from that session was 22,284 ROM bytes (11.3% of the
 code banks `00`-`05`), up from 6,284 measured headlessly — and 61% of what
 executed was outside the analyzer's coverage, which is why the yield was
-so large. Repeating this with sessions that reach different screens
-(disasters, the remaining overlays, bank `04`, which showed 0% executed)
-should keep paying until it saturates.
+so large.
+
+**It saturates fast.** A second session reached 5,815 addresses the first
+never did (union: 28,099 bytes, 14.3% of the code banks) but yielded only
+**28** new entry points, because the first session's roots had already let
+the closure reach most of that code statically. Two sessions is most of
+the value; a third would want to target something genuinely different.
+
+Against the union of both sessions, of everything that actually executed:
+
+| | share of executed addresses |
+|---|---|
+| inside an AOT-eligible node | 56.8% |
+| inside an LLE-only node | 41.6% |
+| not analyzed at all | 13.3% |
+
+So roughly **four in ten executed instructions still fall in code the
+analyzer refuses to compile** — and that is the COP problem below, not a
+shortage of roots.
 
 The two things that moved it were both **indirect dispatch tables read
 straight out of the ROM**, which is exactly what a static closure cannot
