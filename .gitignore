@@ -71,5 +71,6 @@ SimCity_map.lua
 # entry points in recomp/, and the measurements in README.md); the captures
 # themselves are not.
 coverage*.bin
+wram_map*.bin
 session_sram.bin
 *_sram.bin

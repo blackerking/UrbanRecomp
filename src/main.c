@@ -167,6 +167,73 @@ static uint8_t s_pc_bitmap[4096];
 static uint8_t s_pc_bitmap_all[64][4096];
 static uint64_t s_banks_seen; /* bit N set if bank N ever held cpu->k (diagnostic only) */
 
+/* SC_WRAM_MAP=<file>: build a live map of WRAM usage over a play session --
+ * which of the 128KB is read, which is written, and *which PC first wrote
+ * each byte*.
+ *
+ * The PC-execution bitmap (SC_PC_BITMAP_BANK) answers "which routines run".
+ * This is its counterpart for data: it answers "which variables exist, and
+ * who owns them". docs/ROM_MAP.md's WRAM table was built one address at a
+ * time from targeted investigations; this produces the whole picture in one
+ * session, and the first-writer PC turns an anonymous address into a lead --
+ * find the routine, and you have the variable's meaning.
+ *
+ * Records the LAST writer, not the first. Measured: the boot path writes all
+ * 131072 bytes of WRAM (it clears the lot), so a first-writer map is entirely
+ * owned by the clear loop and carries no signal whatsoever. The last writer
+ * after a play session is the routine that actually maintains the byte.
+ * A saturating write count comes along too, which separates hot per-frame
+ * state from something touched once at init.
+ *
+ * Dumped at exit as a flat binary: 0x20000 flag bytes (bit0 read, bit1
+ * written), then 0x20000 little-endian uint32 last-writer PCs (0xFFFFFFFF
+ * where never written), then 0x20000 little-endian uint16 write counts.
+ * Cheap enough to leave on for a whole session: a few array stores per bus
+ * access. */
+static bool s_wram_map;
+static uint8_t *s_wram_flags;      /* [0x20000] bit0 = read, bit1 = written */
+static uint32_t *s_wram_last_pc;   /* [0x20000] last writer, (bank<<16)|pc */
+static uint16_t *s_wram_wcount;    /* [0x20000] saturating write count */
+
+/* WRAM offset for a 24-bit bus address, or -1 if it is not WRAM.
+ * $7E/$7F are direct; banks $00-$3F and $80-$BF mirror $7E0000-$7E1FFF at
+ * $0000-$1FFF, which is where nearly every variable this project has named
+ * actually lives. */
+static inline int wram_offset(uint32_t adr) {
+  uint8_t bank = (uint8_t)(adr >> 16);
+  uint16_t off = (uint16_t)adr;
+  if (bank == 0x7e) return off;
+  if (bank == 0x7f) return 0x10000 + off;
+  if ((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) && off < 0x2000) return off;
+  return -1;
+}
+
+static void wram_map_note(uint32_t adr, bool write) {
+  int o = wram_offset(adr);
+  if (o < 0) return;
+  if (!write) { s_wram_flags[o] |= 0x01; return; }
+  s_wram_flags[o] |= 0x02;
+  s_wram_last_pc[o] = ((uint32_t)g_cpu->k << 16) | g_cpu->pc;
+  if (s_wram_wcount[o] != 0xffff) s_wram_wcount[o]++;
+}
+
+static void write_wram_map(const char *path) {
+  FILE *f = fopen(path, "wb");
+  if (!f) { fprintf(stderr, "failed to open %s\n", path); return; }
+  fwrite(s_wram_flags, 1, 0x20000, f);
+  fwrite(s_wram_last_pc, 4, 0x20000, f);
+  fwrite(s_wram_wcount, 2, 0x20000, f);
+  fclose(f);
+  uint32_t r = 0, w = 0, hot = 0;
+  for (int i = 0; i < 0x20000; i++) {
+    if (s_wram_flags[i] & 1) r++;
+    if (s_wram_flags[i] & 2) w++;
+    if (s_wram_wcount[i] > 16) hot++;
+  }
+  fprintf(stderr, "[wrammap] read=%u written=%u hot(>16 writes)=%u of 131072 -> %s\n",
+          r, w, hot, path);
+}
+
 /* SC_DECOMP_TRACE=1: instrument the LC_LZ5 decompressor at 00:90dd, logging
  * one line per call with its source pointer, its output range, and how many
  * bytes it actually produced.
@@ -230,6 +297,7 @@ static int s_map_write_pc_count;
 static uint8_t bus_read(void *mem, uint32_t adr) {
   (void)mem;
   uint8_t v = snes_read(g_snes, adr);
+  if (s_wram_map) wram_map_note(adr, false);
   uint16_t reg = (uint16_t)adr;
   uint8_t bank = (uint8_t)(adr >> 16);
   bool hw = bank < 0x40 || (bank >= 0x80 && bank < 0xc0);
@@ -278,6 +346,7 @@ static uint8_t bus_read(void *mem, uint32_t adr) {
 }
 static void bus_write(void *mem, uint32_t adr, uint8_t v) {
   (void)mem;
+  if (s_wram_map) wram_map_note(adr, true);
   uint16_t reg = (uint16_t)adr;
   uint8_t bank = (uint8_t)(adr >> 16);
   bool hw = bank < 0x40 || (bank >= 0x80 && bank < 0xc0);
@@ -1709,6 +1778,7 @@ static int run_qualification(uint64_t frames) {
   fprintf(stderr, "banks_seen=%016llx\n", (unsigned long long)s_banks_seen);
   write_pc_bitmap_dump();
   write_map_trace_summary();
+  { const char *p = getenv("SC_WRAM_MAP"); if (s_wram_map && p) write_wram_map(p); }
   { const char *p = getenv("SC_SRAM_DUMP_PATH");
     if (p && *p) {
       report_sram_header("exit");
@@ -1730,6 +1800,16 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
   { const char *e = getenv("SC_DECOMP_TRACE"); if (e && *e) s_decomp_trace = true; }
   { const char *e = getenv("SC_UNLOCK_ALL"); if (e && *e) s_unlock_all = true; }
+  { const char *e = getenv("SC_WRAM_MAP");
+    if (e && *e) {
+      s_wram_flags = (uint8_t *)calloc(0x20000, 1);
+      s_wram_last_pc = (uint32_t *)malloc(0x20000 * sizeof(uint32_t));
+      s_wram_wcount = (uint16_t *)calloc(0x20000, sizeof(uint16_t));
+      if (s_wram_flags && s_wram_last_pc && s_wram_wcount) {
+        memset(s_wram_last_pc, 0xff, 0x20000 * sizeof(uint32_t));
+        s_wram_map = true;
+      }
+    } }
   { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_MENU_PREVIEW");
@@ -2408,6 +2488,7 @@ int main(int argc, char **argv) {
   SDL_Quit();
   write_pc_bitmap_dump();
   write_map_trace_summary();
+  { const char *p = getenv("SC_WRAM_MAP"); if (s_wram_map && p) write_wram_map(p); }
   /* Same SRAM dump the headless path does -- a real play session is the only
    * way to get SRAM with actual saved cities in it, so it is worth capturing
    * from the windowed exit too. */
