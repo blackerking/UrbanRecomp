@@ -135,6 +135,34 @@ ROM, so it's never committed). Verified against this project's own ROM:
 every dialog text block decompresses and renders as readable English
 text.
 
+### Scenario map export tool
+
+`tools/extract_maps.py` decodes every scenario map out of the ROM to
+`extracted_assets/maps/` — a raw 24000-byte `.bin` in exactly the layout
+the game keeps live at `$7F0200` (120×100 cells, one little-endian 16-bit
+tile index each), plus a false-colour `.png` preview. No dependencies; run
+`python tools/extract_maps.py` from the repo root with your ROM staged as
+`simcity.sfc`.
+
+The map format used to be the big open question here — the data is
+compressed and two static guesses had already been tried and rejected. It
+turned out to be four stages: the same LC_LZ5 compression used everywhere
+else in this ROM, then a word-level LZ pass, a run-length pass, and a
+final walk that stamps 3×3 building blocks into a zero-filled grid.
+[`docs/REFERENCE_map_format.md`](docs/REFERENCE_map_format.md) documents
+all four and how each was verified.
+
+Two things fell out of doing it properly rather than guessing again. The
+pointer table holds **nine** maps, not eight — the ninth, the tutorial
+map, was being read as padding. And the earlier "definitely not LC_LZ5"
+result was simply a bad file offset, not a real property of the data; the
+existing decompressor handles those streams fine when pointed at the
+right byte.
+
+The last two entries are the Mario bonus land and the tutorial map. Both
+place zero buildings, where every real scenario stamps 200+ — the tell
+that they're maps you start on rather than cities you inherit.
+
 ### HDMA execution was entirely missing (also fixed)
 
 Unrelated to the joypad-register defect above: this project's cycle-accurate

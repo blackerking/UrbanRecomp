@@ -109,6 +109,16 @@ static uint64_t s_nmi_serviced;
  *                           channel's control/dest/addr regs ($43x0-$43xa)
  *                           -- for finding whether/how a screen sets up
  *                           Mode 7 + HDMA (e.g. the tilted "View" map).
+ * SC_DECOMP_TRACE=1         log every call to the LC_LZ5 decompressor at
+ *                           00:90dd -- source pointer, destination, and the
+ *                           true output extent measured off the bus. This is
+ *                           what settled the scenario-map format; see the
+ *                           long comment above bus_read and
+ *                           docs/REFERENCE_map_format.md.
+ * SC_MAP_WRITE_TRACE=1      log writes into the live 24000-byte map buffer at
+ *                           $7F0200, with a distinct-PC histogram at exit --
+ *                           finds what fills the map without assuming which
+ *                           routine does it.
  * SC_FRAME_BANK_TRACE=<start-frame>,<end-frame>
  *                           log the CPU's bank:PC at every frame boundary
  *                           in that range, unconditionally (not gated on
@@ -156,6 +166,67 @@ static uint64_t s_pc_bitmap_start_frame;
 static uint8_t s_pc_bitmap[4096];
 static uint8_t s_pc_bitmap_all[64][4096];
 static uint64_t s_banks_seen; /* bit N set if bank N ever held cpu->k (diagnostic only) */
+
+/* SC_DECOMP_TRACE=1: instrument the LC_LZ5 decompressor at 00:90dd, logging
+ * one line per call with its source pointer, its output range, and how many
+ * bytes it actually produced.
+ *
+ * This exists to settle the scenario-map compression question (see
+ * docs/REFERENCE_map_format.md): the eight scenario map pointers in the
+ * struct-of-arrays table at 03:ce70 are known, but the format they're stored
+ * in is not, and two static guesses (LC_LZ5 at the pointer itself; a raw
+ * 16-bit cell array) have already been tested and failed. Rather than guess a
+ * third time, watch the load path do it. Correct output is known exactly --
+ * 24000 bytes (120x100 cells x 2) of 10-bit indices -- so a call whose output
+ * length is 24000 is the map load, whatever its source turns out to be.
+ *
+ * Calling convention, decoded by hand from 00:90dd (the disassembler
+ * misaligns here: SEP #$20 makes A 8-bit, so `c9 ff` at 00:9102 is CMP #$ff,
+ * the terminator test, not a 16-bit compare):
+ *
+ *   00:90dd  PHP / PHB / SEP #$20 / REP #$10
+ *   00:90e3  LDA $000b ; PHA ; PLB     ; DB = source bank
+ *   00:90eb  LDX $000e                 ; X   = output index
+ *   00:90ef  LDY $0009                 ; Y   = source offset
+ *   ...      STA $7e8000,X             ; output base is $7E8000, not $7E0000
+ *   00:9106  PLB / PLP / RTS           ; reached on the $ff terminator
+ *
+ * so the source is $0b:$0009 and the destination is $7E8000 + $000e. Note
+ * $7E8000 + a 16-bit X spans up to $7F7FFF, which does reach the live map
+ * buffer at $7F0200 ($7E8000 + $8200).
+ *
+ * Entry is sampled at 00:90eb rather than 00:90dd so cpu->db is already the
+ * source bank: `LDA $000b` at 00:90e3 runs under the *caller's* DB, so the
+ * post-PLB register is the authoritative source bank, not our own read of
+ * $000b. The bank-cross helper at 00:926d bumps the DB register (and resets Y
+ * to $8000) without updating $000b, so the exit sample must come from cpu->db
+ * too -- taken at 00:9106, before PLB restores the caller's bank. */
+static bool s_decomp_trace;
+static bool s_decomp_active;
+static uint32_t s_decomp_src;       /* (bank<<16)|offset, sampled at entry */
+static uint32_t s_decomp_out_base;  /* $7e8000 + $000e, sampled at entry */
+static uint32_t s_decomp_wmin, s_decomp_wmax; /* observed output extent */
+static uint32_t s_decomp_wcount;
+static uint32_t s_decomp_calls;
+
+/* SC_MAP_WRITE_TRACE=1: watch every write into the live map buffer
+ * ($7F0200..$7F607F, 120x100x2 bytes) and report which PCs produce it.
+ *
+ * Complements the decompressor trace above rather than duplicating it: it
+ * makes no assumption that 00:90dd is what fills the map. If the scenario
+ * maps are unpacked by some other routine entirely, this finds it, and if
+ * nothing writes the region at all then the map lives somewhere other than
+ * where the Lua viewer reads it. Rate-limited to the first few writes with
+ * full PCs, plus a distinct-PC histogram at exit, since a full map fill is
+ * 24000 writes. */
+#define kMapBufStart 0x7f0200u
+#define kMapBufEnd   (0x7f0200u + 24000u)
+static bool s_map_write_trace;
+static uint32_t s_map_write_hits;
+#define SC_MAP_WRITE_PCS 16
+static struct { uint32_t pc; uint32_t count; } s_map_write_pcs[SC_MAP_WRITE_PCS];
+static int s_map_write_pc_count;
+
 static uint8_t bus_read(void *mem, uint32_t adr) {
   (void)mem;
   uint8_t v = snes_read(g_snes, adr);
@@ -215,6 +286,30 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
        reg == 0x4218 || reg == 0x4219 || reg == 0x421a || reg == 0x421b))
     fprintf(stderr, "[io f=%llu] WRITE %04x = %02x\n",
             (unsigned long long)s_frames, reg, v);
+  /* Output-extent tracking for SC_DECOMP_TRACE. Deliberately measured from
+   * the bus rather than from X at the RTS: it captures what the routine
+   * really wrote, including any bank-crossing past $7E:ffff, and needs no
+   * assumption about which register holds the final output index. */
+  if (s_decomp_active && (bank == 0x7e || bank == 0x7f)) {
+    if (adr < s_decomp_wmin) s_decomp_wmin = adr;
+    if (adr > s_decomp_wmax) s_decomp_wmax = adr;
+    s_decomp_wcount++;
+  }
+  if (s_map_write_trace && adr >= kMapBufStart && adr < kMapBufEnd) {
+    uint32_t pc = ((uint32_t)g_cpu->k << 16) | g_cpu->pc;
+    if (s_map_write_hits < 12)
+      fprintf(stderr, "[mapwrite f=%llu] pc=%02x:%04x $%06x = %02x\n",
+              (unsigned long long)s_frames, g_cpu->k, g_cpu->pc, adr, v);
+    s_map_write_hits++;
+    int i = 0;
+    for (; i < s_map_write_pc_count; i++)
+      if (s_map_write_pcs[i].pc == pc) { s_map_write_pcs[i].count++; break; }
+    if (i == s_map_write_pc_count && s_map_write_pc_count < SC_MAP_WRITE_PCS) {
+      s_map_write_pcs[s_map_write_pc_count].pc = pc;
+      s_map_write_pcs[s_map_write_pc_count].count = 1;
+      s_map_write_pc_count++;
+    }
+  }
   if (s_view_watch && bank == 0x7e && (reg == 0x21b4 || reg == 0x21b5)) {
     static uint32_t s_view_write_hits;
     if (s_view_write_hits < 400) {
@@ -544,6 +639,43 @@ static bool run_one_frame(void) {
     if (s_auto_turbo_enabled &&
         ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd)))
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
+    /* LC_LZ5 decompressor instrumentation -- see the SC_DECOMP_TRACE comment
+     * above bus_read for the decoded calling convention and why the samples
+     * are taken at 00:90eb / 00:9106 rather than at the JSR and the RTS. */
+    if (s_decomp_trace && cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb) {
+        s_decomp_active = true;
+        s_decomp_src = ((uint32_t)cpu->db << 16) |
+                       g_ram[0x09] | ((uint32_t)g_ram[0x0a] << 8);
+        s_decomp_out_base = 0x7e8000u + (g_ram[0x0e] | ((uint32_t)g_ram[0x0f] << 8));
+        s_decomp_wmin = 0xffffffffu;
+        s_decomp_wmax = 0;
+        s_decomp_wcount = 0;
+      } else if (s_decomp_active && cpu->pc == 0x9106) {
+        uint32_t src_end = ((uint32_t)cpu->db << 16) |
+                           g_ram[0x09] | ((uint32_t)g_ram[0x0a] << 8);
+        /* Compressed size has to be measured in LoROM *file* offsets, not by
+         * subtracting the 24-bit addresses: 00:926d advances the pointer by
+         * one bank per 32KB window ($8000..$ffff), so plain address
+         * subtraction over-counts a bank crossing by $8000 and reports a
+         * source longer than its own output. */
+        uint32_t src_file = ((s_decomp_src >> 16) * 0x8000u) +
+                            ((s_decomp_src & 0xffff) - 0x8000u);
+        uint32_t end_file = ((src_end >> 16) * 0x8000u) +
+                            ((src_end & 0xffff) - 0x8000u);
+        fprintf(stderr,
+                "[decomp #%u f=%llu] src=%02x:%04x..%02x:%04x (file %06x, %u in) "
+                "dst=%06x wrote=%u range=%06x..%06x\n",
+                s_decomp_calls++, (unsigned long long)s_frames,
+                (unsigned)(s_decomp_src >> 16), (unsigned)(s_decomp_src & 0xffff),
+                (unsigned)(src_end >> 16), (unsigned)(src_end & 0xffff),
+                src_file, (unsigned)(end_file - src_file), s_decomp_out_base,
+                s_decomp_wcount,
+                s_decomp_wcount ? s_decomp_wmin : 0,
+                s_decomp_wcount ? s_decomp_wmax : 0);
+        s_decomp_active = false;
+      }
+    }
     if (s_addr_trace_count && s_frames >= s_addr_trace_start_frame && s_addr_trace_armed) {
       uint32_t pc = ((uint32_t)cpu->k << 16) | cpu->pc;
       for (int i = 0; i < s_addr_trace_count; i++) {
@@ -1232,6 +1364,18 @@ static void write_pc_bitmap_dump(void) {
   fclose(f);
 }
 
+/* Distinct-PC histogram for SC_MAP_WRITE_TRACE, emitted at exit alongside the
+ * PC bitmap so both windowed and --qualify runs report it. */
+static void write_map_trace_summary(void) {
+  if (!s_map_write_trace) return;
+  fprintf(stderr, "[mapwrite] %u total writes into $%06x..$%06x from %d distinct PCs\n",
+          s_map_write_hits, kMapBufStart, kMapBufEnd - 1, s_map_write_pc_count);
+  for (int i = 0; i < s_map_write_pc_count; i++)
+    fprintf(stderr, "[mapwrite]   %02x:%04x  %u writes\n",
+            (unsigned)(s_map_write_pcs[i].pc >> 16) & 0xff,
+            (unsigned)(s_map_write_pcs[i].pc & 0xffff), s_map_write_pcs[i].count);
+}
+
 static int run_qualification(uint64_t frames) {
   uint64_t logic_changes = 0, video_changes = 0, audio_active_frames = 0;
   uint64_t last_ram_hash = 0, last_video_hash = 0;
@@ -1384,6 +1528,7 @@ static int run_qualification(uint64_t frames) {
           g_cpu->k, g_cpu->pc);
   fprintf(stderr, "banks_seen=%016llx\n", (unsigned long long)s_banks_seen);
   write_pc_bitmap_dump();
+  write_map_trace_summary();
   return rc;
 }
 
@@ -1397,6 +1542,8 @@ int main(int argc, char **argv) {
     if (e && *e) { s_pc_trace_at_frame = strtoull(e, NULL, 0); s_pc_capture_after = -2; } }
   { const char *e = getenv("SC_ADDR_TRACE"); if (e && *e) parse_addr_trace(e); }
   { const char *e = getenv("SC_GFX_TRACE"); if (e && *e) s_gfx_trace = true; }
+  { const char *e = getenv("SC_DECOMP_TRACE"); if (e && *e) s_decomp_trace = true; }
+  { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_MENU_PREVIEW");
     if (e && *e) { s_menu_preview = true; s_menu_open = true; } }
@@ -2073,5 +2220,6 @@ int main(int argc, char **argv) {
   SDL_DestroyWindow(window);
   SDL_Quit();
   write_pc_bitmap_dump();
+  write_map_trace_summary();
   return 0;
 }
