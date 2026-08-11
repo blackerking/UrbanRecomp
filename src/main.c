@@ -119,6 +119,11 @@ static uint64_t s_nmi_serviced;
  *                           $7F0200, with a distinct-PC histogram at exit --
  *                           finds what fills the map without assuming which
  *                           routine does it.
+ * SC_WRAM_MAP=<file>        map WRAM usage over a session: per byte, whether
+ *                           it was read/written, the LAST PC to write it, and
+ *                           a saturating write count. The data counterpart to
+ *                           SC_PC_BITMAP_BANK -- see docs/ROM_MAP.md "WRAM
+ *                           usage map".
  * SC_FRAME_BANK_TRACE=<start-frame>,<end-frame>
  *                           log the CPU's bank:PC at every frame boundary
  *                           in that range, unconditionally (not gated on

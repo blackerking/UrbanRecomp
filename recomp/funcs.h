@@ -15,7 +15,7 @@
 
 #include "cpu_state.h"
 
-/* 479 functions across all banks (5 decls each). */
+/* 481 functions across all banks (5 decls each). */
 
 void bank_00_80b2(CpuState *cpu);  /* $00:80B2 alias */
 RecompReturn bank_00_80b2_M0X0(CpuState *cpu);
@@ -1417,6 +1417,11 @@ RecompReturn bank_02_aa9d_M0X0(CpuState *cpu);
 RecompReturn bank_02_aa9d_M0X1(CpuState *cpu);
 RecompReturn bank_02_aa9d_M1X0(CpuState *cpu);
 RecompReturn bank_02_aa9d_M1X1(CpuState *cpu);
+void bank_02_ae4a(CpuState *cpu);  /* $02:AE4A alias */
+RecompReturn bank_02_ae4a_M0X0(CpuState *cpu);
+RecompReturn bank_02_ae4a_M0X1(CpuState *cpu);
+RecompReturn bank_02_ae4a_M1X0(CpuState *cpu);
+RecompReturn bank_02_ae4a_M1X1(CpuState *cpu);
 void bank_02_b266(CpuState *cpu);  /* $02:B266 alias */
 RecompReturn bank_02_b266_M0X0(CpuState *cpu);
 RecompReturn bank_02_b266_M0X1(CpuState *cpu);
@@ -1452,6 +1457,11 @@ RecompReturn bank_02_b51f_M0X0(CpuState *cpu);
 RecompReturn bank_02_b51f_M0X1(CpuState *cpu);
 RecompReturn bank_02_b51f_M1X0(CpuState *cpu);
 RecompReturn bank_02_b51f_M1X1(CpuState *cpu);
+void bank_02_b6d0(CpuState *cpu);  /* $02:B6D0 alias */
+RecompReturn bank_02_b6d0_M0X0(CpuState *cpu);
+RecompReturn bank_02_b6d0_M0X1(CpuState *cpu);
+RecompReturn bank_02_b6d0_M1X0(CpuState *cpu);
+RecompReturn bank_02_b6d0_M1X1(CpuState *cpu);
 void bank_02_bb23(CpuState *cpu);  /* $02:BB23 alias */
 RecompReturn bank_02_bb23_M0X0(CpuState *cpu);
 RecompReturn bank_02_bb23_M0X1(CpuState *cpu);

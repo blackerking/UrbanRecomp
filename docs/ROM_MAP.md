@@ -208,6 +208,81 @@ column, observed executing rather than argued from the disassembly. Freezing
 `$43` directly also side-steps needing formatted SRAM, which a cold boot does
 not have.
 
+## WRAM usage map (from a recorded play session)
+
+`SC_WRAM_MAP=<file>` records, per WRAM byte, whether it was read/written, the
+**last** PC to write it, and a saturating write count. Measured over a session
+that built a city, went bankrupt, lost a scenario, took a loan and collected
+gifts:
+
+- **Only 2,410 of the 8,192 bytes of `$7E0000`-`$7E1FFF` are live** -- i.e. ever
+  written again after boot. The other 5,782 are written once by the boot clear
+  and never touched. Most of the "variable space" is unused.
+- `00:8018`-`00:8037` is that boot clear (`STA $00,X ; INX ; DEY ; BNE`, then a
+  second loop over `$7E2000`+). A byte still owned by it is dead space, so
+  last-writer is only meaningful where the owner is *not* this routine.
+- `$1F00`-`$1FFF` is the stack. `$1E80`-`$1EFF` is a **relocated direct page**:
+  several bank-03 routines do `PHD ; TDC ; SEC ; SBC #$0002 ; TCD` to allocate
+  DP locals (e.g. `03:b152`, the power scan), so hot bytes there are stack
+  frames, not variables.
+
+### Auto-repeat: `$012b,X`, `$0133`, `$0135`
+
+The shared edge detector at `00:929b` maintains a **fourth** per-port array
+nobody had documented, and it implements key auto-repeat:
+
+```
+LDA $4218,X ; EOR $011b,X ; AND $bf   ; newly-pressed edges
+STA $c9,X   ; STA $0123,X
+CMP previous held
+  changed   -> $012b,X = $0133        ; initial delay
+  unchanged -> DEC $012b,X
+               on zero: STA $0123,X   ; re-post held state as a fresh edge
+                        $012b,X = $0135   ; repeat rate
+```
+
+`05:92a2` sets the constants once at boot: `$0133 = 10` frames initial delay,
+`$0135 = 4` frames repeat. Confirmed live in save states.
+
+**This does NOT pace the main-map cursor**, which was worth testing rather than
+assuming. Holding Right from a loaded map with `$0133`/`$0135` frozen to 1
+produces a byte-identical trajectory to the stock values (cursor `$01eb`
+128 -> 138 -> 178 -> 218 -> clamp, then scroll `$01bd` +5 per 20 frames). The
+cursor steps 2 units *every frame* and reads the **held** state (`$011b`/`$011c`)
+directly, so auto-repeat only governs consumers of the **edge** array
+(`$0123,X`) -- menus and list navigation. `docs/INVESTIGATION_cursor_cadence.md`'s
+conclusion about the map cursor stands.
+
+### Moving-object table, `$02cb`-`$0376`
+
+A **column-major** entity table -- the same struct-of-arrays idiom as the
+scenario map pointers at `03:ce70`, and just as invisible to a constant scan.
+Field arrays are 16 bytes apart, each holding ~6-8 entries of 2 bytes, indexed
+by `Y`. Updated by a family of routines at `03:f26a`-`03:f3e1`, one per field.
+
+`03:f32d` shows the shape: `$0317,Y` is a per-entity countdown (`DEC`), `$0327,Y`
+a **signed byte** velocity (sign-extended via `BMI` -> `ORA #$ff00`), and
+`$0337,Y` a 16-bit position it accumulates into. `03:f3d0` does the same for
+`$02f7`/`$0307` sourced from a ROM table at `$03eb71`. Consistent with the
+game's moving objects (vehicles/aircraft/disaster sprites); which entity is
+which is not established.
+
+### Other live blocks with a single owner
+
+| block | owner | notes |
+|---|---|---|
+| `$028b`-`$029a`, `$029b`-`$02aa` | `01:c8a5`, `01:c84b` | two 16-byte UI blocks, very hot |
+| `$0c16`-`$0c25`, `$0c35`-`$0c44` | `03:b251`, `03:b257` | 16 bytes each, simulation side |
+| `$0cd1`-`$0cdc` | `03:9053` | 12 bytes, saturated write count |
+| ~250 bytes | `01:c891`/`01:c896` | largest single UI-owned region |
+| ~224 bytes | `00:8aba`/`00:8ac1` | the OAM icon-row rebuild loop (`00:8aa8`) |
+
+`03:a390`-`03:a3cf` is a **32-bit software multiply** (shift-and-add: 32
+iterations of `ASL $0c ; ROL $0e ; ROL $10 ; ROL $12` with a conditional
+`ADC`), writing its result to `$14,X`/`$16,X`/`$18,X`/`$1a,X` on a relocated
+direct page. It is one of the hottest routines in the game -- the simulation's
+arithmetic workhorse.
+
 ## Cartridge SRAM layout (`$700000`+)
 
 SRAM is **not** part of `g_ram` -- it lives in the cart model, so WRAM dumps do
