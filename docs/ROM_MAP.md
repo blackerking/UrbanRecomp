@@ -154,6 +154,47 @@ just the address list for quick lookup.
 | `02:8525`, `02:9f37`, `02:9f43` | `LDA $011c` -> `$011b` | Comprehensive/Information map overlay (scroll + cursor) |
 | `01:f0d3` | `LDA $011c` -> `$011b` | View screen (watch icon) |
 
+## Screen-mode dispatch (`$14`) -- and how to force any screen
+
+`03:d289` is `LDA $14 ; ASL ; TAX ; JMP ($d255,X)`: the direct-page byte `$14`
+selects a screen handler from a 23-entry table at `03:d255`. (Note `03:d286` is
+*mid-instruction* -- the operand of a `REP #$20` -- so tracing that address
+catches nothing, which is easy to mistake for "the dispatcher never runs".)
+
+| `$14` | handler | | `$14` | handler |
+|---|---|---|---|---|
+| 0 | `03:d2b8` | | 12 | `03:df40` |
+| 1 | `03:d2c6` *(boot/attract loop sits here)* | | 13 | `03:e1ec` |
+| 2 | `03:d304` | | 14 | `03:e246` |
+| 3 | `03:d333` | | 15 | `03:e257` |
+| 4 | `03:d388` | | 16 | `03:e292` |
+| 5 | `03:d3ca` | | 17 | `03:e296` |
+| 6 | `03:d88a` | | 18 | `03:d30f` |
+| 7 | `03:d8bb` | | 19 | `03:e2df` |
+| 8 | `03:d951` | | 20 | `03:e344` |
+| 9 | `03:d964` | | 21 | `03:d9eb` |
+| 10 | `03:dd52` | | 22 | `03:da26` |
+| 11 | **`03:ddb6` scenario select** | | | |
+
+**`SC_FREEZE=14:<mode>` forces any of these to run**, which largely removes the
+recurring "there is no save state at that screen" blocker: the handler executes
+and its logic can be traced and its WRAM read, without navigating menus or
+hand-timing `--input`. Graphics may be wrong (the preceding mode's setup never
+ran), but the *logic* is real.
+
+Worked example -- confirming the Las Vegas unlock end to end, from a cold boot,
+with no save state at all:
+
+```
+SC_FREEZE=14:0b        SC_ADDR_TRACE=03:ddc1   ->  a=0002, x=0000  ($79 = 2)
+SC_FREEZE=14:0b,43:80  SC_ADDR_TRACE=03:ddc1   ->  a=0003, x=8000  ($79 = 3)
+```
+
+i.e. freezing bit 15 of the completion field really does widen the grid by a
+column, observed executing rather than argued from the disassembly. Freezing
+`$43` directly also side-steps needing formatted SRAM, which a cold boot does
+not have.
+
 ## Cartridge SRAM layout (`$700000`+)
 
 SRAM is **not** part of `g_ram` -- it lives in the cart model, so WRAM dumps do

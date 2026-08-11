@@ -273,6 +273,13 @@ their 4 copies. Skipping the checksum or the backup would get the edit
 silently reverted at the next verify (`03:e411`/`03:e446`), which is the
 trap here.
 
+Confirmed working by executing it, not just by reading the ROM: with the
+completion bit clear the select screen computes a maximum column of 2,
+and with bit 15 set it computes 3 — the fourth column, where Las Vegas
+and free play live. See `docs/ROM_MAP.md` ("Screen-mode dispatch") for
+the `SC_FREEZE=14:<mode>` technique that makes any screen testable
+without a save state positioned on it.
+
 Why setting that one bit is enough: the select screen is a 4-column ×
 2-row grid, but `03:ddba` computes the maximum reachable column as
 `2 + (bit 15 of the completion field)`. The six ordinary scenarios sit in
