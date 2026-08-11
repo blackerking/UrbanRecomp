@@ -195,6 +195,17 @@ This project's own headless harness still cannot drive that path (the
 mode-freeze technique doesn't reach it), so the confirmation is from
 bsnes, not from `--qualify`.
 
+**Root cause**, found by a bsnes write breakpoint on `$7F0200`: the
+routine that makes bit 15 mean "powered" is `03:b152`, which walks all
+12000 cells applying a **packed power bitmap held at `$7FA598`** (one bit
+per cell, `AND #$7fff` then conditionally `ORA #$8000`). That bitmap is
+*not* part of the SRAM save block — the load path restores `$7F5FC0` and
+`$7F6560` but nothing at `$7FA598` — so after a load it has to be
+recomputed from scratch, and until it is, every cell reads unpowered.
+Hence the dropout, and hence why "assume powered until the real scan says
+otherwise" is the right shape of fix: `03:b152` corrects it on its next
+pass either way.
+
 ### HDMA execution was entirely missing (also fixed)
 
 Unrelated to the joypad-register defect above: this project's cycle-accurate
