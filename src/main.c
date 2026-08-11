@@ -37,7 +37,20 @@
 #include "types.h"
 
 /* ── globals the shared runner device sources reference ─────────────────── */
+/* SIMCITY_AOT_TIER: built as part of the AOT/CpuState migration (see
+ * src/aot_probe.c and the SimCitySNESRecompAOT target). In that build the
+ * shared runtime is linked in, and it already defines several of the symbols
+ * this file provides for the standalone interpreter build. They are the same
+ * objects with the same meaning -- common_rtl.c's g_ram is a 0x20000 array
+ * with identical $7E/$7F semantics, and this host passes g_ram straight to
+ * snes_init(), so both tiers end up sharing one WRAM array rather than
+ * needing any copying between them. Defining them here too would just be a
+ * duplicate symbol, so the AOT build defers to the runtime's copies. */
+#ifdef SIMCITY_AOT_TIER
+#include "common_rtl.h"          /* extern uint8 g_ram[0x20000]; */
+#else
 uint8_t    g_ram[0x20000];
+#endif
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -59,12 +72,33 @@ bool g_fail = false;
 uint8 g_snesrecomp_last_hdmaen;
 /* Referenced by snes.c/interp_bridge.c; only meaningful once the AOT/
  * CpuState hybrid tier (interp_bridge.c) is wired in. 0 = not driving. */
+#ifndef SIMCITY_AOT_TIER
+/* All three are provided by the shared runtime in the AOT build:
+ * g_interp_apu_driving and ppudma_record_dma by common_rtl.c /
+ * ppu_dma_trace.c, interp816_opcode_hook by interp_bridge.c. */
 int g_interp_apu_driving = 0;
 void ppudma_record_dma(int ch, int fromB, uint8_t aBank, uint16_t aAdr,
                        uint8_t bAdr, uint16_t size) {
   (void)ch; (void)fromB; (void)aBank; (void)aAdr; (void)bAdr; (void)size;
 }
 int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
+#else
+/* Conversely, the runtime expects the GAME to supply these. The desktop
+ * hosts define them in their host_main include; this host defines them here.
+ * The APU locks are real work once the AOT tier drives audio -- for now this
+ * host still owns the DSP drain loop single-threaded, so no-ops are correct
+ * and must be revisited when that changes. */
+/* Only g_spc_player is genuinely missing: common_rtl.h and debug_server.h
+ * already carry inline bodies for the APU locks and the debug write hooks,
+ * so defining those here is a redefinition, not a fill-in. (The aot_probe
+ * target does need them, because it does not include those headers.) */
+#include "spc_player.h"
+SpcPlayer *g_spc_player = NULL;
+/* debug_server.h declares but does not define this one (unlike the wram
+ * write hooks); interp_bridge.c calls it per interpreted block. */
+void debug_on_block_enter(uint32_t pc, uint32_t a, uint32_t x, uint32_t y)
+  { (void)pc; (void)a; (void)x; (void)y; }
+#endif
 DspShadow *dsp_shadow_create(void) { return NULL; }
 void dsp_shadow_free(DspShadow *sh) { (void)sh; }
 void dsp_shadow_process(DspShadow *sh, Dsp *dsp, int cL, int cR, int *oL, int *oR) {

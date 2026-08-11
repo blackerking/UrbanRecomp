@@ -527,6 +527,33 @@ primitive rather than Mega Man X's coroutine switch, so it should suit the
 fiber-free `hle_func` + NLR-unwind pattern that doc describes without the
 stack-corruption problem MMX's yield had.
 
+### Migration progress
+
+| step | state |
+|---|---|
+| 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
+| 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
+| 3. Route execution through compiled bodies | not started |
+
+Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
+
+```bash
+cmake --build build --target SimCityAOTProbe          # link probe
+cmake --build build --target SimCitySNESRecompAOT     # host + AOT runtime
+```
+
+Step 2's point is narrow but load-bearing: the two tiers **share one WRAM
+array**. `common_rtl.c` defines `g_ram[0x20000]` with the same `$7E`/`$7F`
+semantics this host already uses, and this host passes `g_ram` straight to
+`snes_init()`, so nothing has to be copied between tiers. `SIMCITY_AOT_TIER`
+in `src/main.c` marks the handful of symbols that move ownership to the
+runtime in that build (`g_ram`, `g_interp_apu_driving`, `ppudma_record_dma`,
+`interp816_opcode_hook`) and the one the runtime expects the game to supply
+(`g_spc_player`).
+
+Step 3 is the real work, and the one thing that could still invalidate all of
+this: none of the 720 compiled bodies has ever executed a single instruction.
+
 **TODO**: harmonise with [ar-recomp](https://github.com/DerrickGold/ar-recomp)
 -- not yet investigated in this repo; worth a look at what conventions or
 shared approach it uses before diverging further.

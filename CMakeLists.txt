@@ -159,3 +159,52 @@ if(SIMCITY_GEN_SOURCES)
         target_link_libraries(SimCityAOTProbe PRIVATE ${SDL2_LIBRARIES})
     endif()
 endif()
+
+# -- AOT-tier build of the real host (migration step 2) ----------------------
+#
+# Same src/main.c as the shipping target, but linked together with the
+# generated banks and the AOT/CpuState runtime. Behaviour is identical -- it
+# still runs 100% on interp816 -- so this proves only that the two tiers can
+# COEXIST in one binary: shared g_ram, no duplicate symbols, no ABI clash.
+# Routing execution through the compiled bodies is step 3.
+#
+#   cmake --build build --target SimCitySNESRecompAOT
+if(SIMCITY_GEN_SOURCES)
+    add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
+        src/main.c
+        ${SIMCITY_GEN_SOURCES}
+        ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
+        ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
+        ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
+        ${SNESRECOMP_ROOT}/runner/src/host_report.c
+        ${SNESRECOMP_ROOT}/runner/src/framedump.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
+        ${SIMCITY_DEVICE_SOURCES}
+    )
+    target_include_directories(SimCitySNESRecompAOT PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/recomp
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
+        ${SNESRECOMP_ROOT}/runner/src/desktop
+    )
+    target_compile_definitions(SimCitySNESRecompAOT PRIVATE
+        SDL_MAIN_HANDLED SIMCITY_AOT_TIER)
+    if(MSVC)
+        # See the note on SimCityAOTProbe: cpu_state.c's weak-marked fallback
+        # guard table is a strong definition under MSVC.
+        target_link_options(SimCitySNESRecompAOT PRIVATE /FORCE:MULTIPLE)
+    else()
+        target_compile_options(SimCitySNESRecompAOT PRIVATE
+            -w -Wno-implicit-function-declaration)
+    endif()
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(SimCitySNESRecompAOT PRIVATE SDL2::SDL2)
+    else()
+        target_include_directories(SimCitySNESRecompAOT PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(SimCitySNESRecompAOT PRIVATE ${SDL2_LIBRARIES})
+    endif()
+endif()
