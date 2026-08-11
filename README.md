@@ -273,6 +273,17 @@ their 4 copies. Skipping the checksum or the backup would get the edit
 silently reverted at the next verify (`03:e411`/`03:e446`), which is the
 trap here.
 
+Why setting that one bit is enough: the select screen is a 4-column ×
+2-row grid, but `03:ddba` computes the maximum reachable column as
+`2 + (bit 15 of the completion field)`. The six ordinary scenarios sit in
+columns 0-2; Las Vegas and free play sit alone in column 3, at x=`$0fe`,
+past the right edge of a 256-wide screen. So beating all six is literally
+what widens the grid by one column and lets you scroll right to them —
+matching how the screen behaves in play. The full chain is
+`$700007` bit 15 → `$42` (`03:e36c`) → `$79` (`03:ddbe`) → the
+right-scroll clamp (`03:dde4`) → `$40` = 6 or 7 (`03:de1a`) → the map
+pointer table.
+
 It deliberately does nothing until the game has formatted SRAM itself
 (magic `"SIM"` present) rather than fabricating a header — so it takes
 effect in a real session or from an in-game save state, not from a cold
