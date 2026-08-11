@@ -189,12 +189,11 @@ ROM space. It also avoids a quirk of that patch: because it replaces
 runs the SRAM loader a second time (harmless — an idempotent copy that
 doesn't touch `$7F0200`, so the power bits survive).
 
-**Caveat**: the trigger point `03:c8dd` is taken from Truttle1's patch,
-which is tested and works. This project's own headless harness has not
-managed to reach that address (the mode-freeze technique doesn't get
-there), so the fix's activation has *not* been independently observed
-here — only its effect is understood. Verify in play; toggle it off in
-the F10 menu to compare.
+The trigger point `03:c8dd` is **confirmed**: a bsnes exec breakpoint
+there fires on loading a saved game, reached via `00:c845` → `03:c8a0`.
+This project's own headless harness still cannot drive that path (the
+mode-freeze technique doesn't reach it), so the confirmation is from
+bsnes, not from `--qualify`.
 
 ### HDMA execution was entirely missing (also fixed)
 
@@ -408,10 +407,37 @@ runtime and understand how SimCity's own main-loop idiom yields control
 back to the host once per frame (`snesrecomp/docs/LLE_SCHEDULER.md`
 describes the general "auto-quiescent" interpreter mechanism every new
 game is meant to use for this, in preference to Mega Man X's older
-per-game cooperative-scheduler/fiber approach). That is genuine
-per-game bring-up work -- identifying SimCity's own vblank-wait idiom well
-enough to declare it safely -- and is intentionally out of scope for this
-milestone.
+per-game cooperative-scheduler/fiber approach).
+
+### SimCity's vblank-wait idiom: found
+
+That doc says the only per-game knowledge the LLE scheduler tier needs is
+*"which PCs are the yield/die primitives"*. For SimCity that is
+**`00:930d`, reached as `COP #$00` with `A = 0`** — the most-used service
+in the ROM at 133 call sites:
+
+```
+00:930d  SEP #$20
+00:930f  STZ $b9          ; clear the frame flag
+00:9311  INC $c7          ; free-running spin counter
+00:9313  LDA $b9
+00:9315  BEQ $9311        ; spin until NMI releases it
+00:9317  RTS
+```
+
+and the NMI handler closes the loop at `00:80bc` with `INC $b9` (gated on
+bit 7 of `$00b1`, which `COP` service 4 at `00:8e75` sets). Confirmed by
+bsnes trace, not inferred.
+
+That also explains `$c7`: it counts spin iterations spent waiting for
+vblank, and `00:823e` seeds the PRNG from it (`LDA $c7` → `$59`/`$5b`/`$5d`)
+— timing-derived randomness, which is why the generated map depends on how
+long the player took to get there.
+
+This is the seam the hybrid tier needs. It is a plain `RTS`-returning
+primitive rather than Mega Man X's coroutine switch, so it should suit the
+fiber-free `hle_func` + NLR-unwind pattern that doc describes without the
+stack-corruption problem MMX's yield had.
 
 **TODO**: harmonise with [ar-recomp](https://github.com/DerrickGold/ar-recomp)
 -- not yet investigated in this repo; worth a look at what conventions or
