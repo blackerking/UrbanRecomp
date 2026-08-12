@@ -42,7 +42,7 @@ return address, adjust it, push it back**:
 `inline_arg_bytes` stays 0 and the decoder treats the operand bytes as code.
 
 **Not a single row in this game's entire `dispatch_v2.c` has a nonzero
-`inline_arg_bytes`**, despite four routines using the idiom at 61 call sites.
+`inline_arg_bytes`**, despite five routines using the idiom at 125 call sites.
 
 ## The affected routines
 
