@@ -592,9 +592,23 @@ gate `LLE_SCHEDULER.md` specifies (bounced vs interpreted must be bit-exact).
 The COP limit starts to bite there in practice — roughly a third of executed
 code has no compiled body to bounce into.
 
-**TODO**: harmonise with [ar-recomp](https://github.com/DerrickGold/ar-recomp)
--- not yet investigated in this repo; worth a look at what conventions or
-shared approach it uses before diverging further.
+**ar-recomp comparison** (was a TODO, now done -- see
+[`docs/MIGRATION_step3.md`](docs/MIGRATION_step3.md) §4):
+[ar-recomp](https://github.com/DerrickGold/ar-recomp) links its generated
+banks and runs the game inside a **fiber**, one switch per frame, with the
+ROM's vblank wait replaced by an HLE that yields back to the host
+(`hle_func 8418 ActRaiser_WaitForVblank`). There is no per-opcode
+interleaving; the host owns the frame boundary and renders through
+`draw_ppu_frame`. Its HLE surface is only 13 functions in total, and it
+declares 1,512 `func` boundaries in bank 00 alone against this project's
+~500 across all banks.
+
+The mapping to SimCity is direct: `00:930d` (COP service 0, the vblank spin
+on `$b9`) is our `WaitForVblank`, and it is a plain `RTS`-returning routine
+rather than a coroutine switch. The one open question is fibers vs the
+framework's newer fiber-free LLE bridge, which `LLE_SCHEDULER.md` says is
+replacing them -- but the first step, declaring `hle_func 930d`, is required
+by both.
 
 ## Building
 

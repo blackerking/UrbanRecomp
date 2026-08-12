@@ -42,10 +42,16 @@ ways out, in increasing order of disruption:
    but limits the win to exactly the routines that matter least.
 3. **Adopt the runner's frame model** wholesale. Most faithful to the
    framework, and the largest change: it replaces the loop this project's
-   accuracy story is built on, and re-validating it means redoing the HDMA and
-   audio work that got `--qualify` passing.
+   accuracy story is built on.
 
-None of these is obviously right, which is the point of writing it down.
+   An earlier draft of this section claimed option 3 would put the HDMA and
+   audio work at risk. **That was overstated** — see the ar-recomp section
+   below. Dropping per-opcode interleaving does not mean dropping per-scanline
+   rendering: the host still advances the PPU line by line around the game's
+   execution, so raster effects keep working. ar-recomp ships widescreen and a
+   3D diorama on exactly this model.
+
+Section 4 below revises the recommendation accordingly.
 
 ## 2. What it would buy, measured
 
@@ -126,17 +132,89 @@ refutation in `LLE_FIRST_ANALYSIS.md` describes.
 
 ## 3. Order of work, if resumed
 
-1. Decide the timing model (§1). Nothing else matters until that is settled.
-2. Drive one frame through `interp_bridge_run_scheduler(cpu, entry, 0x009313,
+1. Decide the timing model (§1). §4 answers this by example — ar-recomp takes
+   option 3 and ships it. What remains is the fibers-vs-LLE-bridge fork, and
+   step 2 below is required either way.
+2. Declare `hle_func 930d` and give it a host implementation — the analogue of
+   ar-recomp's `hle_func 8418 ActRaiser_WaitForVblank`. This is what makes the
+   game's frame boundary visible to the host, and both designs need it.
+3. Then either yield a fiber from that HLE (ar-recomp's model), or drive the
+   frame through `interp_bridge_run_scheduler(cpu, entry, 0x009313,
    0x00b9)` — SimCity's yield primitive is `00:930d` spinning on `$b9`, and it
    is a plain `RTS`-returning primitive, so it should not need MMX's
    coroutine-switch handling. Note the **auto-quiescent** variant is wrong for
    this game: the spin does `INC $c7` every iteration, so the state is not
    read-only and the quiescence detector will never fire.
-3. Run the differential gate from `LLE_SCHEDULER.md`: bounced vs interpreted
+4. Run the differential gate from `LLE_SCHEDULER.md`: bounced vs interpreted
    must be bit-exact over the attract demo. This project already has the tools
    for it — `--qualify` hashes logic/video/audio per frame, and
    `SC_PC_BITMAP_BANK=all` shows which paths each side took.
-4. Only then consider whether the COP and exit-mode limits are worth chasing
+5. Only then consider whether the COP and exit-mode limits are worth chasing
    upstream first; with a third of executed code having no body to bounce into,
    the measured win may be small enough to change the plan.
+
+
+## 4. How ar-recomp does it — and why that changes the recommendation
+
+`ar-recomp` (Derrick Gold's ActRaiser recompilation, sitting alongside this
+repo) is a mature project on the same framework, and it answers the §1 question
+by demonstration: it takes **option 3**, and it works.
+
+### The mechanism
+
+1. **`src/gen` is linked.** Compiled code is the main execution path, not an
+   experiment. For scale: ar-recomp's `recomp/bank00.cfg` alone declares
+   **1,512** `func` boundaries (bank01 128, bank03 107) against this project's
+   ~500 across all banks.
+2. **One fiber per game frame.** `RunOneFrameOfGame()` (`src/actraiser_rtl.c`)
+   does `SwitchToFiber(g_game_fiber)` on Windows, `swapcontext` elsewhere. The
+   compiled game code then runs continuously inside that fiber.
+3. **The vblank wait is HLE'd.** `recomp/bank00.cfg` declares
+   `hle_func 8418 ActRaiser_WaitForVblank`: the ROM's wait routine is replaced
+   by a host C function that calls `ActRaiser_YieldToHost()`, suspending the
+   fiber back to the host.
+4. **The host owns the frame boundary.** It sets `g_snes->forceNmi` and
+   `nmiAvail` (a fresh RDNMI vblank token), switches in, and on the yield
+   renders through `draw_ppu_frame`.
+
+There is no per-opcode interleaving anywhere in that loop.
+
+The HLE surface is **small**: 13 `hle_func` declarations in total, and most are
+optimisations (sprite building, camera) rather than necessities. The vblank
+wait is the one that makes the model work.
+
+Two details worth stealing if we go this way: the fiber is created with
+`FIBER_FLAG_FLOAT_SWITCH` (mandatory — without it x86 FP state is not switched
+and the coroutine does use FP), and the watchdog gets a *yield* hook rather
+than a `longjmp`, because longjmp out of a fiber is undefined behaviour.
+
+### The mapping to SimCity is unusually direct
+
+| ar-recomp | SimCity |
+|---|---|
+| `hle_func 8418 ActRaiser_WaitForVblank` | `00:930d` — COP service 0, spins on `$b9` |
+| HLE yields the fiber | plain `RTS`-returning; simpler than a coroutine switch |
+| host re-arms NMI to release the wait | `00:80bc` `INC $b9` — already identified |
+
+Every piece that declaration needs is already established in `ROM_MAP.md`.
+
+### Revised recommendation
+
+Follow ar-recomp. It is a working, inspectable implementation of the exact
+problem, on the same runtime, for a more complex game — which beats reasoning
+from first principles about a model nobody here has run.
+
+The caveat is that it uses **fibers**, and `snesrecomp/docs/LLE_SCHEDULER.md`
+calls that "Mega Man X's older per-game cooperative-scheduler/fiber approach"
+and states the framework is retiring it in favour of the fiber-free LLE bridge
+(`interp_bridge_run_scheduler` + bouncing). So this is a real fork:
+
+- **ar-recomp's path** — proven, copyable, and the pattern is on disk.
+- **The framework's stated direction** — newer, aligned with upstream, and
+  SimCity's `RTS`-returning primitive suits it better than MMX's coroutine
+  switch did (which is what forced the NLR-unwind machinery in the first
+  place).
+
+Either way the first concrete step is identical: declare
+`hle_func 930d` and give it a host implementation. That is what makes the
+game's frame boundary visible to the host, and it is required by both designs.
