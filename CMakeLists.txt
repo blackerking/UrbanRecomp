@@ -115,6 +115,7 @@ if(SIMCITY_GEN_SOURCES)
     add_executable(SimCityAOTProbe EXCLUDE_FROM_ALL
         src/aot_probe.c
         ${SIMCITY_GEN_SOURCES}
+        src/simcity_hle.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -173,6 +174,7 @@ if(SIMCITY_GEN_SOURCES)
     add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
         src/main.c
         ${SIMCITY_GEN_SOURCES}
+        src/simcity_hle.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -215,6 +217,7 @@ if(SIMCITY_GEN_SOURCES)
     add_executable(SimCityAOTDiff EXCLUDE_FROM_ALL
         src/aot_diff.c
         ${SIMCITY_GEN_SOURCES}
+        src/simcity_hle.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
