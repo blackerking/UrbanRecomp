@@ -122,6 +122,7 @@ int main(int argc, char **argv) {
     #define NEXT() (rng = rng * 1664525u + 1013904223u, (uint16_t)(rng >> 16))
 
     int tested = 0, matched = 0, skipped = 0, nonnormal = 0, nonterm = 0;
+    int cycle_match = 0, cycle_mismatch = 0;
     int failing_pcs = 0;
     unsigned first_fail[8]; int nfail = 0;
 
@@ -175,11 +176,12 @@ int main(int argc, char **argv) {
              * harness's making. Anything that does not return cleanly is
              * skipped rather than compared. */
             int returned = 0;
+            long icycles = 0;
             for (int guard = 0; guard < 4096; guard++) {
                 uint32_t p = ((uint32_t)icpu->k << 16) | icpu->pc;
                 if (p == 0x003413u) { returned = 1; break; }
                 if (p < pc24 || p > end + 1) break;
-                interp816_runOpcode(icpu);
+                { int c = interp816_runOpcode(icpu); icycles += (c > 0 ? c : 1) * 8; }
             }
             if (!returned) { body_skip = 1; break; }
             static uint8_t after_interp[0x2000];
@@ -196,8 +198,19 @@ int main(int argc, char **argv) {
             cpu_p_to_mirrors(&cs);
             cs.ram[0x1ff3] = 0x34; cs.ram[0x1ff2] = 0x12;
             cs.S = 0x1ff1; cs.host_return_valid = 2;
+            uint64_t mc_before = cs.master_cycles;
             RecompReturn r = body_fn(&cs);
             if (r != RECOMP_RETURN_NORMAL) nonnormal++;
+            {
+                long acycles = (long)(cs.master_cycles - mc_before);
+                if (acycles != icycles) {
+                    if (cycle_mismatch < 6)
+                        printf("      %02X:%04X cycles: AOT %ld vs interp %ld (%+ld)\n",
+                               pc24 >> 16, pc24 & 0xffff,
+                               acycles, icycles, acycles - icycles);
+                    cycle_mismatch++;
+                } else cycle_match++;
+            }
 
             if (memcmp(after_interp, g_ram, 0x2000) != 0 ||
                 cs.A != iA || cs.X != iX || cs.Y != iY)
@@ -217,6 +230,8 @@ int main(int argc, char **argv) {
     printf("  no compiled body       : %d\n", skipped);
     printf("  skipped, no clean RTS  : %d\n", nonterm);
     printf("  returns != NORMAL      : %d\n", nonnormal);
+    printf("  cycle counts agree     : %d of %d trials\n",
+           cycle_match, cycle_match + cycle_mismatch);
     for (int i = 0; i < nfail; i++)
         printf("    diverged: %02X:%04X\n", first_fail[i] >> 16, first_fail[i] & 0xffff);
     return failing_pcs ? 1 : 0;

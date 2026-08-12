@@ -192,3 +192,30 @@ cpu_state.obj : error LNK2005: g_ram_routine_guard_count already defined in disp
 weak-fallback pattern work on all three compilers. This project currently works
 around it with `/FORCE:MULTIPLE` on a probe target, which is not something to
 ship.
+
+
+### Also found: AOT and interpreter disagree on cycle counts
+
+Third small finding, independent of the above. Running compiled bodies and the
+interpreter over the same routine and the same inputs, guest state matches
+every time (64/64 trials over 8 routines) but **cycle counts differ in 13 of 64
+trials**, always with the compiled side counting more:
+
+```
+00:8924   AOT 760  interp 744   (+2 CPU cycles)
+00:8982   AOT 760  interp 744   (+2 CPU cycles)
+00:d23a   AOT 240  interp 232   (+1 CPU cycle)
+```
+
+`00:d23a` contains `LDA $d193,X` (absolute indexed, +1 only on a page cross);
+the other two are branch ladders (+1 taken, +2 taken across a page). The
+pattern suggests the emitted code charges data-dependent penalties
+unconditionally while the interpreter charges them only when they occur —
+which would explain both the direction and why only some randomised inputs
+trigger it.
+
+This matters for any host that advances devices from `cpu->master_cycles`, and
+it makes a bounced-vs-interpreted differential diverge on the master clock even
+when logic is bit-identical.
+
+Reproduce with `cmake --build build --target SimCityAOTDiff && ./SimCityAOTDiff`.

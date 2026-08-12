@@ -264,3 +264,54 @@ at all, and it means the eventual driver looks more like
 a host that is not inside `SimCityFiber_RunOneFrame`, which crashes. The
 remaining work is that driver: run the guest inside the fiber, bounce
 JSR/JSL into compiled bodies where one exists, and let the vblank HLE suspend.
+
+
+## 6. The tiers agree on logic but not on cycle counts
+
+Measured while checking whether a device-advance-by-cycle-delta driver is
+viable. `SimCityAOTDiff` now compares `cpu->master_cycles` against the
+interpreter's summed opcode cycles over the same routine and inputs:
+
+```
+identical WRAM + A/X/Y : 8 of 8 bodies   (64 of 64 trials)
+cycle counts agree     : 51 of 64 trials
+```
+
+So the emitted code computes the right answer every time and charges the wrong
+number of cycles about a fifth of the time. Every mismatch is the **AOT
+counting more**, never less:
+
+| routine | AOT | interp | delta |
+|---|---|---|---|
+| `00:8924` | 760 | 744 | +16 master (+2 CPU) |
+| `00:8982` | 760 | 744 | +16 master (+2 CPU) |
+| `00:d23a` | 240 | 232 | +8 master (+1 CPU) |
+
+The opcodes point at data-dependent penalties. `00:d23a` is
+`LDA $0421 ; ASL ; TAX ; LDA $d193,X ; STA $7e2000 ; RTS` — an **absolute
+indexed** read, which costs an extra cycle only when the index crosses a page
+boundary, and its error is exactly +1 CPU cycle. `00:8982` and `00:8924` are
+branch ladders (`LDA abs ; BNE ; STZ abs ; LDA abs ; BNE ; RTS`), where a taken
+branch costs +1 and a taken branch that crosses a page costs +2 — their error
+is exactly +2.
+
+**Hypothesis** (opcode evidence, not proof): the emitted code charges these
+penalties unconditionally while the interpreter charges them only when they
+actually occur. That fits every observation, including the direction — an
+unconditional worst-case charge can only ever be too high — and the fact that
+only *some* trials mismatch, since the randomised inputs decide whether a page
+is crossed.
+
+### What it means for the driver
+
+Advancing the PPU by the compiled body's `master_cycles` delta — option 1 in §1
+— is therefore not timing-neutral. It over-advances slightly, per bounce, in a
+data-dependent way. With thousands of bounces a frame the drift is not obviously
+negligible, and it means a **bounced-vs-interpreted differential will diverge on
+`master=` even when the logic is bit-identical**. Anyone running that gate should
+expect it and compare logic/video hashes rather than the master clock, or the
+first run will look like a codegen failure.
+
+This is worth an upstream question in its own right: two tiers of the same
+framework disagreeing on cycle counts for the same routine is a portability
+problem beyond this game.
