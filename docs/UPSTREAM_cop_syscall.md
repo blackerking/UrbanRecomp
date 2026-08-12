@@ -265,3 +265,78 @@ Two things would help, in order of value:
 This matters beyond SimCity: `JSR (abs,X)` is the standard 65816 idiom for a
 call-through-jump-table, and a game that uses it for its main dispatcher cannot
 currently have that edge resolved by any cfg directive.
+
+
+## Fix implemented and verified
+
+Implemented in this repo's `snesrecomp` submodule, following the same
+found-here/fixed-here/offered-upstream path as the inline-argument fix.
+
+The suggested fix above (resolve the service table statically, model COP as a
+call with a proven exit) turned out to be more machinery than the problem
+needs. Two observations shrink it to a handful of lines:
+
+**1. A COP is M/X-transparent by hardware.** It pushes PB/PC/P; the handler
+runs; `RTI` pops P. Whatever the handler does to the width flags — SimCity's
+dispatcher does `REP #$20 ; REP #$10` immediately — the caller's M/X are
+restored on return. So decode can continue past a COP in the entry widths
+with no assumption, and no exit-M/X proof is required. This is what makes the
+whole thing safe, and it is true for every game, not just this one.
+
+**2. The right primitive already exists.** `Break(tier_to_lle=True)` lowers to
+
+```c
+/* COP: execute exact software interrupt in authoritative LLE */
+return interp_tier_dispatch_tail(cpu, site, site, _entry_s, _hrv);
+```
+
+which hands the interrupt to the authoritative interpreter and unwinds to the
+owning bounce rather than nesting a new one. It was only reachable when the
+COP's address fell inside a declared `data_region` — the "BRK/COP-shaped
+data" case. Everywhere else `_h_cop` produced a bare comment, meaning an
+AOT-eligible node would have **skipped the syscall entirely**; the
+`cop_at_*` poison existed to stop that from ever being emitted.
+
+So the fix is to stop treating a COP as poison and start treating it as what
+it is — a call the compiled tier cannot perform itself:
+
+- `recompiler/v2/lowering.py` — `_h_cop` sets `tier_to_lle=True`
+  unconditionally instead of gating on `data_region_exec`.
+- `recompiler-rs/src/bin/analyze.rs` and `tools/v2_analyze.py` — the poison
+  test and both `graph_has_poison` gates keep `BRK` and drop `COP`.
+
+Note this is strictly safer than the status quo in the only case where the
+two differ: previously an un-poisoned COP (inside a data region) already
+tiered, and a poisoned one never reached codegen. There is no path that
+relied on the comment.
+
+### Result
+
+| | before | after |
+|---|---|---|
+| exact variants | 1155 | **1567** |
+| AOT-eligible | 845 | **1458** |
+| LLE-only | 310 | 109 |
+| instructions analyzed | 40800 | **66198** |
+| AOT share | 80.3% | **94.9%** |
+
+552 tail dispatches are emitted, and no `COP: software interrupt` stub
+survives the regen lint.
+
+The ~91% upper bound in this document was computed against a fixed
+denominator. In practice the frontier grew by 25,398 instructions, because
+truncation at a COP had been hiding everything downstream of it.
+
+Remaining LLE-only, by instructions: `truncated_call_continuation` (2835),
+`unproven_callee_exit` (2293), `brk_at_*` (638). The BRK residue is genuine —
+those are wrong-width decodes, which is what the poison is for.
+
+### Verification
+
+- `--qualify 600` on both tiers: PASS, identical on every counter *including*
+  `master=214385616`.
+- All **seven** save states replayed 410 frames with scripted input, dumping
+  full WRAM at frame 400: **131072/131072 bytes identical** between the
+  interpreter-only and AOT builds, on every state.
+- 50 analyzer tests, 81 project tests, and the regen's differential-emit
+  comparison all pass.

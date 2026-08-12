@@ -491,9 +491,38 @@ as code.
 bound, not a promise — some nodes would fail again for other reasons once
 the decode continues past the `COP`.
 
-It stays the top blocker as the frontier grows: the AOT share has held at
-~71% across every step above, so adding roots finds more code but does not
-change the proportion COP costs us.
+### Fixed — and the estimate was too pessimistic
+
+Implemented in this repo's submodule. The estimate above was made before
+noticing the decisive hardware fact: **`COP` pushes P and the handler's
+`RTI` pops it, so a COP is M/X-transparent.** Decode may therefore continue
+past one in the same widths with no assumption at all, which is what made
+this safe to do.
+
+The framework already had the right primitive — `Break(tier_to_lle=True)`
+emits `interp_tier_dispatch_tail`, executing the interrupt in the
+authoritative interpreter and unwinding there rather than nesting a new one.
+It was only reachable for COP-shaped bytes inside a declared `data_region`.
+Outside one, a COP emitted a bare `/* COP: software interrupt */` comment —
+the syscall silently skipped — which is exactly why those nodes had to be
+poisoned. Tiering every COP makes the poison unnecessary.
+
+| | before | after |
+|---|---|---|
+| exact variants | 1155 | **1567** |
+| AOT-eligible | 845 | **1458** |
+| LLE-only | 310 | 109 |
+| instructions analyzed | 40,800 | **66,198** |
+| AOT share | 80.3% | **94.9%** |
+
+The frontier itself grew by 25,000 instructions, because decode now
+continues past 552 COP sites instead of stopping at them. That is the part
+the upper bound could not have predicted: it assumed a fixed denominator.
+
+Verified: both tiers `--qualify 600` identical on every counter including
+master cycles; all **seven** save states replayed with input give
+**byte-identical 128 KB WRAM** between the interpreter and AOT tiers; 50
+analyzer tests and 81 project tests pass.
 [`docs/UPSTREAM_cop_syscall.md`](docs/UPSTREAM_cop_syscall.md) is a
 filing-ready write-up.
 
