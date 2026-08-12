@@ -433,7 +433,7 @@ seeding roots grows the total and has never once moved the ratio.
 The two things that moved it were both **indirect dispatch tables read
 straight out of the ROM**, which is exactly what a static closure cannot
 follow: the 23-entry screen-handler table behind `03:d289`'s
-`JMP ($d255,X)`, and the 11-entry COP service table behind `00:8211`'s
+`JSR ($d255,X)`, and the 11-entry COP service table behind `00:8211`'s
 `JSR ($8223,X)`. Neither was guessed; both were decoded and cross-checked
 (COP service 8 is the LC_LZ5 decompressor, matching every
 `LDA #$0008 ; COP #$00` call site in the ROM).

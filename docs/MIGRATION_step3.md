@@ -248,7 +248,7 @@ the fiber, because **both architectural entry points are `lle_only`**:
 | NMI `00:80b2` | `unproven_call_at_00813A_to_00C3F9` |
 
 `03:d283` is the screen-mode dispatcher (`LDA $14 ; ASL ; TAX ;
-JMP ($d255,X)`), so its exit modes are unprovable through the indirect jump,
+JSR ($d255,X)`), so its exit modes are unprovable through the indirect call,
 and that one unproven call leaves the reset vector uncompiled.
 
 So the fiber must wrap an **interpreter that bounces into compiled bodies**,

@@ -169,7 +169,7 @@ just the address list for quick lookup.
 
 ## Screen-mode dispatch (`$14`) -- and how to force any screen
 
-`03:d289` is `LDA $14 ; ASL ; TAX ; JMP ($d255,X)`: the direct-page byte `$14`
+`03:d289` is `LDA $14 ; ASL ; TAX ; JSR ($d255,X)`: the direct-page byte `$14`
 selects a screen handler from a 23-entry table at `03:d255`. (Note `03:d286` is
 *mid-instruction* -- the operand of a `REP #$20` -- so tracing that address
 catches nothing, which is easy to mistake for "the dispatcher never runs".)

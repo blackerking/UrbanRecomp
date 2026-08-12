@@ -219,3 +219,49 @@ it makes a bounced-vs-interpreted differential diverge on the master clock even
 when logic is bit-identical.
 
 Reproduce with `cmake --build build --target SimCityAOTDiff && ./SimCityAOTDiff`.
+
+
+### Also found: `indirect_dispatch` does not cover `JSR (abs,X)`
+
+The framework already has the directive this game needs:
+
+```
+indirect_dispatch <site_pc> <count> ptrcall return:<pc> frame:<n> targets:<a,b,...>
+```
+
+It parses correctly and it is exactly the right shape — an authorised static
+recovery of an indirect call, with the target list supplied by the game. But it
+has no effect here, because the native analyzer only consults it for **JMP**:
+
+```rust
+// recompiler-rs/src/decoder.rs
+// cfg/auto indirect_dispatch for JMP/JML indirect.
+if insn.mnem == "JMP" && (insn.mode == Mode::Indir || insn.mode == Mode::IndirX) {
+```
+
+Both of SimCity's dispatchers are `JSR (abs,X)` — opcode `$FC`, not `$7C`:
+
+| site | bytes | what it is |
+|---|---|---|
+| `00:821e` | `fc 23 82` | COP service dispatch, 11 entries at `$8223` |
+| `03:d28f` | `fc 55 d2` | screen-mode dispatch, 23 entries at `$d255` |
+| `01:897f` | `fc ef 88` | `$c5` reason-code dispatch |
+
+So a `ptrcall`-mode directive — which exists precisely to describe a *call*
+through a table, and even takes `return:` and `frame:` arguments for the JSR
+frame — can never fire, because the only site kind that reaches the lookup is a
+jump. Declaring one is silently a no-op: the cfg parses, the analysis is
+unchanged, and nothing warns.
+
+Two things would help, in order of value:
+
+1. Extend the site test to `JSR`/`JSL` indirect (`$FC` and `$DC`). The
+   `ptrcall`/`return:`/`frame:` machinery already exists and appears intended
+   for exactly this.
+2. Failing that, **warn on an `indirect_dispatch` directive that never matches
+   a site**. A directive that silently does nothing is worse than a rejected
+   one; it took a before/after manifest diff to notice.
+
+This matters beyond SimCity: `JSR (abs,X)` is the standard 65816 idiom for a
+call-through-jump-table, and a game that uses it for its main dispatcher cannot
+currently have that edge resolved by any cfg directive.
