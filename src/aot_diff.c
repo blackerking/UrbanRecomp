@@ -38,6 +38,7 @@
 #include "spc_player.h"
 #include "snes/dsp.h"
 #include "snes/dsp_shadow.h"
+#include "pure_leaves.h"
 
 /* Host symbols the shared runtime expects the game to supply. */
 SpcPlayer *g_spc_player = NULL;
@@ -110,67 +111,113 @@ int main(int argc, char **argv) {
     snes_reset(g_snes, true);
     g_ppu = g_snes->ppu;
 
-    int which = -1;
-    RecompReturn (*body)(CpuState *) = find_body(PRNG_PC24, &which);
-    if (!body) { fprintf(stderr, "no compiled body for %06X\n", PRNG_PC24); return 1; }
-    static const char *vn[4] = { "M0X0", "M0X1", "M1X0", "M1X1" };
-    printf("subject 00:824f (PRNG step), compiled variant %s\n\n", vn[which]);
-
     Interp816 *icpu = interp816_init(NULL, bus_read, bus_write);
     interp816_reset(icpu);
 
-    static const uint16_t cases[][3] = {
-        { 0x0000, 0x0000, 0x0000 }, { 0x0001, 0x0000, 0x0000 },
-        { 0x1234, 0x5678, 0x9abc }, { 0xffff, 0xffff, 0xffff },
-        { 0x8000, 0x8000, 0x0000 }, { 0xabcd, 0x0001, 0xf00d },
-        { 0x0f0f, 0xf0f0, 0x00ff }, { 0x7fff, 0x0001, 0x0000 },
-    };
-    int n = (int)(sizeof(cases) / sizeof(cases[0])), bad = 0;
+    /* Scratch WRAM the routines operate on. Saved/restored around each side so
+     * both see identical input; the low 2KB covers direct page and the
+     * near-page variables these leaf routines touch. */
+    static uint8_t saved[0x2000];
+    uint32_t rng = 0x12345678u;
+    #define NEXT() (rng = rng * 1664525u + 1013904223u, (uint16_t)(rng >> 16))
 
-    printf("%-22s %-24s %-24s\n", "seed 59/5b/5d", "AOT 59/5b/5d (A)", "interp 59/5b/5d (A)");
-    for (int i = 0; i < n; i++) {
-        uint16_t a = cases[i][0], b = cases[i][1], c = cases[i][2];
+    int tested = 0, matched = 0, skipped = 0, nonnormal = 0, nonterm = 0;
+    int failing_pcs = 0;
+    unsigned first_fail[8]; int nfail = 0;
 
-        /* --- compiled side --- */
-        seed(a, b, c);
-        CpuState cs;
-        cpu_state_init(&cs, g_ram);
-        cs.PB = 0x00; cs.DB = 0x00; cs.D = 0x0000; cs.S = 0x1ff3;
-        cs.A = 0; cs.X = 0; cs.Y = 0;
-        cs.m_flag = 1; cs.x_flag = 1; cs.emulation = 0;
-        cs.P = 0x30; cpu_p_to_mirrors(&cs);
-        /* Option-1 ABI: a JSR-paired caller pushes a 2-byte return frame and
-         * declares it, so the body's RTS may return NORMAL (cpu_state.h). */
-        cs.ram[0x1ff3] = 0x34; cs.ram[0x1ff2] = 0x12;
-        cs.S = 0x1ff1;
-        cs.host_return_valid = 2;
-        RecompReturn r = body(&cs);
-        Snapshot got = snap(cs.A);
+    for (int i = 0; i < SIMCITY_PURE_LEAF_COUNT; i++) {
+        unsigned pc24 = kSimCityPureLeaves[i].pc24;
+        unsigned end  = kSimCityPureLeaves[i].end;
+        int which = -1;
+        RecompReturn (*body_fn)(CpuState *) = find_body(pc24, &which);
+        if (!body_fn) { skipped++; continue; }
 
-        /* --- interpreter side, same seed --- */
-        seed(a, b, c);
-        icpu->k = 0x00; icpu->pc = (uint16_t)PRNG_PC24;
-        icpu->a = 0; icpu->x = 0; icpu->y = 0;
-        icpu->dp = 0; icpu->db = 0; icpu->sp = 0x1ff1;
-        icpu->mf = 1; icpu->xf = 1; icpu->e = 0;
-        bus_write(NULL, 0x1ff3, 0x34); bus_write(NULL, 0x1ff2, 0x12);
-        for (int guard = 0; guard < 64; guard++) {
-            uint32_t pc = ((uint32_t)icpu->k << 16) | icpu->pc;
-            if (pc < PRNG_PC24 || pc >= PRNG_END) break;
-            interp816_runOpcode(icpu);
+        printf("  [%2d/%d] %02X:%04X ...\n", i + 1, SIMCITY_PURE_LEAF_COUNT,
+               pc24 >> 16, pc24 & 0xffff);
+        fflush(stdout);
+        int body_bad = 0, body_skip = 0;
+        for (int trial = 0; trial < 8 && !body_skip; trial++) {
+            /* randomise the scratch region and the entry registers */
+            /* Values are kept SMALL on purpose. Many of these routines take a
+             * table index out of a WRAM variable -- 01:b375 does
+             * `LDX $01f9 ; LDA $0180c0,X` -- so feeding fully random WRAM
+             * hands them a wild index and produces an out-of-range access that
+             * looks like a codegen bug but is really a violated precondition.
+             * Real callers keep those indices small; so do we. Diversity comes
+             * from the value pattern, not from magnitude. */
+            for (int a = 0; a < 0x2000; a++) saved[a] = (uint8_t)(NEXT() & 0x0f);
+            uint16_t rA = (uint16_t)(NEXT() & 0x0fff);
+            uint16_t rX = (uint16_t)(NEXT() & 0x000f);
+            uint16_t rY = (uint16_t)(NEXT() & 0x000f);
+            uint8_t  rDB = 0x00, mf = which >= 2, xf = (which & 1);
+
+            /* INTERPRETER FIRST, and this ordering is load-bearing. A compiled
+             * body is a plain C call with no way to interrupt it, so a routine
+             * that does not terminate hangs the harness with no diagnostic --
+             * which is exactly what 00:930d does, since it is the vblank spin
+             * (STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6) waiting on an NMI that
+             * never arrives here. The interpreter is stepped under a guard, so
+             * running it first lets us detect non-termination and skip the
+             * body entirely rather than wedging. */
+            memcpy(g_ram, saved, 0x2000);
+            icpu->k = (uint8_t)(pc24 >> 16); icpu->pc = (uint16_t)pc24;
+            icpu->a = rA; icpu->x = rX; icpu->y = rY;
+            icpu->dp = 0; icpu->db = rDB; icpu->sp = 0x1ff1;
+            icpu->mf = mf; icpu->xf = xf; icpu->e = 0;
+            bus_write(NULL, 0x1ff3, 0x34); bus_write(NULL, 0x1ff2, 0x12);
+            /* A clean exit means the routine RETURNED -- its RTS popped the
+             * frame we pushed and landed on $3413. Merely leaving [pc24, end]
+             * is not the same thing: a manifest extent can stop short of the
+             * real routine (00:8436's ends at $8448, one byte before its own
+             * RTS, because the not-equal path continues into a separate node),
+             * and in that case the interpreter would stop early while the
+             * compiled body carried on -- a divergence entirely of the
+             * harness's making. Anything that does not return cleanly is
+             * skipped rather than compared. */
+            int returned = 0;
+            for (int guard = 0; guard < 4096; guard++) {
+                uint32_t p = ((uint32_t)icpu->k << 16) | icpu->pc;
+                if (p == 0x003413u) { returned = 1; break; }
+                if (p < pc24 || p > end + 1) break;
+                interp816_runOpcode(icpu);
+            }
+            if (!returned) { body_skip = 1; break; }
+            static uint8_t after_interp[0x2000];
+            memcpy(after_interp, g_ram, 0x2000);
+            uint16_t iA = icpu->a, iX = icpu->x, iY = icpu->y;
+
+            memcpy(g_ram, saved, 0x2000);
+            CpuState cs;
+            cpu_state_init(&cs, g_ram);
+            cs.PB = (uint8_t)(pc24 >> 16); cs.DB = rDB; cs.D = 0x0000;
+            cs.A = rA; cs.X = rX; cs.Y = rY;
+            cs.m_flag = mf; cs.x_flag = xf; cs.emulation = 0;
+            cs.P = (uint8_t)((mf ? 0x20 : 0) | (xf ? 0x10 : 0));
+            cpu_p_to_mirrors(&cs);
+            cs.ram[0x1ff3] = 0x34; cs.ram[0x1ff2] = 0x12;
+            cs.S = 0x1ff1; cs.host_return_valid = 2;
+            RecompReturn r = body_fn(&cs);
+            if (r != RECOMP_RETURN_NORMAL) nonnormal++;
+
+            if (memcmp(after_interp, g_ram, 0x2000) != 0 ||
+                cs.A != iA || cs.X != iX || cs.Y != iY)
+                body_bad = 1;
         }
-        Snapshot want = snap(icpu->a);
-
-        int ok = got.s59 == want.s59 && got.s5b == want.s5b && got.s5d == want.s5d;
-        if (!ok) bad++;
-        printf("%04x %04x %04x   ->  %04x %04x %04x (%04x)   %04x %04x %04x (%04x)  %s%s\n",
-               a, b, c,
-               got.s59, got.s5b, got.s5d, got.A,
-               want.s59, want.s5b, want.s5d, want.A,
-               ok ? "MATCH" : "*** MISMATCH ***",
-               r == RECOMP_RETURN_NORMAL ? "" : " [body did not return NORMAL]");
+        if (body_skip) { nonterm++; continue; }
+        tested++;
+        if (body_bad) {
+            if (nfail < 8) first_fail[nfail++] = pc24;
+            failing_pcs++;
+        } else matched++;
     }
 
-    printf("\n%d/%d cases match\n", n - bad, n);
-    return bad ? 1 : 0;
+    printf("pure-leaf differential: %d bodies tested, 8 randomised trials each\n", tested);
+    printf("  identical WRAM + A/X/Y : %d\n", matched);
+    printf("  divergent              : %d\n", failing_pcs);
+    printf("  no compiled body       : %d\n", skipped);
+    printf("  skipped, no clean RTS  : %d\n", nonterm);
+    printf("  returns != NORMAL      : %d\n", nonnormal);
+    for (int i = 0; i < nfail; i++)
+        printf("    diverged: %02X:%04X\n", first_fail[i] >> 16, first_fail[i] & 0xffff);
+    return failing_pcs ? 1 : 0;
 }

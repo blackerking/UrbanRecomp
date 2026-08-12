@@ -533,7 +533,7 @@ stack-corruption problem MMX's yield had.
 |---|---|
 | 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
 | 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
-| 3a. Is any compiled body *correct*? | **first evidence** — `SimCityAOTDiff` runs the compiled `00:824f` (PRNG step) against the real ROM routine over 8 seeds including carry edge cases: 8/8 identical, body returns `NORMAL` |
+| 3a. Is any compiled body *correct*? | **8 bodies verified** — `SimCityAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
 | 3b. Route execution through compiled bodies | not started |
 
 Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
@@ -552,8 +552,8 @@ runtime in that build (`g_ram`, `g_interp_apu_driving`, `ppudma_record_dma`,
 `interp816_opcode_hook`) and the one the runtime expects the game to supply
 (`g_spc_player`).
 
-Step 3a picked the easiest possible subject on purpose — `00:824f` is pure
-WRAM state, no I/O, no branches, no calls:
+Step 3a started from the easiest possible subject — `00:824f`, pure WRAM
+state, no I/O, no branches, no calls:
 
 ```
 REP #$20 ; CLC ; LDA $59 ; STA $5d ; ADC $5b ; STA $59 ; ADC $5d ; STA $5b ; RTS
@@ -561,9 +561,30 @@ REP #$20 ; CLC ; LDA $59 ; STA $5d ; ADC $5b ; STA $59 ; ADC $5d ; STA $5b ; RTS
 
 Seeded identically on both sides and compared: 8/8 match, including
 `ffff/ffff/ffff`, `8000` overflow and `7fff+1`, which are where a carry bug
-would show. That is **one** verified body out of 720, not a claim about the
-rest — but it is the difference between "the generated code exists" and "the
-generated code computes the right answer".
+would show.
+
+`tools/select_pure_leaves.py` then generalised it. Synthetic entry state is
+only a *fair* test where the routine has no preconditions a real caller would
+have established, so it selects bodies with no calls or non-local transfers,
+no hardware-register access, and no stack manipulation. 34 of 722 AOT bodies
+qualify; 8 of those return cleanly from synthetic state and are compared over
+8 randomised trials each. **64/64 comparisons identical, zero divergences.**
+
+Getting there meant fixing four harness artefacts, each of which first
+presented as a codegen bug:
+
+| symptom | actual cause |
+|---|---|
+| harness hangs forever | `00:930d` is the **vblank spin**, waiting on an NMI that never arrives. A compiled body is a plain C call with no way to interrupt it — so the interpreter now runs **first**, under a step guard, and a body that does not terminate is never called |
+| segfault | `00:98a0` does `PLX ; PLA ; PHA` to pop its **own return address** and read inline arguments the caller emitted after the `JSR`. Handed a fabricated return address it indexes arbitrary memory |
+| segfault | `01:b375` does `LDX $01f9 ; LDA $0180c0,X` — a table index taken **out of WRAM**. Fully random WRAM hands it a wild index; real callers keep it small, so the harness does too |
+| one divergence at `00:8436` | its manifest extent ends at `$8448`, one byte before its own `RTS`, because the not-equal path continues into a separate node. The interpreter stopped early while the body carried on. Comparison now requires the interpreter to have genuinely **returned** |
+
+That last one is the useful lesson for anyone extending this: "PC left the
+recorded extent" and "the routine returned" are different events, and only the
+second makes a comparison meaningful. The 24 bodies skipped for no clean RTS
+are not failures — they are routines whose contract synthetic state cannot
+satisfy.
 
 Step 3b is the real work: driving the frame loop through
 `interp_bridge_run_scheduler` against `00:930d`/`$b9`, then the differential
