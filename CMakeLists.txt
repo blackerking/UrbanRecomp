@@ -116,6 +116,7 @@ if(SIMCITY_GEN_SOURCES)
         src/aot_probe.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_fiber.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -175,6 +176,7 @@ if(SIMCITY_GEN_SOURCES)
         src/main.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_fiber.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -218,6 +220,7 @@ if(SIMCITY_GEN_SOURCES)
         src/aot_diff.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_fiber.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -250,3 +253,13 @@ if(SIMCITY_GEN_SOURCES)
         target_link_libraries(SimCityAOTDiff PRIVATE ${SDL2_LIBRARIES})
     endif()
 endif()
+
+# -- Fiber layer self-test ---------------------------------------------------
+# Standalone: no ROM, no runtime, no generated code. Coroutine bugs are far
+# easier to find here than underneath a running 65816 interpreter.
+#   cmake --build build --target SimCityFiberTest && ./build/Release/SimCityFiberTest
+add_executable(SimCityFiberTest EXCLUDE_FROM_ALL
+    tests/fiber_test.c
+    src/simcity_fiber.c
+)
+target_include_directories(SimCityFiberTest PRIVATE ${CMAKE_SOURCE_DIR}/src)

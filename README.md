@@ -535,7 +535,8 @@ stack-corruption problem MMX's yield had.
 | 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
 | 3a. Is any compiled body *correct*? | **8 bodies verified** — `SimCityAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
 | 3b. Declare the frame boundary | **done** — `hle_func 930d SimCity_WaitForVblank` in `recomp/bank00.cfg`, implemented in `src/simcity_hle.c`. The emitter now routes all four M/X variants of `bank_00_930d` through the host function |
-| 3c. Route execution through compiled bodies | **scoped, not started** — see [`docs/MIGRATION_step3.md`](docs/MIGRATION_step3.md); the remaining fork is fibers vs the LLE bridge |
+| 3c. Fiber layer for the frame boundary | **done** — `src/simcity_fiber.c`, verified by `tests/fiber_test.c` (stack and FP state preserved across switches) |
+| 3d. Drive the guest inside the fiber | not started — needs an interpreter-with-bouncing driver, because SimCity has no compiled entry point to start from ([why](docs/MIGRATION_step3.md) §5) |
 
 Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
 

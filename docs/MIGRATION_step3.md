@@ -218,3 +218,49 @@ and states the framework is retiring it in favour of the fiber-free LLE bridge
 Either way the first concrete step is identical: declare
 `hle_func 930d` and give it a host implementation. That is what makes the
 game's frame boundary visible to the host, and it is required by both designs.
+
+
+## 5. Decision: fibers — and the one way SimCity differs from ar-recomp
+
+Fibers chosen. `src/simcity_fiber.c` implements the coroutine layer
+(`SimCityFiber_Create` / `_RunOneFrame` / `_YieldToHost`), with
+`tests/fiber_test.c` as a standalone self-test: it drives five frames, yields
+from eight stack frames down, and checks that every level's local survives the
+switch and that floating-point state is preserved on both sides. Coroutine
+bugs are far cheaper to find there than underneath a running 65816.
+
+`FIBER_FLAG_FLOAT_SWITCH` is mandatory, as ar-recomp documents — without it x86
+FP state is not switched between fibers, and both sides here use FP.
+
+### SimCity cannot start inside compiled code
+
+This is the one place the ar-recomp transplant breaks, and it shapes
+everything after it.
+
+ar-recomp's game coroutine begins with `ResetHandler_M1X1(&g_cpu)` and never
+returns: the whole game runs as compiled C inside that single call, and the
+fiber exists only to suspend it. SimCity has no compiled entry point to hand
+the fiber, because **both architectural entry points are `lle_only`**:
+
+| entry | blocked by |
+|---|---|
+| `I_RESET` `00:8000` | `unproven_call_at_008056_to_03D283` |
+| NMI `00:80b2` | `unproven_call_at_00813A_to_00C3F9` |
+
+`03:d283` is the screen-mode dispatcher (`LDA $14 ; ASL ; TAX ;
+JMP ($d255,X)`), so its exit modes are unprovable through the indirect jump,
+and that one unproven call leaves the reset vector uncompiled.
+
+So the fiber must wrap an **interpreter that bounces into compiled bodies**,
+not host compiled code directly — a hybrid of the two designs. That is the
+honest shape for a game where 41% of executed addresses have no compiled body
+at all, and it means the eventual driver looks more like
+`interp_bridge`-with-a-fiber than like ar-recomp's pure coroutine.
+
+### Not yet wired, deliberately
+
+`g_simcity_yield_to_host` is still NULL. Installing
+`SimCityFiber_YieldToHost` before a host frame driver exists would yield into
+a host that is not inside `SimCityFiber_RunOneFrame`, which crashes. The
+remaining work is that driver: run the guest inside the fiber, bounce
+JSR/JSL into compiled bodies where one exists, and let the vblank HLE suspend.
