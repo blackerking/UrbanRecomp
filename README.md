@@ -509,15 +509,29 @@ poisoned. Tiering every COP makes the poison unnecessary.
 
 | | before | after |
 |---|---|---|
-| exact variants | 1155 | **1567** |
-| AOT-eligible | 845 | **1458** |
-| LLE-only | 310 | 109 |
-| instructions analyzed | 40,800 | **66,198** |
-| AOT share | 80.3% | **94.9%** |
+| exact variants | 1155 | **1584** |
+| AOT-eligible | 845 | **1474** |
+| LLE-only | 310 | 110 |
+| instructions analyzed | 40,800 | **67,724** |
+| AOT share | 80.3% | **94.8%** |
 
-The frontier itself grew by 25,000 instructions, because decode now
+The frontier itself grew by 27,000 instructions, because decode now
 continues past 552 COP sites instead of stopping at them. That is the part
 the upper bound could not have predicted: it assumed a fixed denominator.
+
+The more meaningful measure is against what the game actually runs. Taking
+the union of four recorded play sessions — 31,487 distinct executed
+instruction addresses — and asking where each one now lands:
+
+| | share of executed code |
+|---|---|
+| inside an AOT-eligible node | **96.1%** |
+| inside an LLE-only node | 3.6% |
+| not in the frontier at all | 0.3% |
+
+That last row was 0.7% until `03:8000` was declared as a root — the monthly
+simulation tick, executed in every session but named by no `JSR`, `JSL` or
+`JMP` anywhere in the ROM.
 
 Verified: both tiers `--qualify 600` identical on every counter including
 master cycles; all **seven** save states replayed with input give
