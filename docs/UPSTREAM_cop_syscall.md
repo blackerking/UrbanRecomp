@@ -63,6 +63,16 @@ every `LDA #$0008 ; COP #$00` site in the ROM is a decompression call. Service 0
 is the vblank wait (`STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6 ; RTS`), released by
 the NMI handler at `00:80bc`. Both confirmed by bsnes trace, not inferred.
 
+### The dispatcher is itself uncompilable, which compounds this
+
+`00:8211` is not merely the target of truncated callers -- it is itself
+`lle_only`, with reason `truncated_call_continuation`, because its entire body
+is the indirect `JSR ($8223,X)`. So even a caller that survived its own `COP`
+would land on an interpreted dispatcher. **All ~309 COP call sites reach the
+interpreter regardless.** Modelling `COP` as a call and resolving the service
+table statically would fix both halves at once, since the service number is an
+immediate in `A` at nearly every site.
+
 Critically for the analyzer: **`COP #$00` returns**. It is a `JSR` through a
 table wrapped in an `RTI`, so control resumes at the instruction after the
 `COP`, with the flags/DB the handler leaves. It is structurally a call, not a

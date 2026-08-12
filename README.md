@@ -534,7 +534,7 @@ stack-corruption problem MMX's yield had.
 | 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
 | 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
 | 3a. Is any compiled body *correct*? | **8 bodies verified** — `SimCityAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
-| 3b. Route execution through compiled bodies | not started |
+| 3b. Route execution through compiled bodies | **scoped, not started** — see [`docs/MIGRATION_step3.md`](docs/MIGRATION_step3.md); the blocker is a timing-model conflict, not wiring |
 
 Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
 
