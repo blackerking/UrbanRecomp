@@ -4,8 +4,10 @@
 > nibbles as "hardware-guaranteed zero" and treat `AND #$0f00` direction
 > checks as buggy were written against a runner defect, not the ROM. The
 > auto-joypad halves were transposed (`$4218` = A/X/L/R + zero nibble,
-> `$4219` = D-pad); fixed in snesrecomp b48daf4, compensating patches
-> removed in 164a611. `LDA $011b (16-bit) / AND #$0f00` is the correct way
+> `$4219` = D-pad). **That diagnosis was also wrong**: the runner is correct
+> and the bug was this host's own `kPad_*` bit order, now fixed in
+> `src/main.c` with the submodule reverted to stock. See the README's D-pad
+> section. Compensating ROM patches removed in 164a611. `LDA $011b (16-bit) / AND #$0f00` is the correct way
 > to read the D-pad. Rows describing *what a routine does* remain valid;
 > rows calling that routine buggy do not. See task #51.
 

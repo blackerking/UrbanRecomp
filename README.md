@@ -78,49 +78,68 @@ for the derivation, verified empirically per-button. Fixed, and confirmed
 working end-to-end by interactive testing for all 8 discrete buttons
 (A/B/X/Y/L/R/Start/Select).
 
-### D-pad: there was never a stock-ROM bug (runner defect, now fixed)
+### D-pad: the ROM was fine, the runner was fine, this host was wrong
 
-Earlier revisions of this README claimed the stock ROM shipped a
-"D-pad bug family" affecting a dozen screens, fixed by ROM patches. **That
-was wrong.** The ROM was correct; the runner was not.
+This section has been wrong twice, so it is worth stating the final answer
+plainly: **the stock ROM was correct, the shared runner was correct, and the
+bug was in this project's own host.**
 
-`snesrecomp`'s `snes.c` returned the two halves of the auto-joypad read
-transposed. Per hardware the joypad word is
+Two earlier revisions of this README each blamed something else. The first
+claimed the ROM shipped a "D-pad bug family" across a dozen screens and added
+eleven compensating ROM patches. The second retracted that and blamed the
+runner for transposing the `$4218`/`$4219` auto-joypad halves, patched
+`snes.c` in the submodule, and filed
+[issue #14](https://github.com/mstan/snesrecomp/issues/14) upstream.
+
+Both were wrong, for the same underlying reason: `src/main.c` populated
+`input1_currentState` in the **reverse** of the bit order the runner expects,
+and every subsequent fix compensated for that somewhere further downstream.
+
+The hardware layout is:
 
 ```
-bits 15-8 : B, Y, Select, Start, Up, Down, Left, Right
-bits  7-0 : A, X, L, R, 0, 0, 0, 0     (low nibble = controller ID)
+$4218 (JOY1L) : A, X, L, R, 0, 0, 0, 0     (low nibble = controller ID)
+$4219 (JOY1H) : B, Y, Select, Start, Up, Down, Left, Right
 ```
 
-so `$4218` carries A/X/L/R plus four always-zero bits, and `$4219` carries
-the D-pad. Returning them the wrong way round put the D-pad in `$011b` and
-left `$011c` -- the byte the game actually tests -- reading zero.
-`LDA $011b (16-bit) / AND #$0f00` is simply *how you read the D-pad*: it
-tests `$011c` bits 0-3. It only looked like a per-site bug because the
-emulator was feeding it the wrong byte.
+The runner stores `input*_currentState` in **serial order, LSB first** — the
+order the pad shifts out of `$4016`: B, Y, Select, Start, Up, Down, Left,
+Right, A, X, L, R. It then reverses all 16 bits and splits the result, which
+lands exactly the layout above. Nothing in `snes.c` needed changing; the host
+simply had to supply that convention:
 
-Eleven compensating ROM patches were written against that single defect.
-With the runner corrected the two compensations cancel -- applying both
-kills input again -- so the patches have been removed. Measured on the
-bank-loan dialog (its handler depends on exactly one patched site), holding
-Right: patches applied leaves the selection stuck, patches removed moves it,
-on stock ROM code. Holding Left now yields `$011b=00 / $011c=02`, Left in
-`$011c` bit 1, exactly as the hardware layout specifies.
+```c
+kPad_B = 0x0001, kPad_Y = 0x0002, kPad_Select = 0x0004, kPad_Start = 0x0008,
+kPad_Up = 0x0010, kPad_Down = 0x0020, kPad_Left = 0x0040, kPad_Right = 0x0080,
+kPad_A = 0x0100, kPad_X = 0x0200, kPad_L = 0x0400, kPad_R = 0x0800,
+```
 
-The fix lives in the `snesrecomp` submodule and affects every game built on
-that runner. It surfaced because a sibling project (Metal Marines) hit the
-identical pattern and refused to accept that two unrelated commercial games
-shipped the same input bug -- which was the tell here too, and was missed
-for a long time. Eleven independent sites appearing to share one bug is an
-anomaly to explain, not corroboration to lean on.
+Verified with the submodule **unmodified** (our `snes.c` patch reverted), on a
+fixed save state, holding each direction for 110 frames:
 
-[`docs/INVESTIGATION_dpad.md`](docs/INVESTIGATION_dpad.md) is kept as the
-trail of that mistake; note it still argues the old model in most places
-and is being re-derived.
+| held | result |
+|---|---|
+| Right | cursor X `$01EB` 128 → 232 (clamps) |
+| Left | 128 → 16 |
+| Down | cursor Y `$01ED` 128 → 192 |
+| Up | 128 → 24 |
 
-Two ROM patches remain, both unrelated to input and each standing on its own
-evidence: the `$01f3` cursor step-delay tweak and the `00:c0fb` `$7e21b5`
-stomp fix.
+Identical to what the patched runner produced. `--qualify 600` PASS.
+
+`mstan` reached the same conclusion independently in
+[PR #17](https://github.com/mstan/snesrecomp/pull/17), which keeps the
+existing byte order and adds a regression test. **Issue #14 should be closed
+as invalid**, and the submodule patch has been reverted.
+
+The lesson worth keeping is not about joypads. Twice, a bug in this host was
+diagnosed as a bug in something else, and the second diagnosis was more
+convincing than the first because it had a *mechanism* and a sibling project
+hitting the same symptom. "Two unrelated commercial games can't ship the same
+input bug" was a good argument that pointed at the wrong layer — two hosts
+derived from the same wrong assumption produce exactly that pattern too.
+
+`docs/INVESTIGATION_dpad.md` is kept as the trail; note it argues the older
+models in most places.
 
 ### Graphics/text export tool
 

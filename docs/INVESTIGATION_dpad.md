@@ -1,6 +1,21 @@
 # D-pad investigation
 
-> ## CORRECTION (read this first)
+> ## SECOND CORRECTION (read this first, it supersedes the one below)
+>
+> **The runner was not wrong either.** `input*_currentState` is stored in
+> serial order, LSB first (B, Y, Select, Start, Up, Down, Left, Right, A, X,
+> L, R); `snes.c` reverses and splits it, which lands the hardware layout
+> correctly. The actual bug was in this project's own `src/main.c`, whose
+> `kPad_*` constants were the reverse of that order. Verified by holding each
+> direction with the submodule **unmodified**: Right → cursor X 232, Left →
+> 16, Down → cursor Y 192, Up → 24 — identical to the patched runner.
+> Our submodule commit `b48daf4` is reverted and upstream issue #14 should be
+> closed as invalid. See the README's D-pad section for the full account.
+>
+> Everything below is kept as the trail. The first correction (immediately
+> following) is right that the ROM is fine and wrong about the cause.
+
+> ## CORRECTION (superseded — see above)
 >
 > **There was never a stock-ROM "D-pad bug family".** The ROM was correct;
 > the runner was not. `snesrecomp`'s `snes.c` returned the two halves of the

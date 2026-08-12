@@ -501,9 +501,14 @@ static uint8_t s_video_pixels[kVideoPitch * kVideoHeight];
  * $4218, not "Start", confirming the derivation). Do not "simplify" these
  * to the naive hardware bit order -- that was the original bug. */
 enum {
-  kPad_Right = 0x8000, kPad_Left = 0x4000, kPad_Down = 0x2000, kPad_Up = 0x1000,
-  kPad_Start = 0x0800, kPad_Select = 0x0400, kPad_Y = 0x0200, kPad_B = 0x0100,
-  kPad_R = 0x0008, kPad_L = 0x0004, kPad_X = 0x0002, kPad_A = 0x0001,
+  /* Serial order, LSB first -- the order the pad shifts out of $4016:
+   * B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R. The runner
+   * reverses all 16 bits and splits the result, so this convention lands
+   * $4218 = A,X,L,R,0,0,0,0 and $4219 = B,Y,Select,Start,Up,Down,Left,Right
+   * -- the real hardware layout -- with the runner UNMODIFIED. */
+  kPad_B = 0x0001, kPad_Y = 0x0002, kPad_Select = 0x0004, kPad_Start = 0x0008,
+  kPad_Up = 0x0010, kPad_Down = 0x0020, kPad_Left = 0x0040, kPad_Right = 0x0080,
+  kPad_A = 0x0100, kPad_X = 0x0200, kPad_L = 0x0400, kPad_R = 0x0800,
 };
 
 /* HDMA per-scanline execution. The shared engine's cycle-accurate DMA path
