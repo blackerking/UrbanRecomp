@@ -13,6 +13,9 @@ everything reverse-engineered about this ROM so far (WRAM variables,
 named routines, patch sites, compressed data regions), see
 [docs/ROM_MAP.md](docs/ROM_MAP.md).
 
+**Open threads:** [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md) lists what is
+left to investigate, with the evidence already gathered for each.
+
 ## Status: Phase 1 (LLE-first correctness baseline)
 
 This bring-up follows snesrecomp's own documented philosophy
