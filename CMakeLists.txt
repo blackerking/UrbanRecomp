@@ -208,3 +208,42 @@ if(SIMCITY_GEN_SOURCES)
         target_link_libraries(SimCitySNESRecompAOT PRIVATE ${SDL2_LIBRARIES})
     endif()
 endif()
+
+# -- AOT differential harness (migration step 3a) ----------------------------
+#   cmake --build build --target SimCityAOTDiff
+if(SIMCITY_GEN_SOURCES)
+    add_executable(SimCityAOTDiff EXCLUDE_FROM_ALL
+        src/aot_diff.c
+        ${SIMCITY_GEN_SOURCES}
+        ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
+        ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
+        ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
+        ${SNESRECOMP_ROOT}/runner/src/host_report.c
+        ${SNESRECOMP_ROOT}/runner/src/framedump.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
+        ${SIMCITY_DEVICE_SOURCES}
+    )
+    target_include_directories(SimCityAOTDiff PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/recomp
+        ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
+        ${SNESRECOMP_ROOT}/runner/src/desktop
+    )
+    target_compile_definitions(SimCityAOTDiff PRIVATE SDL_MAIN_HANDLED)
+    if(MSVC)
+        target_link_options(SimCityAOTDiff PRIVATE /FORCE:MULTIPLE)
+    else()
+        target_compile_options(SimCityAOTDiff PRIVATE
+            -w -Wno-implicit-function-declaration)
+    endif()
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(SimCityAOTDiff PRIVATE SDL2::SDL2)
+    else()
+        target_include_directories(SimCityAOTDiff PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(SimCityAOTDiff PRIVATE ${SDL2_LIBRARIES})
+    endif()
+endif()

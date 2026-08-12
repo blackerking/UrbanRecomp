@@ -533,7 +533,8 @@ stack-corruption problem MMX's yield had.
 |---|---|
 | 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
 | 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
-| 3. Route execution through compiled bodies | not started |
+| 3a. Is any compiled body *correct*? | **first evidence** — `SimCityAOTDiff` runs the compiled `00:824f` (PRNG step) against the real ROM routine over 8 seeds including carry edge cases: 8/8 identical, body returns `NORMAL` |
+| 3b. Route execution through compiled bodies | not started |
 
 Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
 
@@ -551,8 +552,24 @@ runtime in that build (`g_ram`, `g_interp_apu_driving`, `ppudma_record_dma`,
 `interp816_opcode_hook`) and the one the runtime expects the game to supply
 (`g_spc_player`).
 
-Step 3 is the real work, and the one thing that could still invalidate all of
-this: none of the 720 compiled bodies has ever executed a single instruction.
+Step 3a picked the easiest possible subject on purpose — `00:824f` is pure
+WRAM state, no I/O, no branches, no calls:
+
+```
+REP #$20 ; CLC ; LDA $59 ; STA $5d ; ADC $5b ; STA $59 ; ADC $5d ; STA $5b ; RTS
+```
+
+Seeded identically on both sides and compared: 8/8 match, including
+`ffff/ffff/ffff`, `8000` overflow and `7fff+1`, which are where a carry bug
+would show. That is **one** verified body out of 720, not a claim about the
+rest — but it is the difference between "the generated code exists" and "the
+generated code computes the right answer".
+
+Step 3b is the real work: driving the frame loop through
+`interp_bridge_run_scheduler` against `00:930d`/`$b9`, then the differential
+gate `LLE_SCHEDULER.md` specifies (bounced vs interpreted must be bit-exact).
+The COP limit starts to bite there in practice — roughly a third of executed
+code has no compiled body to bounce into.
 
 **TODO**: harmonise with [ar-recomp](https://github.com/DerrickGold/ar-recomp)
 -- not yet investigated in this repo; worth a look at what conventions or
