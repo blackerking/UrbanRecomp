@@ -340,3 +340,57 @@ those are wrong-width decodes, which is what the poison is for.
   interpreter-only and AOT builds, on every state.
 - 50 analyzer tests, 81 project tests, and the regen's differential-emit
   comparison all pass.
+
+---
+
+## Next blocker, now that COP is gone: unpublished exit M/X
+
+With COP modelled, the remaining LLE-only set is 3,499 instructions (5.2%),
+and it has essentially one cause. Stating it precisely, because
+`unproven_callee_exit` undersells it:
+
+**300 of 1,584 nodes never get exit M/X published at all** (1,284 do), and an
+unpublished exit truncates *every* caller of that node, transitively.
+
+The clearest single example: `03:8087` is `JSR $8df1`, and `038DF1:M0X0` is
+`aot_eligible` with an **empty `reasons` list** — a clean, compiled node. Its
+caller is still `lle_only` with `truncated_call_continuation`, purely because
+`038DF1:M0X0` has no entry in the manifest's `exit_modes`. Compilability and
+exit-width publication are separate fixpoints, and the second one is what the
+remaining 5% is waiting on.
+
+The shape that defeats it is a mutually recursive dispatch cycle. Bank 01's UI
+state machine is the clean case: `$01df` selects through two parallel tables
+at `01:9d1a` (call) and `01:9d3a` (jump), and the five handlers
+`01:A886 / A97C / AA39 / AAD5 / AD54` each dispatch through the same tables to
+all five. Every one is unproven because the other four are:
+
+```
+01A886:M0X0  unproven_call_at_01A8E9_to_{01A886,01A97C,01AA39,01AAD5,01AD54}
+01A97C:M0X0  unproven_call_at_01AA23_to_{ ...the same five... }
+01AA39:M0X0  unproven_call_at_01AABF_to_{ ...the same five... }
+```
+
+Nothing is missing statically — the tables resolve, the targets are known, the
+nodes are decoded. It is purely that the solver has no fixed point for a
+cycle. The `assumptions` machinery and the comment about a "closed SCC solver"
+in `v2_analyze.py` suggest this was anticipated but not finished.
+
+`exit_mx_at <addr> <m> <x>` can assert a node's exit widths by hand, and would
+break these cycles. We have deliberately not used it: it is an unchecked
+assertion, and asserting a width the ROM does not actually exit in would
+miscompile silently. A solver that iterates a cycle to a fixed point — or
+that measures the exit widths from a recorded run and *checks* the assertion —
+is the right fix.
+
+### Corrections to earlier claims in this document
+
+- **`indirect_dispatch` does reach `JSR (abs,X)`.** The section above says the
+  directive can only fire for `JMP`. `decoder.rs` matches
+  `JSR && Mode::IndirX` against `env.indirect_dispatch`, with an
+  `autorecover_indirect_xtable` fallback. Verified by declaring `01:8985`
+  explicitly (12 word entries at `01:88ef`): the analysis was byte-identical,
+  because autorecover had already resolved it. The site truncates one step
+  later, at the exit-M/X lookup.
+- The related complaint that a never-matching directive is silent still
+  stands, and is how the original claim went unchecked.

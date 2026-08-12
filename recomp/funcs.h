@@ -15,7 +15,7 @@
 
 #include "cpu_state.h"
 
-/* 481 functions across all banks (5 decls each). */
+/* 482 functions across all banks (5 decls each). */
 
 void bank_00_80b2(CpuState *cpu);  /* $00:80B2 alias */
 RecompReturn bank_00_80b2_M0X0(CpuState *cpu);
@@ -1477,6 +1477,11 @@ RecompReturn bank_02_bc8f_M0X0(CpuState *cpu);
 RecompReturn bank_02_bc8f_M0X1(CpuState *cpu);
 RecompReturn bank_02_bc8f_M1X0(CpuState *cpu);
 RecompReturn bank_02_bc8f_M1X1(CpuState *cpu);
+void bank_03_8000(CpuState *cpu);  /* $03:8000 alias */
+RecompReturn bank_03_8000_M0X0(CpuState *cpu);
+RecompReturn bank_03_8000_M0X1(CpuState *cpu);
+RecompReturn bank_03_8000_M1X0(CpuState *cpu);
+RecompReturn bank_03_8000_M1X1(CpuState *cpu);
 void bank_03_8196(CpuState *cpu);  /* $03:8196 alias */
 RecompReturn bank_03_8196_M0X0(CpuState *cpu);
 RecompReturn bank_03_8196_M0X1(CpuState *cpu);
