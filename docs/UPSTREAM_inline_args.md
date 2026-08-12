@@ -44,20 +44,35 @@ return address, adjust it, push it back**:
 **Not a single row in this game's entire `dispatch_v2.c` has a nonzero
 `inline_arg_bytes`**, despite four routines using the idiom at 61 call sites.
 
-## The four routines
+## The affected routines
 
-All in bank `03`, all identical in shape, all skipping 3 bytes:
+Found empirically rather than by pattern-matching the ROM, using
+`tools/find_inline_args.py`: a recorded execution bitmap shows the call
+executing, the byte immediately after it never executing, and a byte a little
+further on executing. The CPU can only get there if the callee adjusted its
+return address.
 
-| routine | call sites |
-|---|---|
-| `03:a2f5` | 34 |
-| `03:a421` | 18 |
-| `03:a3cf` | 8 |
-| `03:a350` | 1 |
+| routine | bytes skipped | executed call sites |
+|---|---|---|
+| **`00:98a0`** | **2** | **69** |
+| `03:a2f5` | 3 | 30 |
+| `03:a421` | 3 | 17 |
+| `03:a3cf` | 3 | 8 |
+| `03:a350` | 3 | 1 |
 
-The three inline bytes are operand selectors indexing the caller's direct-page
-frame (`LDA $0001,Y ; AND #$00ff ; TAX ; LDA $08,X`) — a compact bytecode over
-bank 03's shared math layer.
+**125 call sites across five routines**, and note the largest is in bank `00`,
+skipping a different number of bytes — so this is not one odd helper in one
+bank. `00:98a0` is `PLX ; PLA ; PHA`, using its return address as a pointer to
+two inline bytes; the bank-03 four are `PLA ; TAY ; CLC ; ADC #$0003 ; PHA`
+with three operand selectors indexing the caller's direct-page frame
+(`LDA $0001,Y ; AND #$00ff ; TAX ; LDA $08,X`) — a compact bytecode over bank
+03's shared math layer.
+
+The empirical approach is deliberate. The static form of the question is "does
+this callee adjust its return address", which needs a decoder that recognises
+every way of writing it — and getting that wrong in the conservative direction
+is precisely how these were missed. An execution bitmap has no such blind
+spot.
 
 ## The miscompilation, with a worked example
 
@@ -108,14 +123,13 @@ not.
 ## Scale
 
 ```
-inline-arg call sites in code banks      : 61
-  inside an AOT-eligible node            : 28
-  ...AND executed, with operands skipped : 28
+call sites with proven skipped bytes : 125
+  inside an AOT-eligible node        : 43
 ```
 
-**28 of 28.** Every call site that sits in a compiled node is on a path that
-really executes, with operand bytes that really are skipped. There is no
-subset where this is benign.
+**43 miscompiled call sites on live paths.** Every one is a call the CPU
+executed, followed by bytes the CPU never executed, inside a node the emitter
+marked compilable. There is no subset where this is benign.
 
 ## Why it is silent
 
@@ -154,3 +168,7 @@ grep -n "L_AFD9_M0X0" src/gen/bank03_v2.c
 
 and compare against the ROM bytes at `03:afd6`. `src/gen/dispatch_v2.c` shows
 every row's `inline_arg_bytes` as the trailing field; all are `0`.
+
+`tools/find_inline_args.py` in this repo reproduces the whole list from a
+coverage bitmap, and is game-agnostic — pointed at another title's bitmap and
+ROM it will find that game's equivalents.
