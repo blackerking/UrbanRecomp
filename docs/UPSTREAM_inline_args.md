@@ -172,3 +172,52 @@ every row's `inline_arg_bytes` as the trailing field; all are `0`.
 `tools/find_inline_args.py` in this repo reproduces the whole list from a
 coverage bitmap, and is game-agnostic — pointed at another title's bitmap and
 ROM it will find that game's equivalents.
+
+
+## Fix implemented and verified
+
+Implemented in this repo's `snesrecomp` submodule (commit `61df24b`), following
+the precedent of the joypad-transposition fix: found here, fixed here, offered
+upstream as a tested patch.
+
+`detect_inline_arg_bytes` now recognises both pop/adjust/push spellings
+alongside the original stack-relative one:
+
+```
+PLA ; [TAY] ; CLC ; ADC #imm ; PHA      accumulator form (03:a2f5/a3cf/a421)
+PLX ; INX ... ; PHX                     index form       (00:98a0)
+```
+
+`x_pulled`/`x_added` track the index form, and a new `mutates_x()` invalidates
+it on any other write to X, mirroring the existing `mutates_y()` treatment.
+
+Result on SimCity:
+
+| | before | after |
+|---|---|---|
+| exact variants | 1070 | **1155** |
+| AOT-eligible | 722 | **845** |
+| LLE-only | 348 | 310 |
+| dispatch rows with nonzero `inline_arg_bytes` | **0** | 4 |
+
+Checking every call site against the execution bitmap and the emitted labels,
+**scoped per bank**:
+
+```
+resumes past the operands (correct) : 59
+resumes at a skipped byte (wrong)   :  0
+in an LLE-only node, no label        : 66
+```
+
+Before the change `inline_arg_bytes` was zero for every row, so by
+construction every emitted caller resumed at `call + size` — i.e. all 59 were
+wrong. All 50 existing analyzer tests still pass.
+
+### A caution about verifying this
+
+An earlier version of this check reported 19 remaining wrong sites. That was
+an artefact of the check, not the fix: emitted labels are named `L_XXXX_MnXn`
+with **no bank component**, so searching all generated sources for `L_8F0A`
+matches a bank-00 label when asking about a bank-01 address. Scope the label
+search to the bank's own generated files. It is an easy mistake to make in
+exactly the direction that invents a residual bug.
