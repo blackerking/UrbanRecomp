@@ -1454,19 +1454,36 @@ The attack replays deterministically from a save state taken before it: run
 the "before" state forward and entity `$14` appears between frames 1800 and
 3600, with no input at all. That makes it a fixture, not just an observation.
 
-Watching `$0af1` across the replay shows the two phases, and both live in one
-routine:
+Watching `$0af1` across the replay shows the two phases. Write attribution
+names the two instructions responsible — the flag is **set at `03:bce9`** and
+**cleared at `03:bd2b`**:
 
 ```
-03:bd1d  LDA #$8000
-03:bd20  STA $0aef
-03:bd23  STA $0af1        ; approach: flag set
-03:bd26  PLY ; INY ; BRA $bcf0
-03:bd2a  PLY
-03:bd2b  STZ $0af1        ; arrival: flag cleared
-03:bd2e  LDA #$0030 ; JSR $be04
-03:bd34  LDA #$0014 ; JSR $c42a
+03:bcda  LDA $bd4f,Y ; STA $0af7      ; parameter from a table at $bd4f
+03:bce0  STZ $0af5
+03:bce3  LDA #$8000
+03:bce6  STA $0aef
+03:bce9  STA $0af1                    ; approach: flag set
+03:bcec  INY ; INY ; BRA $bcc5        ; loop
+...
+03:bd2b  STZ $0af1                    ; arrival: flag cleared
+03:bd2e  LDA #$0030 ; JSR $be04       ; post event $30
+03:bd34  LDA #$0014 ; JSR $c42a       ; spawn entity $14
 ```
+
+`$0aef` gets `$8000` here too and is then rewritten every frame from
+`00:c71f` — 1,111 writes in 1,200 frames — so it is an animation or countdown
+running through the approach, not a flag.
+
+> **Correction.** An earlier revision of this section quoted `03:bd1d`-`bd28`
+> for the flag-set, an almost identical block (`LDA #$8000 ; STA $0aef ;
+> STA $0af1 ; INY ; BRA`) forty bytes further on. **Those bytes never
+> execute.** `dis_mx.py` had said so — none of that range carried the `*`
+> execution mark while `03:bd2b` onward did — and the listing was read past
+> without checking. The tool exists precisely to catch a plausible-looking
+> decode of code that never runs, and it worked; the reader did not. Two
+> near-duplicate blocks presumably serve two event kinds, only one of which
+> is the UFO.
 
 | frame | `$0af1` | entity slot 1 |
 |---|---|---|
