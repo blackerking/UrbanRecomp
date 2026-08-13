@@ -456,14 +456,16 @@ It calls a fixed pipeline (`$90a7`, `$c474`, `$b84b`, `$88b4`, `$894c`,
 
 | address | meaning |
 |---|---|
-| `$0b51` | tick counter. Measured at **200 frames per tick** |
+| `$0b51` | tick counter. Cadence depends on the in-game speed setting — 200 frames per tick on one save state, 125 on another running faster |
 | `$0b55` | month, 1..12 |
 | `$0b53` | year (1902/1904/1905/1991/… matching the per-scenario seed at `03:ced9`) |
 | `$0dc7` | accumulator, `+= $0dc5` every tick |
 
-So **4 ticks = 1 month**, **12 months = 1 year**, and a game year is roughly
-9,600 frames. Verified by replaying savestate 5 for 9,000 frames: tick
-195 → 240 (45 ticks) with the year rolling 1904 → 1905.
+So **4 ticks = 1 month** and **12 months = 1 year**. That structure is fixed;
+the tick *cadence* is not, because the game has a speed setting. On one state
+a tick took 200 frames (verified over 9,000 frames: 45 ticks, 1904 → 1905);
+on a state running faster, six months passed in 3,000 frames, i.e. 125 frames
+per tick.
 
 `$0b53 - 10` is stored to `$0da9` and `$0b55 - 1` to `$0dad` (display
 forms), and in month 1 also `$0b53 - 120` to `$0dab`.
@@ -674,12 +676,33 @@ UI state handlers). Each bit is tested with its own mask:
 
 | bit | mask | option | test sites | confidence |
 |---|---|---|---|---|
-| 0 | `$0001` | **build over parks / forest / rubble** | `01:bab4`, `01:bad4` | likely |
-| 1 | `$0002` | **auto budget** | `01:9422`, `03:8ec0` | **confirmed live** |
-| 2 | `$0004` | **traffic-jam view** | `01:8b82`, `01:8c96` | likely |
-| 3 | `$0008` | **music on/off** | `00:8087`, `00:c8b1` | likely |
+| 0 | `$0001` | **auto bulldozing** | `01:bab4`, `01:bad4` | **confirmed** |
+| 1 | `$0002` | **auto budget** | `01:9422`, `03:8ec0` | **confirmed** |
+| 2 | `$0004` | **auto goto** | `01:8b82`, `01:8c96` | confirmed by elimination |
+| 3 | `$0008` | **music on/off** | `00:8087`, `00:c8b1` | strong |
 
-The order matches the four options as they appear in the game.
+The bit order is the order the options appear on the menu page.
+
+Confirmed against save states captured with known settings:
+
+| state | settings as set in-game | `$0195` |
+|---|---|---|
+| bulldoze on, budget off, goto on, music on | | `$000d` = `1101` |
+| bulldoze off, budget on, goto off, music off | | `$0002` = `0010` |
+| **then bulldozing turned back on**, budget still on | | `$0003` = `0011` |
+| budget turned off, bulldozing left on | | `$0001` = `0001` |
+
+Turning bulldozing on moved `$0002` -> `$0003`, so **bit 0 is auto
+bulldozing**; turning auto budget off moved `$0003` -> `$0001`, so **bit 1 is
+auto budget**. Goto and music were only ever changed together in this set, so
+bits 2 and 3 are not separated by the states alone — but bit 3 is read in
+bank 00's audio setup in 8-bit mode and feeds an `#$81` command byte, which
+makes music bit 3 and auto goto bit 2 by elimination, matching the menu
+order.
+
+"Auto goto" teleports the view to the event — a traffic jam, for instance —
+which is consistent with bit 2's site at `01:8b8a` selecting view mode
+`#$0009` in place of `#$00ff`.
 
 Bit 0 sits in the build path and gates on the tile index: `01:babd` compares
 against `#$002e` = 46, so the bit permits building over tile classes below
@@ -724,12 +747,34 @@ releases when `02:a3e8` clears it, and the income terms are computed —
 gift building paying 100 a year, which is the reported casino payout observed
 live rather than read from the ROM.
 
-The treasury update itself was still not reached: `$0b9d` has zero writes and
-`$0b1d` (loan, value 19) is never decremented, so execution did not get past
-`03:8ed6` in this run. The arithmetic at `03:8efa-8f24` is therefore still
-**read but not observed executing**. Confirming it wants a session with auto
-budget genuinely enabled through the options screen rather than a frozen
-word, since freezing `$0195` also forces the other three options off.
+That first attempt did **not** reach the treasury update, because freezing
+`$0195` to `$02` also forces the other three options off, which is not a
+state the game ever produces.
+
+### Verified end to end
+
+Replaying a save state captured in **December with auto budget genuinely
+enabled** rolls the year over and runs the whole thing unattended:
+
+| term | address | value |
+|---|---|---|
+| tax income | `$0dc9` | 151 |
+| gift income | `$0dd9` | 0 |
+| outgoing 1 | `$0dcd` | 88 |
+| outgoing 2 | `$0dcf` | 100 |
+| outgoing 3 | `$0dd1` | 0 |
+| net | `$0bc1` | `$FFDB` = **-37** |
+| treasury | `$0b9d`/`$0b9f` | 2994 -> **2957** |
+
+`151 + 0 - (88 + 100 + 0) = -37`, `$0bc1` holds -37 as a signed word, and the
+treasury moves by exactly that. `$0b9d` was written once, from `03:8F1F` —
+the store at `03:8f1c` that had until now only been read from the ROM. The
+model is confirmed against a running machine.
+
+The three outgoing line items are written by **`02:a65f`, `02:a665` and
+`02:a66b`**, inside the `JSL $02a64d` that reason code 10 calls on the
+automatic path. So bank 02 holds the funding allocator, and `$0dc3` was
+cleared from `01:9461` as predicted.
 
 ## The `$01df` UI state machine — five menu handlers
 
