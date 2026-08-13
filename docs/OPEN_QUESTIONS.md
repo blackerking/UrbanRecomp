@@ -164,50 +164,59 @@ none is identified. Placing each gift in play and watching `$0c71` and `$0ddd`
 would name them in one session — the casino is known to be one of the six
 100/year tiles.
 
-### C5. Disasters — mapped statically, never once executed
+### C5. Disasters — the `$0199` model was WRONG, and the mechanism is unfound
 
-Prepared ahead of a session that deliberately triggers them.
+An earlier revision of this section claimed `03:b84b` / `$0199` was the
+disaster machinery: a pending-disaster bitfield with handlers at `03:b9db`
+and `03:ba47`. **That is disconfirmed.** Recording a session in which fire,
+flood, tornado, earthquake and the monster were all set off:
 
-`03:b84b` is the disaster step, called from the tick pipeline at `03:8010`.
-It gates on the No-Disasters cheat and then on `$0199`:
+- the dispatch body `03:b871-b8a1` still shows **1 of 48 bytes executed**,
+  unchanged from before the session;
+- `$0199` is **0 in every one of the six disaster save states**;
+- only **13 addresses in the whole ROM** executed that never had before.
+
+Two independent disconfirmations. Whatever `$0199` gates, it is not the
+disasters. The static reading of the ladder was correct as far as it went —
+it really is a three-bit field with per-bit handlers — but the inference that
+it meant "disasters" came from the `$0425` No-Disasters cheat being tested a
+few instructions earlier, which is proximity, not evidence.
+
+The 13 newly executed addresses are the only real lead:
 
 ```
-03:b858  LDA $0425 ; AND #$0001 ; BEQ $b863    ; No-Disasters bit
-03:b863  LDA $003e ; CMP #$0003 ; BNE $b86e ; JSR $b96f
-03:b86e  LDA $0199 ; BEQ $b8a1                 ; nothing pending -> skip
-03:b873  AND #$0001 ; BEQ $b87d ; LDA #$00fe ; BRA $b89b
-03:b87d  LDA $0199 ; AND #$0002 ; BEQ $b88d ; JSR $b9db ; LDA #$00fd
-03:b88d  LDA $0199 ; AND #$0004 ; BEQ $b8a1 ; JSR $ba47 ; LDA #$00fb
-03:b89b  ...  STA $0199                        ; clear the bit just handled
+00:AD10 00:AD11 00:AD14 00:AD15
+00:B18E 00:B190 00:B192 00:B193 00:B194
+03:BAA6   03:E21E 03:E221 03:E224
 ```
 
-**`$0199` is a pending-disaster bitfield**, one bit per type, and each arm
-masks its own bit off with `$fe` / `$fd` / `$fb` after running. Handlers:
-bit 1 -> `03:b9db`, bit 2 -> `03:ba47`; bit 0 has no call in the dispatch
-itself. `$0199` is cleared at `03:c775` and set at `03:ca5e`.
+`03:BAA6` does fall inside `03:ba47`, so that routine may be disaster-
+adjacent after all, but one byte is not a finding.
 
-How much is unexplored, against the union of six recorded sessions:
+### Why the six save states could not be replayed
 
-| region | executed |
-|---|---|
-| `03:b871-b8a1` dispatch body | **1 / 48 bytes** |
-| `03:b96f` | 36 / 108 |
-| `03:b9db` (bit 1) | 41 / 108 |
-| `03:ba47` (bit 2) | 73 / 185 |
-| whole `03:b871-bb00` | 208 / 655 |
+All six sit in **`$01df = 2`** (the Boston Meltdown one in `$01df = 4`), a
+bank-01 UI mode in which the simulation does not tick at all. Over 600 frames
+of replay, a frozen state executes 1,315 addresses in bank 01 and 667 in bank
+03 and never reaches `03:8026`; a state that runs executes 558 in bank 01 and
+3,834 in bank 03. Bank 02 is untouched entirely while frozen.
 
-The dispatch body has essentially never run, so no disaster has ever fired in
-any recording. This is the largest single behavioural gap left.
+Pressing B, Start, A, Select and X for six frames each changes nothing —
+`$01df` stays 2 and the tick counter never moves. So these states cannot be
+driven forward headless without knowing what input that mode expects.
 
-To make the session pay: `SC_ADDR_TRACE=03:b873` catches the first dispatch
-with a PC history, and `SC_WRAM_MAP` will attribute whatever the handlers
-write. Watching `$0199` identifies which bit each disaster type sets, and
-`03:ca5e` is where they are raised.
+### What would actually settle it
 
-Note the coverage has otherwise saturated — two further play sessions added
-only 52 new executed addresses (31,487 -> 31,539, +0.17%) and moved none of
-the frontier percentages. Ordinary play is exhausted; the remaining gaps are
-paths like this one.
+The coverage bitmap records every executed address, so **no save state is
+needed** — the disasters simply have to *play out* during a recorded session
+rather than being set up and then reloaded past. The session log for the
+attempt above shows saves and loads interleaved and ending on loads, which is
+consistent with each disaster being armed and then abandoned.
+
+So: start a session, trigger one disaster, **let it burn for a while without
+reloading**, then the next. A save taken *during* a visible disaster would
+also work and would additionally allow a headless replay, provided it is
+taken in normal play mode rather than `$01df = 2`.
 
 ### C6. Smaller open threads
 
