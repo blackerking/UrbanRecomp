@@ -1349,3 +1349,42 @@ was flagged as an inference at the time.
 The cell-pattern rewriter at `03:a553` remains shared demolition machinery,
 not per-disaster code — that conclusion came from writer attribution rather
 than from guessing, and nothing here disturbs it.
+
+## Entity types in the `$0ced` table
+
+Every `JSR $c42a` in bank 03 is preceded by `LDA #imm` giving the type it
+allocates. Cross-referencing the call sites against the disaster handlers'
+address ranges names most of them:
+
+| type | call site | inside | reading |
+|---|---|---|---|
+| `$00` | `03:c621`, `03:c66a`, `03:c67f` | — | |
+| `$01` | `03:c4c9` | — | **never executed in any recording** |
+| `$07` | `03:ba77` | monster arm `03:ba47` | monster |
+| `$08` | `03:bdf3` | — | |
+| `$0A` | `03:ba37` | tornado arm `03:b9db` | tornado |
+| `$0B` | `03:bba0`, `03:bbf2` | `03:bb6a` and fire arm `03:bbb9` | shared effect |
+| `$0C` | `03:bc74` | flood arm `03:bc0b` | flood |
+| `$0E` | `03:bb12` | earthquake arm `03:baf5` | earthquake |
+| `$13` | `03:c3f1` | — | |
+| `$14` | `03:bd34` | — | |
+
+### This casts doubt on the "monster step" label
+
+`03:bb6a` was written up above as the monster's step. That is now suspect.
+It allocates type `$0B`, and so does the **fire** arm at `03:bbf2` — while the
+monster arm proper allocates `$07`. `03:bb6a` is also reached from `03:b939`
+under a two-in-eight gate in the `$003e` path rather than from the ladder, and
+it is near-identical in shape to the fire handler `03:bbb9` (random cell,
+`$84eb` property test, stamp tile `$7F`), differing mainly in its strength
+constant.
+
+The likelier reading is that `$0B` is a shared damage/effect entity and
+`03:bb6a` is a spread step that fire and the monster both drive, not the
+monster specifically. It was attributed by difference against sessions, which
+is weaker than attribution by containment — the session evidence only shows
+that it ran when the monster did, and the monster and fire were not separated
+at the time.
+
+Not rewritten above pending a session that runs fire alone with no monster
+active, which would settle it.
