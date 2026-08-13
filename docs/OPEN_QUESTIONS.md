@@ -321,3 +321,34 @@ exit width, not proof of one — an unexercised path may exit differently, and
 15 runs of ordinary play is not a proof of totality. Turning this into
 `exit_mx_at` lines requires the analyzer to **verify** them rather than trust
 them, which is the "check" half and is upstream work.
+
+### F1. Cross-checking published exits against measurement — not sound yet
+
+The obvious next use of the M/X bitmap is to validate the analyzer: for every
+direct call whose callee *has* a published exit mode, the widths observed at
+the return address should be inside that published set. Run over 2,235
+distinct (site, callee) pairs, 40 come out as mismatches.
+
+**Those 40 are not analyzer bugs, and the check as written cannot show that
+they are.** At least two confounds are already visible in the output:
+
+- **Inline arguments.** The check reads the return address as `site + 3` for
+  `JSR` and `site + 4` for `JSL`. Five routines in this ROM consume bytes
+  after the call and resume past them, across 125 call sites — for those the
+  real return is `site + len + skip`, so the measurement is taken at an
+  operand byte. `00:824B -> 00824F` is exactly this shape: a three-byte `JSR`
+  whose target sits four bytes on.
+- **Reachability.** A return address is not reached *only* by returning. If
+  the same address is also a branch target or a fall-through, the observed
+  width set is a union over all the ways in, not the callee's exit.
+
+Both are fixable — skip the known inline-argument callees, and exclude return
+addresses with any other predecessor — but until they are, this comparison
+cannot accuse the analyzer of anything. Recorded because the raw number is
+tempting: "40 mismatches" reads like a finding, and publishing it as one would
+be the same mistake as the `$0199` disaster attribution, where a plausible
+correlation got written up before it was tested.
+
+What the run *does* establish is the shape of the data: 2,235 pairs have both
+a published exit and an observed return, so once the confounds are handled
+there is enough measurement here to check the solver properly.
