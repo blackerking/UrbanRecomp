@@ -556,6 +556,71 @@ analyzer tests and 81 project tests pass.
 [`docs/UPSTREAM_cop_syscall.md`](docs/UPSTREAM_cop_syscall.md) is a
 filing-ready write-up.
 
+### Measuring exit M/X instead of proving it
+
+The remaining LLE-only code is almost entirely one problem: an unpublished
+callee exit width truncates every caller, transitively, and the solver has no
+fixed point for mutually recursive dispatch cycles. The machine has no such
+difficulty — it just runs them — so `SC_MX_BITMAP` records the executed-PC
+bitmap split four ways by the live `(m,x)`, which turns the proof obligation
+into an observation.
+
+Three tools use it, and the split matters: measuring is easy, and the whole
+risk lives in the checking.
+
+| tool | question |
+|---|---|
+| `tools/mx_exit_report.py` | what widths do unproven callees return in? |
+| `tools/mx_exit_check.py` | do the analyzer's *published* exits match the machine? |
+| `tools/mx_exit_propose.py` | which measurements are solid enough to emit as `exit_mx_at`? |
+| `tools/gen_align_check.py` | does the emitted C decode on the boundaries the CPU actually used? |
+
+**The analyzer is sound wherever it publishes**: 473 call sites checked, 473
+agree, 0 mismatches, across both flags. 150 of those publish an exit width
+that *differs* from the entry width, so the check is not agreeing trivially,
+and fault-injecting flipped exit modes into the manifest does make it fail.
+
+An earlier run of this comparison reported "40 mismatches", then 26 after two
+confounds were corrected. All of them were artefacts of the check. The last
+and least obvious: a call site carries a demand *per variant*, and comparing
+the machine against the wrong variant's published exit accuses the solver of
+disagreeing with code that never runs. `JSR` changes neither M nor X, so the
+width recorded at the call site's own address names the entry variant — which
+costs no new instrumentation and resolves all 26.
+
+Three measured directives were emitted, derived independently from two
+disjoint halves of an 18-run recording. One of them, `exit_mx_at 038df1 0 0`,
+unblocked **`03:8000`, the monthly simulation tick** — the worked example
+that `docs/OPEN_QUESTIONS.md` A1 had named as the thing this whole approach
+existed to fix.
+
+| | before | after |
+|---|---|---|
+| AOT-eligible | 1474 | **1475** |
+| LLE-only | 110 | **109** |
+| AOT share (analyzed) | 94.83% | **94.93%** |
+| AOT share (executed code) | 96.1% | **96.5%** |
+
+The modest headline number understates it: the remaining LLE-only set is now
+67 nodes of genuine width refutation (715 instructions, the `brk_at_*` poison
+working as designed) and 42 nodes blocked only by an unproven callee exit
+(2,727 instructions). The ceiling for this line of work is **99%**.
+
+What stands between here and that ceiling is *coverage*, not method. The five
+bank-01 UI handlers are worth 766 instructions each and are the bulk of what
+is left; `coverage_union.bin` proves they execute during real play, but 18
+headless runs never enter them, because every preserved save state sits in
+the `$01df = 2` UI mode that does not tick. One interactive session with
+`SC_MX_BITMAP` set would finish it.
+
+`tools/gen_align_check.py` also turned up a **pre-existing decode
+desynchronisation** in the emitted C, unrelated to the directives: a cfg
+`func` with no `entry_mx_at` defaults to `M1X1`, and `00:926d` is only ever
+entered with `x=0`, so that variant read a three-byte `LDY #$0000` as two
+bytes and emitted a block label in the middle of an instruction. Dead code,
+but `aot_eligible` with an empty `reasons` list — the same silent signature
+as the inline-argument bug. Fixed with `entry_mx_at 926d 1 0`.
+
 Declaring the service targets as roots (done above) makes the handlers
 themselves reachable, but it cannot help the *callers*: the caller still
 has an unprovable edge mid-function. Reaching high static coverage on this

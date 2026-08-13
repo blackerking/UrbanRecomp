@@ -1,24 +1,45 @@
 # What is left for investigation
 
-State as of the COP work (AOT share 94.8% analyzed, 96.1% of executed code).
-Ordered by value, not by area. Each item says what is actually known, so the
-next session does not re-derive it.
+State as of the measured-exit-M/X work (AOT share **94.93%** analyzed, 1,475
+of 1,584 variants). Ordered by value, not by area. Each item says what is
+actually known, so the next session does not re-derive it.
 
 ---
 
 ## A. Recompiler coverage
 
-### A1. The exit-M/X fixpoint — the whole remaining 5.2%
+### A1. The exit-M/X fixpoint — the whole remaining 5%
 
-**300 of 1,584 nodes never get exit M/X published** (1,284 do), and an
-unpublished exit truncates *every* caller, transitively. This is the single
-cause of essentially all remaining LLE-only code.
+**Partly closed.** The worked example below is fixed; the bank-01 cycle is
+not, and is now blocked by *coverage*, not by method. See §F for the
+measurement machinery and §F2 for what remains.
 
-It is not a decode or table-recovery problem. `038DF1:M0X0` is `aot_eligible`
-with an **empty `reasons` list** — clean, compiled — and its caller `03:8000`
-is still `lle_only` with `truncated_call_continuation`, purely because
-`038DF1` has no entry in the manifest's `exit_modes`. Compilability and
-exit-width publication are separate fixpoints.
+Current state: 1,584 nodes, 1,475 AOT-eligible, 109 LLE-only, **94.93%** of
+analyzed instructions (was 94.83%). 107 nodes still publish no exit M/X, and
+an unpublished exit truncates *every* caller, transitively.
+
+> The "300 of 1,584" figure this section used to carry was stale — it predates
+> the inline-argument fix, which took LLE-only from 348 to 110 on its own.
+
+It is not a decode or table-recovery problem. `038DF1:M0X0` was `aot_eligible`
+with an **empty `reasons` list** — clean, compiled — while its caller
+`03:8000` was still `lle_only` with `truncated_call_continuation`, purely
+because `038DF1` had no entry in the manifest's `exit_modes`. Compilability
+and exit-width publication are separate fixpoints.
+
+**`03:8000` is now AOT-eligible.** `exit_mx_at 038df1 0 0` in
+`recomp/bank03.cfg`, measured rather than asserted (§F), unblocked the
+monthly simulation tick — the one node this section named as the example.
+
+The remaining LLE-only set splits cleanly:
+
+| | nodes | instructions |
+|---|---|---|
+| genuine width refutation (`brk_at_*` / `structural_poison`, = A2) | 67 | 715 |
+| blocked only by an unproven callee exit | 42 | 2,727 |
+
+So the ceiling for this line of work is **99%**, and the last 1% is A2, which
+is the poison working as designed rather than a bug.
 
 The shape that defeats the solver is a mutually recursive dispatch cycle.
 Bank 01's UI state machine is the clean example: `$01df` selects through two
@@ -30,14 +51,18 @@ Options, best first:
 
 1. An SCC fixed-point solver upstream. `v2_analyze.py` already has an
    `assumptions` set and a comment about a "closed SCC solver", so this was
-   anticipated and not finished.
+   anticipated and not finished. **Still the right fix for the bank-01
+   cycle**, because measurement cannot reach it without play coverage.
 2. **Measure and check.** Record exit M/X per callee from a real run, then
    emit `exit_mx_at` lines *and have the analyzer verify them* against the
-   recording. This is the pragmatic path and fits this project's existing
-   habit of using execution bitmaps as ground truth.
-3. Hand-written `exit_mx_at`. **Rejected so far**: it is an unchecked
+   recording. **Done — see §F.** `tools/mx_exit_propose.py` emits them,
+   `tools/mx_exit_check.py` verifies, `tools/gen_align_check.py` catches the
+   silent-miscompile failure mode directly in the emitted C.
+3. Hand-written `exit_mx_at`. **Still rejected**: it is an unchecked
    assertion, and asserting a width the ROM does not exit in miscompiles
-   silently — the same failure class as the inline-argument bug.
+   silently — the same failure class as the inline-argument bug. Every
+   directive now in the cfgs came from measurement and is re-checked after
+   regeneration.
 
 ### A2. `brk_at_*` is probably *correct* — confirm and close
 
@@ -376,6 +401,11 @@ published `x=1` where the machine shows `x=0`:
 Twenty-six independent solver bugs would not all land on the same flag in the
 same direction. That is the signature of a convention mismatch on one side.
 
+> **Resolved: there were no mismatches.** It was a third confound in the
+> check, not a disagreement. Skip to "The 26 explained" below; the two
+> paragraphs after this one are kept because the SEP/REP calibration they
+> report is still the thing that ruled out the measurement side.
+
 **Tested, and the host is right.** `SEP #$10` sets the X flag (8-bit index)
 and `REP #$10` clears it (16-bit), so the width at the instruction *after* one
 of those is ground truth. Over the executed sites:
@@ -392,12 +422,162 @@ That leaves the disagreement on the analyzer's side, with one alternative not
 yet excluded: the check looks up the callee variant named by the *demand's*
 target `(m,x)`, so if a site actually reaches a different variant at runtime
 than the demand records, the published exit being compared is the wrong one.
-Distinguishing "the published exit X is wrong" from "the demand names the
-wrong variant" needs the callee's entry width measured too — which the same
-bitmap can supply, by reading the width at the target address rather than at
-the return address.
 
-The 492 agreements are worth noting on their own: where the two do agree, they
-agree exactly, across 492 call sites and both flags. That is real evidence the
-solver is sound where it publishes at all — which was never in doubt but had
-never been measured.
+### The 26 explained — it was the check, and the analyzer is sound
+
+That last alternative is exactly what it was. **The mismatches are an artefact
+of comparing against a variant that never runs**, and the fix needed no new
+instrumentation.
+
+A call site does not carry one demand, it carries a demand *per variant*. The
+analyzer cannot prove the entry width statically, so it emits both, and for a
+callee that leaves X alone it correctly publishes exit `x=1` for the `x=1`
+variant and `x=0` for the `x=0` one. Both rows are right. Comparing the
+machine against whichever row the enumeration reached first then accuses the
+solver of disagreeing with a variant the ROM never enters.
+
+The siblings make it obvious once they are printed together:
+
+```
+008130 -> 00C1FA:M0X0  published m0x0      <- the variant the machine enters
+008130 -> 00C1FA:M0X1  published m0x1      <- the one the check was reading
+0394A0 -> 03A29A:M1X0  published m1x0
+0394A0 -> 03A29A:M1X1  published m1x1
+```
+
+Observed at `00:8130`: entry `m0x0`, exit `m0x0`. The `M0X0` row matches
+exactly; the `M0X1` row is dead.
+
+**Keying on the measured entry width fixes it, and the key is free**: `JSR`
+and `JSL` change neither M nor X, so *the width recorded at the call site's
+own address is that site's entry variant*. The callee's target address is the
+wrong place to read it — that unions every caller.
+
+`tools/mx_exit_check.py` does this, and corrects four confounds in total:
+inline-argument return addresses, return addresses any executed branch/jump
+can also land on, call sites that never executed, and the variant key above.
+
+```
+checked 473   agree 473   mismatch 0
+```
+
+Two guards against this being a vacuous result, because keying the lookup on
+the entry width would trivially agree for any callee that just preserves M
+and X:
+
+- **150 of the 473 publish an exit width that differs from the entry width**,
+  in both directions on both flags — `m0x0 -> m1x0` 64 times, `m1x0 -> m0x0`
+  48, plus X changes. Those are the rows with something to be wrong about,
+  and they are all correct.
+- **Fault injection**: flipping 40 random published exits in the manifest
+  makes the check report mismatches; the true manifest reports none.
+
+So the solver is sound everywhere it publishes, measured across 473 call
+sites and both flags. The earlier "26 systematic" reading was right to be
+suspicious of itself and right not to be filed upstream — there was no bug to
+file.
+
+### F2. Directives emitted, and why only three
+
+`tools/mx_exit_propose.py` turns the measurement into cfg directives. It reads
+the exit width **at the callee's own `RTS`/`RTL`**, not at its callers' return
+addresses, because 44 of the 60 unproven call sites are `JSR (abs,X)` — fixed
+return address, runtime-chosen target — so the widths seen at the return are a
+union over whichever handler the dispatch picked. The width at an `RTS` is the
+exit width of the routine that instruction belongs to, by definition.
+
+It proposes a callee only when all of the following hold, and says which test
+each rejection failed:
+
+- every executed return point in the body was measured, not just one;
+- they all agree on a single width;
+- the return-address reading, where a direct call exists, does not contradict
+  it.
+
+Three passed, and all three were derived independently from two **disjoint**
+halves of the recording, which produced identical directives:
+
+```
+exit_mx_at 01940f 1 0      recomp/bank01.cfg
+exit_mx_at 038df1 0 0      recomp/bank03.cfg   <- unblocked 03:8000
+exit_mx_at 03a89f 0 0      recomp/bank03.cfg
+```
+
+The rejections are the useful part:
+
+| callee | why not |
+|---|---|
+| `00:C3F9` | genuinely split, `m0x0` **and** `m0x1` — no single `exit_mx_at` can be right |
+| `02:A3E0` | split at the `RTS`, `m0x0`/`m1x0` — **the return-address reading alone said `m0x0` and would have proposed it** |
+| `02:8000` | four executed `RTL`s, one measured; the other three could differ |
+| 13 others | never observed returning — no evidence either way |
+
+`02:A3E0` is the concrete argument for reading the `RTS`: the weaker method
+was one step from emitting a wrong directive, and the stronger one caught it.
+
+### F3. The bank-01 cycle is now a coverage problem, not a solver problem
+
+The five handlers `01:A886 / A97C / AA39 / AAD5 / AD54` are the big remaining
+prize — 12 nodes and 766 instructions each. They are **not** unmeasurable in
+principle: `coverage_union.bin`, recorded from real interactive play, shows
+every one of them executing, with their `RTS` instructions executing too.
+
+They are unmeasurable from *this* session's recordings. 18 headless runs (a
+boot plus every preserved save state, with scripted input, some 20,000 frames
+long) reach 11,352 distinct PCs against the 31,730 in `coverage_union.bin`,
+and none of them enters those handlers — consistent with C5's finding that
+all the preserved save states sit in `$01df = 2`, a UI mode that does not
+tick and does not respond to scripted input.
+
+**What would finish it: one interactive session with `SC_MX_BITMAP` set**,
+played through the UI states that the five handlers implement (C3). Nothing
+else is needed — the tooling, the checks and the directive path all exist and
+are exercised. Every M/X bitmap recorded so far is a strict subset of
+`coverage_union.bin`, with zero addresses outside it, so the recording is
+known to be consistent with the existing coverage; it is simply thinner.
+
+Failing that, option 1 in A1 — the upstream SCC solver — is the route that
+does not depend on anyone playing the right screens.
+
+### F4. A decode desynchronisation found in the emitted C, and fixed
+
+`tools/gen_align_check.py` is the third check, and the one that would actually
+catch a wrong `exit_mx_at`. The AOT differential cannot: this host still runs
+everything on the interpreter (`src/main.c`, "this host bypasses
+common_rtl.c entirely"), so `SimCitySNESRecompAOT` links the generated banks
+without executing them, and byte-identical WRAM between the two builds says
+nothing about whether the emitted C is right.
+
+The execution bitmap can. Decoding every executed address at the width it was
+executed in yields the set of bytes that are *definitely operands*; an emitted
+block label sitting on one of those is a decode desynchronisation, and no
+reading of the listing makes it benign. It is one-sided on purpose — a label
+at an address the bitmap never recorded proves nothing.
+
+Over 15,032 emitted labels it found exactly one, and it was **pre-existing**,
+not introduced by the directives above (the same check on a regeneration with
+the directives removed reports the identical label):
+
+```
+00:926D  func with no entry_mx_at  ->  defaults to M1X1
+00:926D  A0 00   decoded M1X1 as `LDY #$00`, two bytes
+00:926F  80 48   so decode resumed here and read `BRA $92b9`
+00:92B9          which is the middle of `DEC $012b,X` at 92b7
+```
+
+The routine is only ever entered with `x=0`: all ten call sites demand
+`M1X0`, and the bitmap records only `m1x0` at `926d`, which makes the real
+instruction `LDY #$0000` at three bytes with the next instruction at `9270`.
+The `M1X1` variant was dead, so nothing miscompiled at runtime — but it was
+`aot_eligible` with an empty `reasons` list, and would have become live the
+moment anything routed to it.
+
+Fixed with `entry_mx_at 926d 1 0` in `recomp/bank00.cfg`. The variant is gone
+and the check is clean. Note the ordering requirement: `cfg_loader` applies
+`entry_mx_at` at the point the `func` is parsed, in a single pass, so the
+directive must appear **before** the `func` line.
+
+This is worth generalising upstream. A cfg `func` silently defaulting to
+`M1X1` is a trap whenever the routine is only entered at another width, and
+the resulting body looks completely clean — same signature as the
+inline-argument bug, and found the same way.

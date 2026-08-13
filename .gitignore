@@ -74,3 +74,10 @@ coverage*.bin
 wram_map*.bin
 session_sram.bin
 *_sram.bin
+
+# SC_MX_BITMAP captures -- the same execution map as coverage*.bin, split by
+# the live (m,x) width flags. Same reasoning: derived from the copyrighted
+# ROM, so the capture stays local while what it established is committed
+# (the exit_mx_at/entry_mx_at directives in recomp/ and the numbers in
+# README.md). Regenerate with SC_MX_BITMAP=<path> on any run.
+mx_*.bin
