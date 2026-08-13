@@ -264,6 +264,13 @@ binding would put them.
 | Mouse cursor control (toggle) | F3 |
 | Fast D-pad cursor -- host-speed, bypasses the ROM's own cadence (toggle) | F9 |
 | Dump WRAM snapshot now (`wram_snapshot.bin`) | F4 |
+
+The F10 menu carries six **disaster triggers**, which set a bit in `$0197` —
+the pending-disaster bitfield the game's own disaster-selection page writes,
+serviced by the six-arm ladder at `03:b8ae`. They fire the real code path.
+Four are named from single-disaster recordings that attributed them; bits 0
+and 1 are still unidentified and are labelled by number rather than guessed
+at.
 | Cheat: No Disasters (toggle, unconfirmed bit) | F5 |
 | Cheat: Needless Money (toggle, confirmed) | F6 |
 | Cheat: Valve Max (toggle, confirmed) | F7 |

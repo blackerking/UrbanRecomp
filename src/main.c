@@ -1463,6 +1463,28 @@ static void menu_action_load_slot1(void) {
     fprintf(stderr, "[menu] failed to load slot 1 (not saved yet?)\n");
 }
 
+/* Disaster triggers: $0197 is the pending-disaster bitfield serviced by the
+ * six-arm ladder at 03:b8ae, which calls one handler per bit and then masks
+ * that bit off. Setting a bit here is exactly what the game's own
+ * disaster-selection page does, so these fire the real code path rather than
+ * simulating anything.
+ *
+ * Named only where a single-disaster recording has actually attributed the
+ * bit (see docs/ROM_MAP.md); bits 0 and 1 are still unidentified and are
+ * labelled by number so the menu never asserts something unproven. Naming
+ * them after a guess is how the $0199 mistake happened. */
+static void trigger_disaster_bit(unsigned bit, const char *what) {
+  g_ram[0x0197] |= (uint8_t)(1u << bit);
+  fprintf(stderr, "[menu] set $0197 bit %u (%s) -> $0197=%02x, frame %llu\n",
+          bit, what, g_ram[0x0197], (unsigned long long)s_frames);
+}
+static void menu_trigger_bit0(void) { trigger_disaster_bit(0, "unidentified"); }
+static void menu_trigger_bit1(void) { trigger_disaster_bit(1, "unidentified"); }
+static void menu_trigger_meltdown(void) { trigger_disaster_bit(2, "meltdown"); }
+static void menu_trigger_tornado(void) { trigger_disaster_bit(3, "tornado"); }
+static void menu_trigger_quake(void) { trigger_disaster_bit(4, "earthquake"); }
+static void menu_trigger_monster(void) { trigger_disaster_bit(5, "monster"); }
+
 /* This table is the whole "extension" mechanism, mirroring ar-recomp's own
  * randomizer/HD-replacements pattern: each row is one self-contained
  * feature plugged in via a single field pointer or action callback, with
@@ -1490,6 +1512,12 @@ static SettingDesc s_settings[] = {
     kPopOverrides, (int)(sizeof(kPopOverrides) / sizeof(kPopOverrides[0])) },
   { "SET CLASS",             kSettingCycle, &s_class_override,      0,    NULL,
     kClassOverrides, (int)(sizeof(kClassOverrides) / sizeof(kClassOverrides[0])) },
+  { "TRIG TORNADO",          kSettingAction, NULL, 0, menu_trigger_tornado,  NULL, 0 },
+  { "TRIG QUAKE",            kSettingAction, NULL, 0, menu_trigger_quake,    NULL, 0 },
+  { "TRIG MONSTER",          kSettingAction, NULL, 0, menu_trigger_monster,  NULL, 0 },
+  { "TRIG MELTDOWN",         kSettingAction, NULL, 0, menu_trigger_meltdown, NULL, 0 },
+  { "TRIG BIT 0",            kSettingAction, NULL, 0, menu_trigger_bit0,     NULL, 0 },
+  { "TRIG BIT 1",            kSettingAction, NULL, 0, menu_trigger_bit1,     NULL, 0 },
   { "CLR MILESTONE",         kSettingAction, NULL, 0, menu_action_clear_milestones, NULL, 0 },
   { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1, NULL, 0 },
   { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1, NULL, 0 },
@@ -1571,7 +1599,16 @@ static void render_settings_menu(SDL_Renderer *renderer) {
   int out_w = 0, out_h = 0;
   SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
 
-  const int px = 4;            /* font pixel size, in real screen pixels */
+  /* Font pixel size, in real screen pixels. Adaptive rather than a fixed 4:
+   * the box is pad*2 + line_h*lines tall with line_h = 6*px and pad = 3*px,
+   * i.e. 6*px*(lines+1), so a long enough list pushes menu_y negative and
+   * silently clips the title off the top of the window. That is exactly what
+   * adding the six disaster triggers did. Shrink to fit instead, capped at
+   * the original 4 so short lists look unchanged. */
+  const int lines = (int)kSettingCount + 6 + (s_menu_preview ? 4 : 0);
+  int px = out_h / (6 * (lines + 1));
+  if (px > 4) px = 4;
+  if (px < 1) px = 1;
   const int line_h = 6 * px;   /* glyph height (5) + 1 row of spacing */
   const int pad = 3 * px;
   int menu_w = out_w * 3 / 4;
