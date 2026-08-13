@@ -1262,3 +1262,45 @@ The flood session produced **no distinguishing signal at all**: no arm
 exclusive to it, and zero first-time-executed addresses in the whole ROM. So
 either the flood is not dispatched through this ladder, or it did not fire
 during that session. The data cannot tell those apart.
+
+### The flood is not in the ladder
+
+Confirmed behaviourally — a flood started, spread, destroyed a building and
+receded — while the same session lit **no arm exclusive to it** and executed
+**zero** first-time addresses. So the flood is not dispatched through `$0197`.
+Its spread-then-recede behaviour is what a tile-level cellular process looks
+like: a tile type that propagates on the per-tick map scan rather than an
+event serviced once and cleared.
+
+That is the answer to why six bits cannot cover every reported disaster. At
+least one of them is not an event at all.
+
+### What the flood *did* prove: the rewriter is shared demolition
+
+Attributing every map-cell write per session, one writer appears in the flood
+session and nowhere else:
+
+| writer | flood | quake | monster |
+|---|---|---|---|
+| `03:B191` | 19,256 | — | 19,826 |
+| `03:A53A` | 3,864 | — | 3,474 |
+| **`03:A5C9`** | **10** | 0 | 0 |
+
+`03:a5c9` is not a third arm. It is the `INY` inside the **write loop** of the
+tile-`$0354` arm at `03:a59e` — the store itself is `03:a5c5`. Its absence
+everywhere else means that in every other recording the arm was entered and
+the pattern never fully matched, so the rewrite pass never ran.
+
+The flood is therefore the only recorded event that has actually completed a
+`$0354` structure demolition, which matches the building destroyed during it.
+It also settles the earlier caution: the cell-pattern rewriter is **shared
+demolition machinery invoked by whatever damages a structure**, not a
+per-disaster routine. Declining to call `03:a553` "the tornado routine" was
+right, and the reason is now evidenced rather than assumed.
+
+### Where that leaves the ladder
+
+Bits 0 (`03:bbb9`) and 1 (`03:bc0b`) remain unattributed, and the flood is out
+of the running for both. Remaining candidates are fire, the Las Vegas UFO, and
+the plane crash — the last of which cannot fire without a plane, so it may
+never appear in a recording at all.
