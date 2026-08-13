@@ -1500,3 +1500,43 @@ in the reason-code path: nonzero, and the normal input handling is skipped.
 back to `03:bcf0` on the other path, and a PC-history trace catches it
 arriving from bank 00 (`00:92b0`), i.e. after a call out and back. The loop's
 own entry is still unidentified.
+
+## `03:b16c` — the power-bit application pass
+
+This is the routine behind `03:B191`, which dominates map-cell writes in every
+recorded session (19,826 cells during a tornado replay, 19,256 during a
+flood). It is not disaster code at all — it is how the power bitmap becomes
+per-cell state:
+
+```
+03:b16c  TXA ; AND #$001e ; BNE $b17a     ; fetch a new bitmap word every 16 cells
+03:b172  LDA $a598,Y ; XBA ; STA $00
+03:b17a  LDA #$0000 ; STA $00023f
+03:b181  LDA $0200,X ; AND #$7fff         ; map cell, bit 15 cleared
+03:b187  ASL $00                          ; shift the bitmap word
+03:b189  BCC $b18e ; ORA #$8000           ; carry set -> cell bit 15 = powered
+03:b18e  STA $0200,X
+03:b191  LDA $00023f ; BEQ $b19b ; ROR $00 ; BRA $b17a
+03:b19b  INX ; INX
+```
+
+One bitmap bit per cell, walked 16 cells to a word, ORed into **bit 15** of
+each map cell. That is exactly the bit the post-load power fix pokes —
+`g_ram[0x10201 + i*2] |= 0x80` is `$7F0200 + i*2 + 1` bit 7, i.e. cell bit 15
+— so the fix and this pass write the same thing, one from the host and one
+from the guest. The bitmap source `$a598,Y` is the `$7FA598` array whose
+absence from the SRAM save block caused the power dropout on load.
+
+It also explains why this address swamps every write-attribution table: it
+touches all 12,000 cells on every pass, so any per-disaster writer shows up
+against a background two orders of magnitude larger.
+
+### The UFO approach loop is reached from here
+
+A PC-history trace catches `03:bcc5` — the loop whose `03:bce9` sets the
+approach flag — arriving from this region (`03:b16c`-`03:b1a0`). So the Las
+Vegas attack is driven off the per-cell simulation pass rather than a timer.
+The exact edge is not established: the trace's last recorded PC before
+`03:bcc5` is `03:b195`, whose `BEQ $b19b` does not lead there, so either the
+history is not contiguous across the transition or the entry is via a path the
+14-entry buffer did not capture. Worth a longer history before asserting it.
