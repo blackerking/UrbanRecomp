@@ -864,3 +864,74 @@ the game actually offers.
 `01:aa39` does the same with two shifts on `$0197`, so that page carries a
 two-bit field, and stores the result to `$79` — the same selection byte the
 scenario-unlock work writes.
+
+## `03:a553` — the map cell-pattern rewriter
+
+Found empirically: it is in the 128 addresses that first executed in a session
+where a tornado was allowed to run its course, against a union of eight
+recorded sessions. 109 of those 128 were in bank 03.
+
+```
+03:a553  LDY #$0000
+03:a556  LDA $00 ; CLC ; ADC $a6e2,Y ; TAX      ; cell + signed offset
+03:a55d  LDA $7f0200,X ; CMP $a6f0,Y ; BNE $a585 ; must match the pattern
+03:a566  INY ; INY ; CPY #$000e ; BNE $a556      ; seven cells
+03:a56d  <second loop>
+03:a577  LDA $a6fe,Y ; STA $7f0200,X             ; write the replacement
+03:a585  LDA #$0001 ; RTS
+```
+
+Two passes over three parallel 7-entry word tables: **verify all seven cells,
+then rewrite all seven**. Nothing is written unless the whole shape matches,
+which is what makes it a structure transform rather than a per-tile edit.
+
+| table | contents |
+|---|---|
+| `$a6e2` offsets | `fe1c fe1e ff0e fffe 00ee 01de 01dc` |
+| `$a6f0` expected | `035c 035d 0001 0355 0001 035b 035a` |
+| `$a6fe` replacement | `0001 0031 0031 0031 0031 0031 0001` |
+
+The map is at **`$7F0200`**, 120 cells per row at 2 bytes each = 240 bytes per
+row, which agrees with the 120x100 layout in `REFERENCE_map_format.md` and
+with the address the post-load power fix pokes. The offsets are signed and
+decode to a coherent shape:
+
+| offset | rows | cells |
+|---|---|---|
+| `$fe1c` = -484 | -2 | -2 |
+| `$fe1e` = -482 | -2 | -1 |
+| `$ff0e` = -242 | -1 | -1 |
+| `$fffe` = -2 | 0 | -1 |
+| `$00ee` = +238 | +1 | -1 |
+| `$01de` = +478 | +2 | -1 |
+| `$01dc` = +476 | +2 | -2 |
+
+A five-row vertical strip. The expected tiles are all in the `$03xx` range —
+above the industrial zone base of 513, so special/gift structures, the same
+band as the buildings in the annual-income ladder — and they are replaced with
+`$0001` and `$0031`, i.e. the structure is levelled.
+
+Immediately after, `03:a589` shows the trigger shape:
+
+```
+03:a589  CMP #$0354 ; BNE                       ; only for this tile
+03:a58e  JSR $907e ; AND #$0003 ; BNE $a585      ; 1-in-4 random
+03:a596  JSR $a70c ; CMP #$0015 ; BCC $a585      ; threshold 21
+03:a59e  <another offset/expected/replacement triple at $a6b8/$a6c6/...>
+```
+
+so `03:907e` is a random source and `03:a70c` yields a value tested against
+21. Several such triples sit consecutively in `$a6b8`-`$a70c`.
+
+**Caveat on attribution.** This code first ran during a tornado, but that does
+not by itself make it "the tornado routine" — it is a general cell-pattern
+rewriter, and levelling a structure is something several events could want.
+Claiming more than that would repeat the `$0199` mistake below. What is
+established is the mechanism and the tables, not which event drives it.
+
+### A replayable disaster dataset
+
+Unlike the earlier six, save states captured *during* a running tornado do
+advance under headless replay (tick 11 -> 12, 20 -> 22, 33 -> 35 over 900
+frames), so a disaster in progress can be stepped and diffed. The earlier
+"armed but not yet fired" states all sat in `$01df = 2` and never ticked.
