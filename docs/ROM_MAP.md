@@ -1166,19 +1166,22 @@ than a random one, so `$0ba9`/`$0baa` is the **epicentre**:
 (56,56) and (60,50) in the captured states. An event that begins somewhere
 specific rather than anywhere fits several candidates; it is not settled.
 
-**Bit 1 (`03:bc0b`) is 8 bytes**, half of them covered during the monster run,
-which suggests a shared tail rather than a disaster of its own.
+**Bit 1 (`03:bc0b`) is 148 bytes, not 8.** An earlier note here said 8 and
+called it a shared tail; that was an artefact of measuring each handler's span
+as the distance to the next handler *in the order I happened to list them*
+rather than in address order. `03:bc0b` runs to `03:bc9f`, where the
+random-cell picker starts. Corrected spans are used in the table below.
 
 ### Status
 
-| bit | handler | identification |
-|---|---|---|
-| 0 | `03:bbb9` | roaming destroyer, needs tile property bit 2 — fire, inferred |
-| 1 | `03:bc0b` | 8 bytes, probably a shared tail |
-| 2 | `03:b9cd` | **nuclear meltdown** — confirmed via `$0a8d` |
-| 3 | `03:b9db` | **tornado** — confirmed by session |
-| 4 | `03:baf5` | **earthquake** — confirmed by session; epicentre `$0ba9`/`$0baa`, entity `$0E` |
-| 5 | `03:ba47` | **monster** — confirmed by session, entity `$0B` |
+| bit | handler | span | identification |
+|---|---|---|---|
+| 0 | `03:bbb9` | 82 | roaming destroyer, needs tile property bit 2 — unplaced |
+| 1 | `03:bc0b` | 148 | unplaced; runs in most sessions, so not disaster-specific |
+| 2 | `03:b9cd` | 14 | **nuclear meltdown** — confirmed via `$0a8d` |
+| 3 | `03:b9db` | 108 | **tornado** — confirmed by session |
+| 4 | `03:baf5` | 117 | **earthquake** — confirmed by session; epicentre `$0ba9`/`$0baa`, entity `$0E` |
+| 5 | `03:ba47` | 174 | **monster** — confirmed by session, entity `$0B` |
 
 Reported but not yet placed: **flood** and the **UFO**, which appears in the
 Las Vegas scenario rather than in ordinary play. Six bits for
@@ -1235,3 +1238,27 @@ Worth stating plainly because the source was second-hand: the disaster half of
 that claim is confirmed in the ROM, the tax half is not, and nothing here
 settles which reading of `$8fe8` is right. Watching `$0dc9` (tax income) across
 a year on two difficulties with an otherwise identical city would settle it.
+
+
+### Per-arm coverage by single-disaster session
+
+The attribution method, laid out so it can be checked:
+
+| bit | handler | span | union | tornado | monster | quake | flood |
+|---|---|---|---|---|---|---|---|
+| 2 | `03:b9cd` | 14 | 4 | 0 | 0 | 0 | 0 |
+| 3 | `03:b9db` | 108 | 41 | **41** | 0 | 0 | 0 |
+| 5 | `03:ba47` | 174 | 71 | 19 | **63** | 16 | 16 |
+| 4 | `03:baf5` | 117 | 47 | 0 | 0 | **47** | 0 |
+| 0 | `03:bbb9` | 82 | 31 | 0 | 0 | 0 | 0 |
+| 1 | `03:bc0b` | 148 | 60 | 0 | 60 | 60 | 60 |
+
+Bits 3, 4 and 5 each light up in exactly one session, which is what makes
+those three attributions solid. Bit 1 runs in three sessions of four, so it is
+not disaster-specific whatever it is. **Bit 0 has never run in any of the four
+single-disaster sessions** — its 31 covered bytes all come from ordinary play.
+
+The flood session produced **no distinguishing signal at all**: no arm
+exclusive to it, and zero first-time-executed addresses in the whole ROM. So
+either the flood is not dispatched through this ladder, or it did not fire
+during that session. The data cannot tell those apart.
