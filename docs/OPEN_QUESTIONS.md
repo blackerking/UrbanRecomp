@@ -234,6 +234,31 @@ Nice-to-have, tracked as task #1. The map format is fully solved and verified
 byte-exact (`docs/REFERENCE_map_format.md`), so this is mostly scenario-table
 plumbing rather than new research.
 
+### D2. Let a won scenario keep playing — no win check, no ending
+
+Requested. Once a scenario has been beaten, allow carrying on in it freely
+instead of being evaluated and ended.
+
+The ROM already implements exactly that state for one index. The win/lose
+evaluator at `03:c548` **deliberately returns without writing a result for
+index 7** — free play — which carries the sentinel deadline `$ffff` in the
+8-entry table at `$03c5b3`. So this is not new behaviour to invent; it is an
+existing path to route a won scenario onto.
+
+Two ways in, both fitting machinery that already exists:
+
+- **Host-side**, alongside `SCENARIO OVR` and `UNLOCK SCENARIOS` in
+  `src/main.c`: when the scenario's completion bit is set in `$700007` (bit N
+  per the mask table at `03:e334`, read into `$42` at init), make `03:c548`
+  take its index-7 path.
+- **Deadline substitution**: give the scenario the `$ffff` sentinel that
+  index 7 carries, so the timer never expires.
+
+The first is more honest about intent and easier to toggle; the second is a
+smaller change but conflates "won" with "no time limit", which are not the
+same thing if the ending is triggered from somewhere other than the deadline.
+Worth checking which of the two actually gates the ending before choosing.
+
 ---
 
 ## E. Verification gaps
