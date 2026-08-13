@@ -923,11 +923,69 @@ Immediately after, `03:a589` shows the trigger shape:
 so `03:907e` is a random source and `03:a70c` yields a value tested against
 21. Several such triples sit consecutively in `$a6b8`-`$a70c`.
 
-**Caveat on attribution.** This code first ran during a tornado, but that does
-not by itself make it "the tornado routine" — it is a general cell-pattern
-rewriter, and levelling a structure is something several events could want.
-Claiming more than that would repeat the `$0199` mistake below. What is
-established is the mechanism and the tables, not which event drives it.
+### Two arms, selected by tile id
+
+The caution above turned out to be right: this is a **table-driven** rewriter
+with one arm per structure tile, not a tornado routine. Both arms have the
+identical shape —
+
+```
+03:a53b  LDA $0b89 ; CMP #$0355 ; BNE $a589     ; arm for tile $0355
+03:a543  JSR $907e ; AND #$0003 ; BNE           ; 1-in-4 draw
+03:a54b  JSR $a70c ; CMP #$0015 ; BCC           ; threshold 21
+03:a553  <verify 7 / rewrite 7 against $a6e2/$a6f0/$a6fe>
+
+03:a589  CMP #$0354 ; BNE                       ; arm for tile $0354
+03:a58e  JSR $907e ; AND #$0003 ; BNE
+03:a596  JSR $a70c ; CMP #$0015 ; BCC
+03:a59e  <verify 7 / rewrite 7 against $a6b8/$a6c6/$a6d4>
+```
+
+so `$0b89` — the current tile index, the same variable the zone-tally helpers
+decode — picks the pattern. The two triples are 42 bytes each, laid out
+consecutively:
+
+| tile | offsets | expected | replacement |
+|---|---|---|---|
+| `$0354` | `$a6b8` `ff0a fffa fffc fffe 0000 0002 ff12` | `$a6c6` `0356 0357 0001 0354 0001 0359 0358` | `$a6d4` `0001 0030 0030 0030 0030 0030 0001` |
+| `$0355` | `$a6e2` `fe1c fe1e ff0e fffe 00ee 01de 01dc` | `$a6f0` `035c 035d 0001 0355 0001 035b 035a` | `$a6fe` `0001 0031 0031 0031 0031 0031 0001` |
+
+The `$0354` offsets are a compact horizontal cluster; the `$0355` offsets span
+five rows vertically. Both keep two `$0001` cells as anchors and level the
+other five to `$0030` or `$0031`. That reads as the two orientations of one
+multi-tile structure, each with its own rubble tile.
+
+This matches the reported behaviour that **the monster does the same thing as
+the tornado with different tiles** — the event picks the tile, the tile picks
+the table, and the rewriter is shared. It also means enumerating the rest of
+the triples would enumerate the destructible structures directly.
+
+### The other map writers during a disaster
+
+Attributing every map-cell write during a tornado replay:
+
+| writer | cells |
+|---|---|
+| `03:B191` | 19,826 |
+| `03:A53A` | 3,474 |
+| `03:82F3` | 562 |
+| `03:99B5` | 126 |
+| `03:84EA` | 12 |
+
+`03:a536` (recorded as `03:A53A`, the instruction after) is a separate,
+narrower edit — `AND #$ff0f ; ORA $0b41 ; STA $7f01fe,X` — rewriting the low
+nibble of a cell's attribute byte from `$0b41` rather than replacing the cell.
+
+### Determinism
+
+Reloading a save state reproduces the disaster exactly — same location, same
+damage — confirmed in play. The recompilation is deterministic on this path,
+which is what makes these states usable as regression fixtures.
+
+**The AOT tier is verified on this code.** All four tornado states replayed
+900 frames on both tiers give **byte-identical 128 KB WRAM**. That extends the
+COP and inline-argument verification onto code that had never executed in any
+earlier recording.
 
 ### A replayable disaster dataset
 
