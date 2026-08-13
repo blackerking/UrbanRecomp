@@ -2291,20 +2291,41 @@ int main(int argc, char **argv) {
     if (keys[SDL_SCANCODE_DOWN] || keys[SDL_SCANCODE_J]) input |= kPad_Down;
     if (keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_H]) input |= kPad_Left;
     if (keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_K]) input |= kPad_Right;
-    /* SDL scancodes are physical/positional (QWERTY-based); on a QWERTZ
-     * (e.g. German) keyboard the Y/Z key positions are swapped, so accept
-     * either scancode here regardless of active keyboard layout. */
-    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_Y]) input |= kPad_B;
-    if (keys[SDL_SCANCODE_X]) input |= kPad_A;
-    if (keys[SDL_SCANCODE_A]) input |= kPad_Y;
-    if (keys[SDL_SCANCODE_S]) input |= kPad_X;
-    if (keys[SDL_SCANCODE_Q]) input |= kPad_L;
-    if (keys[SDL_SCANCODE_E]) input |= kPad_R;
+    /* Letter bindings are resolved by *keycode*, not scancode, so they follow
+     * the labels on the keyboard rather than QWERTY positions.
+     *
+     * This used to accept SDL_SCANCODE_Z and SDL_SCANCODE_Y together, which
+     * papered over the QWERTZ/QWERTY swap only because both fed the same
+     * button. They are separate buttons now (Y = SNES Y, X = SNES B), so the
+     * positional approach would put them on the wrong buttons on a German
+     * layout -- there the key labelled Y sits where QWERTY has Z.
+     * SDL_GetScancodeFromKey maps "the key that types this character" to its
+     * scancode under the active layout, which is what keys[] is indexed by.
+     * Resolved once: the layout can change at runtime, but re-querying every
+     * frame for every button buys nothing here. */
+    static SDL_Scancode sc_l, sc_r, sc_x, sc_a, sc_y, sc_b, sc_select;
+    static bool binds_ready = false;
+    if (!binds_ready) {
+      sc_l      = SDL_GetScancodeFromKey(SDLK_q);   /* Q -> L      */
+      sc_r      = SDL_GetScancodeFromKey(SDLK_w);   /* W -> R      */
+      sc_x      = SDL_GetScancodeFromKey(SDLK_a);   /* A -> X      */
+      sc_a      = SDL_GetScancodeFromKey(SDLK_s);   /* S -> A      */
+      sc_y      = SDL_GetScancodeFromKey(SDLK_y);   /* Y -> Y      */
+      sc_b      = SDL_GetScancodeFromKey(SDLK_x);   /* X -> B      */
+      sc_select = SDL_GetScancodeFromKey(SDLK_b);   /* B -> Select */
+      binds_ready = true;
+    }
+    if (keys[sc_l]) input |= kPad_L;
+    if (keys[sc_r]) input |= kPad_R;
+    if (keys[sc_x]) input |= kPad_X;
+    if (keys[sc_a]) input |= kPad_A;
+    if (keys[sc_y]) input |= kPad_Y;
+    if (keys[sc_b]) input |= kPad_B;
     if (keys[SDL_SCANCODE_RETURN]) input |= kPad_Start;
     /* Select is bound to B (not Shift) so Shift is free for the
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
-    if (keys[SDL_SCANCODE_B]) input |= kPad_Select;
+    if (keys[sc_select]) input |= kPad_Select;
     /* Left mouse button = SNES X -- lets host-mouse cursor control (F3)
      * actually select/interact with things, not just move the cursor.
      * Not gated on s_mouse_enabled: useful as a plain extra binding

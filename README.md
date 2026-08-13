@@ -244,15 +244,22 @@ shared `snesrecomp` runtime needed).
 | SNES button | Key(s) |
 |---|---|
 | D-pad | Arrow keys, or U/H/J/K (up/left/down/right) |
-| A | X |
-| B | Y or Z (either physical key position, for QWERTZ keyboards), or left mouse click |
-| X | S |
-| Y | A |
+| A | S |
+| B | X |
+| X | A, or left mouse click |
+| Y | Y |
 | L | Q |
-| R | E |
+| R | W |
 | Start | Enter |
 | Select | B |
 | Fast-forward (hold) | Tab |
+
+The letter bindings follow the **labels on the keyboard**, not QWERTY key
+positions, so they are the same keys on a German layout as on a US one. They
+are resolved through `SDL_GetScancodeFromKey`, because SNES Y and SNES B now
+sit on the keys labelled Y and X — which on QWERTZ are not where a positional
+binding would put them.
+
 | Debug-menu code entry (controller 2, one-shot) | F2 |
 | Mouse cursor control (toggle) | F3 |
 | Fast D-pad cursor -- host-speed, bypasses the ROM's own cadence (toggle) | F9 |
