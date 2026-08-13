@@ -109,15 +109,18 @@ or whether the interpreter is already fast enough on a modern host.
 
 ## C. Reverse engineering
 
-### C1. How is `03:8000` reached?
+### C1. How is the tick routine entered? (narrowed)
 
-Declared as a root because nothing names it: no `JSR $8000`, no
-`JSL $038000`, no `JMP $8000` anywhere in the ROM, and bank 03's only
-indirect dispatcher (`03:D28F`, `JSR ($D255,X)`, 23 entries) does not list
-it. Yet it executes in all four recorded sessions. Candidates not yet
-excluded: an RTS/RTL-trick, a `JMP (abs)`/`JML [abs]` through RAM, or entry
-from the COP path. A PC-trace hook recording the instruction executed
-immediately before `03:8000` would settle it in one run.
+`03:8000` is declared as a root because nothing names it: no `JSR $8000`,
+no `JSL $038000`, no `JMP $8000` anywhere in the ROM, no executed indirect
+dispatch table containing it, and no `PEA $7FFF`/RTS trick.
+
+Narrowed since: tracing `03:8026` (the `INC $0b51`) **does** hit, arriving
+from `03:84c3`, while tracing `03:8000` in the same run does not. So the
+routine body runs every tick but entry at `$8000` is rare or one-time —
+`$8000` is a prologue (`SEP`/`REP`/set DB=3) that the per-tick path skips.
+Finding the real per-tick entry needs a longer PC history than
+`SC_PC_HISTORY_SIZE` currently keeps.
 
 ### C2. The `$c5` reason-code dispatch — 12 handlers, semantics unknown
 
@@ -130,6 +133,7 @@ immediately before `03:8000` would settle it in one run.
 ```
 
 Only reason 1 (`8D26`, cursor sprite + direction dispatch) is understood.
+`tools/dis_mx.py` now makes these readable.
 
 ### C3. The `$01df` UI sub-state machine — 5 states
 
@@ -138,12 +142,22 @@ Two parallel tables at `01:9d1a` (call) and `01:9d3a` (jump), handlers
 five states *are* would also make an `exit_mx_at` assertion verifiable by
 inspection.
 
-### C4. The monthly tick's per-tick pass
+### C4. Tick / calendar / seasons / population / budget — **done**
 
-`03:8000` advances `$0b51` and, every fourth call, `$0b53`/`$0b55` (the
-latter wrapping 13 → 1, i.e. month). It then calls `03:8df1`, `03:b42f`,
-`03:addf` and others. These are the most likely home of the **money and
-population mechanics**, which are still unmapped.
+Written up in `docs/ROM_MAP.md`. Time base (200 frames per tick, 4 ticks per
+month), the season tables at `03:8160`/`03:816d`, the population formula
+`(($0b8f + $0b93) * 8 + $0b8b) * 20`, and the annual budget at `03:8df1`
+with the treasury clamped to 999,999.
+
+Two follow-ups it raises:
+
+- **Which zone does each of `$0b8b`, `$0b8f`, `$0b93` count?** Two are
+  weighted `*8` against the third. Cheap to settle: build only one zone type
+  and watch which counter moves.
+- **Is `$0b1d` the loan?** While nonzero it decrements and charges 500 per
+  year. That reads like loan repayment, but it is inferred from code shape
+  and should be confirmed by taking a loan in play — the user has already
+  done so once.
 
 ### C5. Smaller open threads
 
