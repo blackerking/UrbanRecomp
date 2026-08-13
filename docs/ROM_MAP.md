@@ -1185,3 +1185,53 @@ Las Vegas scenario rather than in ordinary play. Six bits for
 more candidates than that means at least one reported event is not driven by
 this ladder — fire spreading tile-to-tile rather than being dispatched once
 would be the obvious way that happens.
+
+## `$0b57` — difficulty, and what it actually changes
+
+`$0b57` reads 0 or 1 across every captured save state and does not track city
+size (`$0ca5`/`$0deb` do that — both 3 in an 80,000-population city where
+`$0b57` is 0). It indexes two tables, in the two places difficulty is
+reported to matter.
+
+### Disaster frequency — confirmed and quantified
+
+```
+03:b91e  LDA $0b57 ; ASL A ; TAY
+03:b923  LDA $b969,Y ; JSR $9035      ; random 0..N
+03:b929  CMP #$0000 ; BNE <skip>      ; proceed only on a zero draw
+```
+
+`03:9035` is the bounded RNG, so the per-tick chance is **1 in (N+1)**. The
+table at `03:b969` holds three sane entries before running into unrelated
+bytes, which is what fixes its length at three:
+
+| `$0b57` | N | chance per tick |
+|---|---|---|
+| 0 | 4800 | 1 in 4801 |
+| 1 | 2400 | 1 in 2401 |
+| 2 | 1200 | 1 in 1201 |
+
+So each difficulty step **doubles** the disaster rate, 4x from easiest to
+hardest. That confirms the reported behaviour that medium and hard throw far
+more disasters than easy, and puts a number on it.
+
+### The tax claim does not hold up as stated
+
+The other difficulty-indexed table is at `03:8fe8`, used in the annual budget:
+
+```
+03:8e3c  LDA $0e17 ; ASL A ; ADC $0e15 ; STA $00
+03:8e45  LDA $0b57 ; ASL A ; TAX ; LDA $8fe8,X ; STA $04
+03:8e4f  JSR $a2f5  [00 04 00]        ; multiply
+```
+
+with `$8fe8` = `00b3 00e6 0133 ...` = **179, 230, 307**. The multiplier
+*increases* with difficulty, which is the opposite direction to "taxes are
+lower on higher difficulty". Either this term is not the tax rate — it is fed
+by `$0e15`/`$0e17` and multiplied, so it could as easily be a cost or demand
+factor — or the widely repeated claim is wrong.
+
+Worth stating plainly because the source was second-hand: the disaster half of
+that claim is confirmed in the ROM, the tax half is not, and nothing here
+settles which reading of `$8fe8` is right. Watching `$0dc9` (tax income) across
+a year on two difficulties with an otherwise identical city would settle it.
