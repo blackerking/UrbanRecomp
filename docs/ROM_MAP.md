@@ -993,3 +993,77 @@ Unlike the earlier six, save states captured *during* a running tornado do
 advance under headless replay (tick 11 -> 12, 20 -> 22, 33 -> 35 over 900
 frames), so a disaster in progress can be stepped and diffed. The earlier
 "armed but not yet fired" states all sat in `$01df = 2` and never ticked.
+
+## The monster step, `03:bb6a`, and what it drags in
+
+Isolated by difference: a session in which the monster rampaged executed 36
+addresses that nine sessions — including the tornado run — never had. Only two
+regions, `03:bb6a-bbb8` and `03:b92e-b93c`.
+
+### The per-tick gate, `03:b92e`
+
+```
+03:b92e  JSR $907e ; AND #$0007 ; CMP #$0002 ; BCS $b93e
+03:b939  JSR $bb6a                 ; two chances in eight
+```
+
+### The step itself
+
+```
+03:bb6c  LDA #$0014 ; STA $00
+03:bb71  JSR $bc9f ; TAY           ; pick a random map cell, tile id -> Y
+03:bb75  LDA $84eb,Y ; AND #$0001 ; BNE      ; per-tile property table, bit 0 = skip
+03:bb7d  CPY #$0088 ; BCC          ; only tiles >= $88
+03:bb82  LDA #$007f ; STA $7f0200,X          ; stamp tile $7F over the target
+03:bb8b  LDA $04 ; STA $0400 ; LDA $05 ; STA $0402   ; remember where
+03:bb97  INC $03fe
+03:bb9a  LDA #$0020 ; JSR $be04    ; post event $20
+03:bba0  LDA #$000b ; JSR $c42a    ; allocate entity type $0B
+03:bba6  INC $0c9f
+03:bbab  LDA #$21 ; STA $0006
+```
+
+### Four things this identifies
+
+**`03:9035` is a bounded random number generator**, not the smoothing window
+an earlier note guessed at. `03:bc9f` is simply "pick a random cell":
+
+```
+03:bc9f  LDA #$0077 ; JSR $9035 ; STA $04    ; x in 0..119
+03:bca7  LDA #$0063 ; JSR $9035 ; STA $05    ; y in 0..99
+03:bcaf  LDA $04 ; JSR $849e                 ; (x,y) -> cell index
+```
+
+`#$0077` = 119 and `#$0063` = 99 are exactly the 120x100 map bounds, which
+also confirms `03:849e` as the coordinate-to-cell-index helper.
+
+**`$0ced` is the moving-object table.** `03:c42a` scans it for a free slot:
+
+```
+03:c42a  PHA ; LDX #$0000
+03:c430  LDA $0ced,X ; CMP #$ffff ; BEQ <found>
+03:c438  TXA ; CLC ; ADC #$0006 ; TAX ; CPX #$003c ; BNE
+```
+
+stride 6, limit `$3c` = 60, free marker `$ffff` — **10 slots of 6 bytes**. The
+monster is **entity type `$0B`**. This is the entity table listed as an open
+thread; the identities can now be read off from each caller's type byte.
+
+**`03:be04` is a one-shot event post**, guarded so only one is pending:
+
+```
+03:be04  LDY $0395 ; BNE $be11 ; STA $0397 ; INC $0395
+```
+
+The monster posts event `$0020`.
+
+**`$84eb` is a per-tile property table**, indexed by tile id, with bit 0
+meaning "not a valid target".
+
+### The sound is still unattributed
+
+The reported difference — the monster makes sounds, the tornado does not —
+looked like it would fall out of `JSR $c42a`, but that is the entity
+allocator, and `03:be04` is an event post. Neither touches the APU directly.
+The sound most likely follows from the entity or the event downstream rather
+than from the step, and is not established here.
