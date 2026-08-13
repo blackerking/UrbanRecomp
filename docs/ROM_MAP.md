@@ -1118,3 +1118,67 @@ which. Roughly **60% of the six handlers' code has still never executed.**
 Attributing the rest needs one session per disaster, each triggering a single
 type, so that session's newly executed addresses name its bit the way the
 tornado and monster runs did.
+
+### Reading the unattributed arms
+
+**Bit 2 (`03:b9cd`) is the nuclear meltdown.** Its whole body is a guard:
+
+```
+03:b9cf  LDA $0a8d ; BEQ $b9da ; ... ; RTS
+```
+
+`$0a8d` is the nuclear-plant count — incremented at `03:ac08` when one is
+built, decremented at `03:ce47` (never executed in any recording). Measured
+across the save states: it is **0 in the Boston state with the plants deleted
+and 1 in the Boston states that still have one**, which is exactly the
+reported behaviour that removing every nuclear plant removes the disaster.
+This is why the arm shows only 4 of 14 bytes covered — in most recordings it
+takes the early exit.
+
+**Bit 0 (`03:bbb9`) is a roaming destroyer, like the monster but pickier.**
+Same shape as `03:bb6a` — random cell, stamp tile `$7F` — with two
+differences: the strength parameter is `#$0028` (40) rather than `#$0014`
+(20), and the target must have **property bit 2** set in `$84eb` as well as
+not having bit 0:
+
+```
+03:bbc4  LDA $84eb,Y ; AND #$0001 ; BNE <skip>    ; never a target
+03:bbcc  LDA $84eb,Y ; AND #$0004 ; BEQ <skip>    ; must have this property
+```
+
+A per-tile "may catch fire" flag is the natural reading, which would make this
+the fire, but that is inference from the shape of the test, not evidence.
+
+**Bit 4 (`03:baf5`) starts at a stored location, not a random one:**
+
+```
+03:baf7  LDA $0ba9 ; AND #$00ff ; STA $0400
+03:bb00  LDA $0baa ; AND #$00ff ; STA $0402       ; a remembered coordinate
+03:bb0c  LDA #$000a ; JSR $be04                   ; event $0A
+03:bb12  LDA #$000e ; JSR $c42a                   ; entity type $0E
+03:bb18  LDA #$015e ; JSR $9035                   ; random 0..350
+```
+
+`$0ba9`/`$0baa` is written at `03:9ba0`, `03:9bb8` and `03:c859`, and holds
+(56,56) and (60,50) in the captured states. An event that begins somewhere
+specific rather than anywhere fits several candidates; it is not settled.
+
+**Bit 1 (`03:bc0b`) is 8 bytes**, half of them covered during the monster run,
+which suggests a shared tail rather than a disaster of its own.
+
+### Status
+
+| bit | handler | identification |
+|---|---|---|
+| 0 | `03:bbb9` | roaming destroyer, needs tile property bit 2 — fire, inferred |
+| 1 | `03:bc0b` | 8 bytes, probably a shared tail |
+| 2 | `03:b9cd` | **nuclear meltdown** — confirmed via `$0a8d` |
+| 3 | `03:b9db` | **tornado** — confirmed by session |
+| 4 | `03:baf5` | starts at a stored coordinate, spawns entity `$0E` |
+| 5 | `03:ba47` | **monster** — confirmed by session, entity `$0B` |
+
+Reported but not yet placed: **earthquake**, **flood**, and the **UFO**, which
+appears in the Las Vegas scenario rather than in ordinary play. Six bits for
+more candidates than that means at least one reported event is not driven by
+this ladder — fire spreading tile-to-tile rather than being dispatched once
+would be the obvious way that happens.
