@@ -352,3 +352,35 @@ correlation got written up before it was tested.
 What the run *does* establish is the shape of the data: 2,235 pairs have both
 a published exit and an observed return, so once the confounds are handled
 there is enough measurement here to check the solver properly.
+
+### Both confounds handled — and the residue is systematic, not 26 bugs
+
+Correcting the return address for the five inline-argument callees (168 sites)
+and excluding every return address that any executed branch or jump can also
+land on (144 sites) leaves:
+
+```
+checked 518   agree 492   mismatch 26
+```
+
+**Every one of the 26 differs only in the X bit, always the same way** —
+published `x=1` where the machine shows `x=0`:
+
+```
+00:8130 -> 00C1FA:M0X1   observed m0x0   published m0x1
+00:8432 -> 008436:M1X1   observed m0x0 m1x0   published m0x1 m1x0
+02:A64D -> 02A651:M1X1   observed m1x0   published m1x1
+03:94A0 -> 03A29A:M1X1   observed m1x0   published m1x1
+```
+
+Twenty-six independent solver bugs would not all land on the same flag in the
+same direction. That is the signature of a **convention mismatch on one side**
+— either the host records `cpu->xf` with a different sense than the manifest's
+`x`, or the exit is published for a variant key whose `x` is the entry width
+rather than the exit width. Both are cheap to test and neither has been
+tested, so the 26 remain unexplained rather than attributed.
+
+The 492 agreements are worth noting on their own: where the two do agree, they
+agree exactly, across 492 call sites and both flags. That is real evidence the
+solver is sound where it publishes at all — which was never in doubt but had
+never been measured.
