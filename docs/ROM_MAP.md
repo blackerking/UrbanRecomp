@@ -1149,7 +1149,10 @@ not having bit 0:
 A per-tile "may catch fire" flag is the natural reading, which would make this
 the fire, but that is inference from the shape of the test, not evidence.
 
-**Bit 4 (`03:baf5`) starts at a stored location, not a random one:**
+**Bit 4 (`03:baf5`) is the earthquake** — confirmed by a session that
+triggered only that: 47 of its 117 bytes ran, matching the union exactly,
+while bits 0, 2 and 3 stayed at zero. It starts at a stored location rather
+than a random one, so `$0ba9`/`$0baa` is the **epicentre**:
 
 ```
 03:baf7  LDA $0ba9 ; AND #$00ff ; STA $0400
@@ -1174,11 +1177,11 @@ which suggests a shared tail rather than a disaster of its own.
 | 1 | `03:bc0b` | 8 bytes, probably a shared tail |
 | 2 | `03:b9cd` | **nuclear meltdown** — confirmed via `$0a8d` |
 | 3 | `03:b9db` | **tornado** — confirmed by session |
-| 4 | `03:baf5` | starts at a stored coordinate, spawns entity `$0E` |
+| 4 | `03:baf5` | **earthquake** — confirmed by session; epicentre `$0ba9`/`$0baa`, entity `$0E` |
 | 5 | `03:ba47` | **monster** — confirmed by session, entity `$0B` |
 
-Reported but not yet placed: **earthquake**, **flood**, and the **UFO**, which
-appears in the Las Vegas scenario rather than in ordinary play. Six bits for
+Reported but not yet placed: **flood** and the **UFO**, which appears in the
+Las Vegas scenario rather than in ordinary play. Six bits for
 more candidates than that means at least one reported event is not driven by
 this ladder — fire spreading tile-to-tile rather than being dispatched once
 would be the obvious way that happens.
