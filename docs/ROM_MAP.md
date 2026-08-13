@@ -1447,3 +1447,39 @@ never been *attributed*. That is the same pattern as the earthquake session,
 and it is the reason coverage growth stopped being a useful signal several
 sessions ago: what is left is naming code that already runs, not finding code
 that does not.
+
+### `$0af1` is the "controls disabled" flag, and the spawn is reproducible
+
+The attack replays deterministically from a save state taken before it: run
+the "before" state forward and entity `$14` appears between frames 1800 and
+3600, with no input at all. That makes it a fixture, not just an observation.
+
+Watching `$0af1` across the replay shows the two phases, and both live in one
+routine:
+
+```
+03:bd1d  LDA #$8000
+03:bd20  STA $0aef
+03:bd23  STA $0af1        ; approach: flag set
+03:bd26  PLY ; INY ; BRA $bcf0
+03:bd2a  PLY
+03:bd2b  STZ $0af1        ; arrival: flag cleared
+03:bd2e  LDA #$0030 ; JSR $be04
+03:bd34  LDA #$0014 ; JSR $c42a
+```
+
+| frame | `$0af1` | entity slot 1 |
+|---|---|---|
+| start | 0 | free |
+| 300-1800 | **`$8000`** | free |
+| 3600+ | 0 | **`$14`** |
+
+`$0af1` is held at `$8000` for the whole approach and cleared as the UFO
+spawns — which matches the reported behaviour that **the controls go dead
+just before the attack**, and explains `01:898a`'s `LDA $0af1 ; BNE $89e4`
+in the reason-code path: nonzero, and the normal input handling is skipped.
+
+`03:bd2b` is not a routine entry. It is the fall-out of a loop that branches
+back to `03:bcf0` on the other path, and a PC-history trace catches it
+arriving from bank 00 (`00:92b0`), i.e. after a call out and back. The loop's
+own entry is still unidentified.
