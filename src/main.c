@@ -204,6 +204,21 @@ static int s_pc_bitmap_bank = -1; /* -1 = off, -2 = all banks, else single bank 
 static uint64_t s_pc_bitmap_start_frame;
 static uint8_t s_pc_bitmap[4096];
 static uint8_t s_pc_bitmap_all[64][4096];
+
+/* SC_MX_BITMAP=<path>: the same executed-PC bitmap, but split four ways by the
+ * live (m,x) width flags. The point is the exit-M/X fixpoint that blocks the
+ * remaining ~5% of AOT coverage (docs/OPEN_QUESTIONS.md A1): the analyzer
+ * cannot prove what widths a callee returns in, but the machine knows -- the
+ * widths observed at a call's *return address* are exactly the callee's exit
+ * widths. Recording (pc, m, x) turns that from a proof obligation into a
+ * measurement, which is the same move the execution bitmap already made for
+ * "is this address code".
+ *
+ * Deliberately separate from s_pc_bitmap_all rather than replacing it: the
+ * existing bitmaps are the basis of every coverage number in the README, and
+ * silently changing their format would invalidate the ones already on disk. */
+static uint8_t (*s_mx_bitmap)[64][4096];   /* [mx][bank][byte], mx = m<<1 | x */
+static const char *s_mx_bitmap_path;
 static uint64_t s_banks_seen; /* bit N set if bank N ever held cpu->k (diagnostic only) */
 
 /* SC_WRAM_MAP=<file>: build a live map of WRAM usage over a play session --
@@ -894,6 +909,11 @@ static bool run_one_frame(void) {
         s_frames >= s_pc_bitmap_start_frame) {
       uint32_t idx = cpu->pc - 0x8000;
       s_pc_bitmap_all[cpu->k][idx >> 3] |= (uint8_t)(1u << (idx & 7));
+    }
+    if (s_mx_bitmap && cpu->pc >= 0x8000 && cpu->k < 64) {
+      uint32_t idx = cpu->pc - 0x8000;
+      int mx = ((cpu->mf ? 1 : 0) << 1) | (cpu->xf ? 1 : 0);
+      s_mx_bitmap[mx][cpu->k][idx >> 3] |= (uint8_t)(1u << (idx & 7));
     }
     if (cpu->k < 64) s_banks_seen |= (1ULL << cpu->k);
     if (s_pc_capture_after > 0) {
@@ -1724,7 +1744,24 @@ static void render_settings_menu(SDL_Renderer *renderer) {
  * as snesrecomp/cosim/ref_driver.c's standalone mode -- "goes through the
  * attract demo without logic, video, or audio errors" made concrete and
  * automatable, with zero SimCity-specific WRAM knowledge required. ─────── */
+static void write_mx_bitmap_dump(void) {
+  if (!s_mx_bitmap || !s_mx_bitmap_path) return;
+  FILE *f = fopen(s_mx_bitmap_path, "wb");
+  if (!f) { fprintf(stderr, "SC_MX_BITMAP: cannot write %s\n", s_mx_bitmap_path); return; }
+  fwrite(s_mx_bitmap, 1, 4 * sizeof(s_pc_bitmap_all), f);
+  fclose(f);
+  unsigned n[4] = {0,0,0,0};
+  for (int mx = 0; mx < 4; mx++)
+    for (int b = 0; b < 64; b++)
+      for (int i = 0; i < 4096; i++)
+        for (int k = 0; k < 8; k++)
+          if (s_mx_bitmap[mx][b][i] & (1u << k)) n[mx]++;
+  fprintf(stderr, "[mxbitmap] m0x0=%u m0x1=%u m1x0=%u m1x1=%u -> %s\n",
+          n[0], n[1], n[2], n[3], s_mx_bitmap_path);
+}
+
 static void write_pc_bitmap_dump(void) {
+  write_mx_bitmap_dump();
   if (s_pc_bitmap_bank == -1) return;
   const char *path = getenv("SC_PC_BITMAP_PATH");
   if (!path) return;
@@ -1941,6 +1978,12 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_FREEZE"); if (e && *e) parse_freezes(e); }
   { const char *e = getenv("SC_PC_BITMAP_BANK");
     if (e && *e) s_pc_bitmap_bank = !strcmp(e, "all") ? -2 : (int)strtol(e, NULL, 16); }
+  { const char *e = getenv("SC_MX_BITMAP");
+    if (e && *e) {
+      s_mx_bitmap = calloc(4, sizeof(s_pc_bitmap_all));
+      if (s_mx_bitmap) s_mx_bitmap_path = e;
+      else fprintf(stderr, "SC_MX_BITMAP: out of memory\n");
+    } }
   { const char *e = getenv("SC_PC_BITMAP_START"); if (e && *e) s_pc_bitmap_start_frame = strtoull(e, NULL, 0); }
   /* SC_DEBUG_CODE_AT=<frame>: queue the one-button debug-menu code macro
    * (see queue_debug_menu_code) on controller 2 at that frame, for
