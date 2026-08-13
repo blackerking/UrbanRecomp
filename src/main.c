@@ -1169,6 +1169,7 @@ static void parse_freezes(const char *spec) {
  * normal. */
 static int s_scenario_override;
 static const int kScenarioOverrides[] = { 0, 6, 7 };
+static const char *const kScenarioOverrideNames[] = { "OFF", "LAS VEGAS", "FREE PLAY" };
 
 /* Population override, for exercising the population milestone messages.
  * Population is 32-bit little-endian at $0BA5 (low word) + $0BA7 (high
@@ -1260,8 +1261,19 @@ static void apply_unlock_all(void) {
    * formatted save whose body is zeroed, so wait for the game instead. */
   if (snes_read(g_snes, 0x700000) != 'S' ||
       snes_read(g_snes, 0x700001) != 'I' ||
-      snes_read(g_snes, 0x700002) != 'M')
+      snes_read(g_snes, 0x700002) != 'M') {
+    /* Say so once. This used to return in silence, which makes the toggle
+     * look broken rather than pending: switching it on at the title screen
+     * does nothing at all until a real session has formatted SRAM, and there
+     * was no way to tell that from "it didn't work". */
+    static bool warned;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr, "[unlock] waiting: SRAM not formatted yet (no SIM magic "
+              "at $700000). Start a game once, then this applies by itself.\n");
+    }
     return;
+  }
   uint16_t flags = (uint16_t)(snes_read(g_snes, 0x700007) |
                               ((uint16_t)snes_read(g_snes, 0x700008) << 8));
   uint16_t want = (uint16_t)(flags | kWinMarkBits);
@@ -1427,6 +1439,12 @@ typedef struct {
   void (*action)(void);   /* kSettingAction only */
   const int *values;      /* kSettingCycle only: allowed values, cycled in order */
   int value_count;
+  /* kSettingCycle only, optional: one label per entry of `values`. A bare
+   * number is fine for a step size, but not for an index whose meaning is
+   * arbitrary -- SCENARIO OVR showing "6" and "7" cost a whole play session,
+   * because 7 is free play and looks like a perfectly reasonable next value
+   * after Las Vegas. Name them and the mistake is unavailable. */
+  const char *const *value_names;
 } SettingDesc;
 
 static bool setting_get(const SettingDesc *d) {
@@ -1507,7 +1525,8 @@ static SettingDesc s_settings[] = {
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
   { "SCENARIO OVR",          kSettingCycle, &s_scenario_override,  0,    NULL,
-    kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])) },
+    kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])),
+    kScenarioOverrideNames },
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
@@ -1657,7 +1676,11 @@ static void render_settings_menu(SDL_Renderer *renderer) {
       const char *val;
       if (d->kind == kSettingCycle) {
         int cv = *(int *)d->field;
-        if (cv < 0) {
+        int idx = -1;
+        for (int k = 0; k < d->value_count; k++) if (d->values[k] == cv) idx = k;
+        if (d->value_names && idx >= 0) {
+          val = d->value_names[idx];
+        } else if (cv < 0) {
           val = "OFF"; /* negative sentinel, so 0 stays a real selectable value */
         } else {
           snprintf(numbuf, sizeof(numbuf), "%d", cv);
