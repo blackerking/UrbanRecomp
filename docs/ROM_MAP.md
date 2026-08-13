@@ -665,3 +665,68 @@ Reason code 10 is the other half. `01:9419` reads `$0dc3` and tests its sign
 `03:8ecb` are the two stores that raise it. This is why the treasury never
 moves in an unattended replay — nothing dismisses the dialog, so `03:8ece`
 never releases and the arithmetic after it is never reached.
+
+## `$0195` — the four in-game option toggles
+
+The options screen keeps all four settings as bits of one word at `$0195`,
+flipped by the `EOR` at `01:a9c1` (inside `01:a97c`, one of the five `$01df`
+UI state handlers). Each bit is tested with its own mask:
+
+| bit | mask | option | test sites | confidence |
+|---|---|---|---|---|
+| 0 | `$0001` | **build over parks / forest / rubble** | `01:bab4`, `01:bad4` | likely |
+| 1 | `$0002` | **auto budget** | `01:9422`, `03:8ec0` | **confirmed live** |
+| 2 | `$0004` | **traffic-jam view** | `01:8b82`, `01:8c96` | likely |
+| 3 | `$0008` | **music on/off** | `00:8087`, `00:c8b1` | likely |
+
+The order matches the four options as they appear in the game.
+
+Bit 0 sits in the build path and gates on the tile index: `01:babd` compares
+against `#$002e` = 46, so the bit permits building over tile classes below
+that — terrain, parks, forest, rubble. Bit 2 selects `#$0009` instead of
+`#$00ff` as a view/overlay mode (`01:8b8a`). Bit 3 is read in 8-bit mode
+during bank 00's audio setup, choosing a value that is then passed with an
+`#$81` command byte.
+
+Only bit 1 has been confirmed dynamically; the other three are read from
+context. Toggling each option in play and reading `$0195` would settle all
+four in one session.
+
+### Auto budget, exactly
+
+```
+03:8eba  LDA #$ffff ; STA $0dc3        ; default: negative
+03:8ec0  LDA $0195 ; AND #$0002 ; BEQ $8ece
+03:8ec8  LDA #$0001 ; STA $0dc3        ; auto budget: positive
+03:8ece  LDA $0dc3 ; BNE $8ece         ; spin either way
+```
+
+and in reason code 10:
+
+```
+01:9419  LDA $0dc3 ; BPL $9467         ; positive -> skip the dialog
+...
+01:9467  JSL $02a3dc ; JSL $02a64d ; BRA $945e
+01:945e  STZ $0dc3                     ; both paths land here
+```
+
+So the sign of `$0dc3` is the channel: `$ffff` means "ask the player" and `1`
+means "allocate automatically". The manual path shows the dialog via
+`COP #$00` service 3 at `01:945a`; the automatic path runs two bank-02
+routines and falls into the same clear.
+
+### What was observed with auto budget forced on
+
+Freezing `$0195` to `$02` and replaying savestate 5 for 12,505 frames does
+reach the annual budget: `$0dc3` is raised at `03:8ebd`/`03:8ecb`, the spin
+releases when `02:a3e8` clears it, and the income terms are computed —
+`$0dc9` (tax) written from `03:8eb2`, and **`$0dd9` = 100**, i.e. exactly one
+gift building paying 100 a year, which is the reported casino payout observed
+live rather than read from the ROM.
+
+The treasury update itself was still not reached: `$0b9d` has zero writes and
+`$0b1d` (loan, value 19) is never decremented, so execution did not get past
+`03:8ed6` in this run. The arithmetic at `03:8efa-8f24` is therefore still
+**read but not observed executing**. Confirming it wants a session with auto
+budget genuinely enabled through the options screen rather than a frozen
+word, since freezing `$0195` also forces the other three options off.
