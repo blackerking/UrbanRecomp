@@ -374,11 +374,28 @@ published `x=1` where the machine shows `x=0`:
 ```
 
 Twenty-six independent solver bugs would not all land on the same flag in the
-same direction. That is the signature of a **convention mismatch on one side**
-— either the host records `cpu->xf` with a different sense than the manifest's
-`x`, or the exit is published for a variant key whose `x` is the entry width
-rather than the exit width. Both are cheap to test and neither has been
-tested, so the 26 remain unexplained rather than attributed.
+same direction. That is the signature of a convention mismatch on one side.
+
+**Tested, and the host is right.** `SEP #$10` sets the X flag (8-bit index)
+and `REP #$10` clears it (16-bit), so the width at the instruction *after* one
+of those is ground truth. Over the executed sites:
+
+| after | X must be | host bitmap records |
+|---|---|---|
+| `SEP #$10`, 47 sites | 1 | **x=1 in 11 observations, x=0 in 0** |
+| `REP #$10`, 267 sites | 0 | **x=0 in 92 observations, x=1 in 0** |
+
+Zero contradictions in either direction, so `cpu->xf` is recorded with the
+standard sense and the measurement is not the problem.
+
+That leaves the disagreement on the analyzer's side, with one alternative not
+yet excluded: the check looks up the callee variant named by the *demand's*
+target `(m,x)`, so if a site actually reaches a different variant at runtime
+than the demand records, the published exit being compared is the wrong one.
+Distinguishing "the published exit X is wrong" from "the demand names the
+wrong variant" needs the callee's entry width measured too — which the same
+bitmap can supply, by reading the width at the target address rather than at
+the return address.
 
 The 492 agreements are worth noting on their own: where the two do agree, they
 agree exactly, across 492 call sites and both flags. That is real evidence the
