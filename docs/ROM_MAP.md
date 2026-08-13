@@ -730,3 +730,46 @@ The treasury update itself was still not reached: `$0b9d` has zero writes and
 **read but not observed executing**. Confirming it wants a session with auto
 budget genuinely enabled through the options screen rather than a frozen
 word, since freezing `$0195` also forces the other three options off.
+
+## The `$01df` UI state machine — five menu handlers
+
+`$01df` selects through two parallel tables, `01:9d1a` (called) and
+`01:9d3a` (jumped), at `01:a8e9` and `01:a8f8`. The five handlers share one
+shape — a modal loop that waits a frame and polls input:
+
+```
+LDA #$0000 ; COP #$00      ; service 0, wait for vblank
+JSR $ae26                  ; sample
+JSR $aecc                  ; handle; returns carry set when done
+BCC <loop>
+```
+
+| `$01df` | handler | what it edits |
+|---|---|---|
+| 0 | `01:a886` | reads `$0193`, calls `$a918` first |
+| 1 | `01:a97c` | **the options screen** — reads `$0195` |
+| 2 | `01:aa39` | reads `$0197`, writes `$79` |
+| 3 | `01:aad5` | plain modal loop, then `CMP #$0008` |
+| 4 | `01:ad54` | plain modal loop |
+
+`$0193`, `$0195` and `$0197` are three parallel settings words, one per page.
+
+### `$0195` really does hold exactly four option bits
+
+`01:a97c` renders the options page with
+
+```
+01:a97e  LDA $0195      (8-bit)
+01:a981  ASL A ; ASL A ; ASL A ; ASL A
+01:a985  XBA
+```
+
+Four shifts then `XBA` lifts **bits 0-3** into the high byte for the menu
+renderer, so the option nibble is exactly four bits wide. That is an
+independent confirmation that the four masks found elsewhere (`$0001`,
+`$0002`, `$0004`, `$0008`) are the complete set, and matches the four options
+the game actually offers.
+
+`01:aa39` does the same with two shifts on `$0197`, so that page carries a
+two-bit field, and stores the result to `$79` — the same selection byte the
+scenario-unlock work writes.
