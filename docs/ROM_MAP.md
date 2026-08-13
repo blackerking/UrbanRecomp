@@ -1304,3 +1304,48 @@ Bits 0 (`03:bbb9`) and 1 (`03:bc0b`) remain unattributed, and the flood is out
 of the running for both. Remaining candidates are fire, the Las Vegas UFO, and
 the plane crash — the last of which cannot fire without a plane, so it may
 never appear in a recording at all.
+
+
+## Disaster attributions, settled in play
+
+All six arms of the `$0197` ladder are now identified, by adding the triggers
+to the F10 menu and firing each one in a real session:
+
+| bit | handler | disaster |
+|---|---|---|
+| 0 | `03:bbb9` | **fire** |
+| 1 | `03:bc0b` | **flood** |
+| 2 | `03:b9cd` | **plane crash** |
+| 3 | `03:b9db` | **tornado** |
+| 4 | `03:baf5` | **earthquake** |
+| 5 | `03:ba47` | **monster** |
+
+### Three corrections this forces
+
+**Bit 2 is the plane crash, not the nuclear meltdown, so `$0a8d` counts
+airports.** The earlier reading was built on a single coincidence: `$0a8d` was
+0 in the Boston state and the plants had been deleted there, so the guard
+`LDA $0a8d ; BEQ` looked like a nuclear-plant check. That state had no airport
+either. One save state agreeing with a hypothesis is not evidence for it when
+another variable explains it equally well, and the guard is real — the arm
+needs an airport to have anything to crash. `03:ac08 INC $0a8d` is where one
+is built.
+
+**The flood *is* in the ladder — bit 1.** An earlier section concluded it was
+not, from a session where it fired but lit no arm exclusive to it. That
+reasoning was sound but the premise was thin: bit 1 shows 60 of 148 bytes in
+three sessions of four, which reads as "not disaster-specific" only if floods
+are rare. They are not — the arm was running in most sessions because floods
+kept happening. The spread-then-recede behaviour is still real, but it is what
+the handler *does* after being dispatched, not evidence against dispatch.
+
+**Bit 0 is fire, as the tile-property reading suggested.** `03:bbb9` requires
+its target to carry bit 2 in the per-tile table at `$84eb`, and the
+"flammable" guess was right. This is the one inference that survived, and it
+was flagged as an inference at the time.
+
+### What still holds
+
+The cell-pattern rewriter at `03:a553` remains shared demolition machinery,
+not per-disaster code — that conclusion came from writer attribution rather
+than from guessing, and nothing here disturbs it.

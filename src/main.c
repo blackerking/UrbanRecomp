@@ -1412,7 +1412,12 @@ static void apply_mouse_delta(int dx, int dy) {
  * persistence (all of these already persist their own way, e.g. save
  * states, or are meant to be session-only toggles like the cheats). */
 
-typedef enum { kSettingBool, kSettingBit, kSettingAction, kSettingCycle } SettingKind;
+/* kSettingHeader is a non-interactive section label. It carries no field and
+ * no action; navigation skips over it so Up/Down still lands only on real
+ * rows. Sections exist because the list grew past the point where a flat
+ * column of twenty-odd entries reads as one undifferentiated block. */
+typedef enum { kSettingBool, kSettingBit, kSettingAction, kSettingCycle,
+               kSettingHeader } SettingKind;
 
 typedef struct {
   const char *label;
@@ -1426,6 +1431,7 @@ typedef struct {
 
 static bool setting_get(const SettingDesc *d) {
   switch (d->kind) {
+    case kSettingHeader: return false;
     case kSettingBool: return *(bool *)d->field;
     case kSettingBit:  return (*(uint8_t *)d->field & d->mask) != 0;
     default: return false;
@@ -1434,6 +1440,7 @@ static bool setting_get(const SettingDesc *d) {
 
 static void setting_activate(SettingDesc *d) {
   switch (d->kind) {
+    case kSettingHeader: break;
     case kSettingBool: *(bool *)d->field = !*(bool *)d->field; break;
     case kSettingBit:  *(uint8_t *)d->field ^= d->mask; break;
     case kSettingAction: if (d->action) d->action(); break;
@@ -1478,9 +1485,9 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
   fprintf(stderr, "[menu] set $0197 bit %u (%s) -> $0197=%02x, frame %llu\n",
           bit, what, g_ram[0x0197], (unsigned long long)s_frames);
 }
-static void menu_trigger_bit0(void) { trigger_disaster_bit(0, "unidentified"); }
-static void menu_trigger_bit1(void) { trigger_disaster_bit(1, "unidentified"); }
-static void menu_trigger_meltdown(void) { trigger_disaster_bit(2, "meltdown"); }
+static void menu_trigger_fire(void)  { trigger_disaster_bit(0, "fire"); }
+static void menu_trigger_flood(void) { trigger_disaster_bit(1, "flood"); }
+static void menu_trigger_plane(void) { trigger_disaster_bit(2, "plane crash"); }
 static void menu_trigger_tornado(void) { trigger_disaster_bit(3, "tornado"); }
 static void menu_trigger_quake(void) { trigger_disaster_bit(4, "earthquake"); }
 static void menu_trigger_monster(void) { trigger_disaster_bit(5, "monster"); }
@@ -1504,6 +1511,7 @@ static SettingDesc s_settings[] = {
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
+  { "CHEATS",                kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
   { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL, NULL, 0 },
@@ -1512,13 +1520,15 @@ static SettingDesc s_settings[] = {
     kPopOverrides, (int)(sizeof(kPopOverrides) / sizeof(kPopOverrides[0])) },
   { "SET CLASS",             kSettingCycle, &s_class_override,      0,    NULL,
     kClassOverrides, (int)(sizeof(kClassOverrides) / sizeof(kClassOverrides[0])) },
-  { "TRIG TORNADO",          kSettingAction, NULL, 0, menu_trigger_tornado,  NULL, 0 },
-  { "TRIG QUAKE",            kSettingAction, NULL, 0, menu_trigger_quake,    NULL, 0 },
-  { "TRIG MONSTER",          kSettingAction, NULL, 0, menu_trigger_monster,  NULL, 0 },
-  { "TRIG MELTDOWN",         kSettingAction, NULL, 0, menu_trigger_meltdown, NULL, 0 },
-  { "TRIG BIT 0",            kSettingAction, NULL, 0, menu_trigger_bit0,     NULL, 0 },
-  { "TRIG BIT 1",            kSettingAction, NULL, 0, menu_trigger_bit1,     NULL, 0 },
   { "CLR MILESTONE",         kSettingAction, NULL, 0, menu_action_clear_milestones, NULL, 0 },
+  { "DISASTER TRIGGER",      kSettingHeader, NULL, 0, NULL, NULL, 0 },
+  { "FIRE",                  kSettingAction, NULL, 0, menu_trigger_fire,     NULL, 0 },
+  { "FLOOD",                 kSettingAction, NULL, 0, menu_trigger_flood,    NULL, 0 },
+  { "PLANE CRASH",           kSettingAction, NULL, 0, menu_trigger_plane,    NULL, 0 },
+  { "TORNADO",               kSettingAction, NULL, 0, menu_trigger_tornado,  NULL, 0 },
+  { "EARTHQUAKE",            kSettingAction, NULL, 0, menu_trigger_quake,    NULL, 0 },
+  { "MONSTER",               kSettingAction, NULL, 0, menu_trigger_monster,  NULL, 0 },
+  { "STATE",                 kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1, NULL, 0 },
   { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1, NULL, 0 },
 };
@@ -1630,8 +1640,18 @@ static void render_settings_menu(SDL_Renderer *renderer) {
   for (size_t i = 0; i < kSettingCount; i++) {
     SettingDesc *d = &s_settings[i];
     bool selected = ((int)i == s_menu_selected);
+    bool header = (d->kind == kSettingHeader);
+    if (header) {
+      /* Section labels sit flush left in a dimmer grey; the rows under them
+       * are indented, so the grouping is visible without needing rules or a
+       * second font. */
+      SDL_SetRenderDrawColor(renderer, 150, 150, 255, 255);
+      draw_text(renderer, menu_x + pad, ty, px, d->label);
+      ty += line_h;
+      continue;
+    }
     SDL_SetRenderDrawColor(renderer, 255, selected ? 255 : 255, selected ? 0 : 255, 255);
-    draw_text(renderer, menu_x + pad, ty, px, d->label);
+    draw_text(renderer, menu_x + pad + 4 * px, ty, px, d->label);
     if (d->kind != kSettingAction) {
       char numbuf[16];
       const char *val;
@@ -1647,7 +1667,7 @@ static void render_settings_menu(SDL_Renderer *renderer) {
         val = setting_get(d) ? "ON" : "OFF";
       }
       int label_w = text_width(px, d->label);
-      draw_text(renderer, menu_x + pad + label_w + 8 * px, ty, px, val);
+      draw_text(renderer, menu_x + pad + 4 * px + label_w + 8 * px, ty, px, val);
     }
     ty += line_h;
   }
@@ -2212,10 +2232,19 @@ int main(int argc, char **argv) {
       if (s_menu_open && ev.type == SDL_KEYDOWN) {
         switch (ev.key.keysym.scancode) {
           case SDL_SCANCODE_UP:
-            s_menu_selected = (s_menu_selected - 1 + (int)kSettingCount) % (int)kSettingCount;
+            /* Step until a non-header lands under the cursor. Bounded by
+             * kSettingCount so an all-header table cannot spin forever. */
+            for (size_t n = 0; n < kSettingCount; n++) {
+              s_menu_selected =
+                  (s_menu_selected - 1 + (int)kSettingCount) % (int)kSettingCount;
+              if (s_settings[s_menu_selected].kind != kSettingHeader) break;
+            }
             break;
           case SDL_SCANCODE_DOWN:
-            s_menu_selected = (s_menu_selected + 1) % (int)kSettingCount;
+            for (size_t n = 0; n < kSettingCount; n++) {
+              s_menu_selected = (s_menu_selected + 1) % (int)kSettingCount;
+              if (s_settings[s_menu_selected].kind != kSettingHeader) break;
+            }
             break;
           case SDL_SCANCODE_RETURN:
           case SDL_SCANCODE_LEFT:
