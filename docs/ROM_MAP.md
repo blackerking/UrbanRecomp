@@ -428,3 +428,131 @@ not just inferred from the option table's ordering.
 - **Widescreen** (`docs/PLAN_widescreen.md`): scoped, not implemented --
   the shared engine already has the rendering machinery; needs SimCity-
   specific BG-layer identification and visual verification.
+
+## Simulation tick, calendar, seasons, population and the annual budget
+
+Recovered with `tools/dis_mx.py` (width-tracking disassembly cross-checked
+against the coverage bitmap) plus `SC_WRAM_MAP` write-attribution on a save
+state whose city is actually running. Every listing below is fully
+`*`-marked — i.e. every instruction quoted was executed in a recorded
+session — and no operand byte is marked executed, so the widths are the ones
+the CPU used.
+
+### The tick routine, `03:8000`
+
+Entered with `SEP #$20 ; REP #$10`, then `LDA #$03 ; PHA ; PLB` to put DB=3.
+It calls a fixed pipeline (`$90a7`, `$c474`, `$b84b`, `$88b4`, `$894c`,
+`$821d`, `$8297`, `$addf`) and then advances time:
+
+```
+03:8026  INC $0b51                  ; tick counter
+03:8029  LDA $0dc7 ; CLC ; ADC $0dc5 ; STA $0dc7
+03:8033  LDA $0b51 ; AND #$0003 ; BNE $80b0     ; every 4th tick only:
+03:803b  INC $0b55                  ; month
+03:803e  LDA $0b55 ; CMP #$000d ; BNE $804f
+03:8046  LDA #$0001 ; STA $0b55     ; month wraps 13 -> 1
+03:804c  INC $0b53                  ; year
+```
+
+| address | meaning |
+|---|---|
+| `$0b51` | tick counter. Measured at **200 frames per tick** |
+| `$0b55` | month, 1..12 |
+| `$0b53` | year (1902/1904/1905/1991/… matching the per-scenario seed at `03:ced9`) |
+| `$0dc7` | accumulator, `+= $0dc5` every tick |
+
+So **4 ticks = 1 month**, **12 months = 1 year**, and a game year is roughly
+9,600 frames. Verified by replaying savestate 5 for 9,000 frames: tick
+195 → 240 (45 ticks) with the year rolling 1904 → 1905.
+
+`$0b53 - 10` is stored to `$0da9` and `$0b55 - 1` to `$0dad` (display
+forms), and in month 1 also `$0b53 - 120` to `$0dab`.
+
+### Seasons: two month-indexed tables at `03:8160` and `03:816d`
+
+```
+03:8090  LDY $0b55
+03:8093  SEP #$20
+03:8095  LDA $8160,Y ; BEQ $80b0        ; gate: only on a season boundary
+03:809a  LDA $816d,Y ; CMP $0b4d ; BEQ $80b0
+03:80a2  STA $0b4d                      ; new season
+03:80a7  LDA #$0001 ; STA $0b4b         ; "season changed" flag
+03:80ad  STZ $0b4f
+```
+
+Both tables are bytes indexed directly by month (index 0 unused):
+
+```
+03:8160 gate    00 00 00 01 00 00 01 00 00 01 00 00 01 03
+03:816d season  03 03 03 00 00 00 01 01 01 02 02 02 03 03
+```
+
+The gate is nonzero only at months **3, 6, 9 and 12**, and `$0b4d` becomes
+0, 1, 2, 3 there. So the seasons are Mar–May = 0, Jun–Aug = 1, Sep–Nov = 2,
+Dec–Feb = 3. Confirmed dynamically: over 9,000 frames `$0b4d` was written
+exactly **4 times**, all from `03:80a5`.
+
+### Population, `03:8196`
+
+```
+03:81a3  LDA $0b8f ; CLC ; ADC $0b93
+03:81aa  ASL A ; ASL A ; ASL A          ; x8
+03:81ad  ADC $0b8b
+03:81b0  STA $00
+03:81b2  LDA #$0014 ; STA $02           ; x20
+03:81b7  JSR $a2f5  [00 02 00]          ; 16x16 -> 32 multiply, inline args
+03:81bd  LDA $00 ; STA $0ba5            ; population, low word
+03:81c2  LDA $02 ; STA $0ba7            ; population, high word
+03:81c7  $0de3:$0de5 = population - $0bcd:$0bcf     ; change since last
+```
+
+**`population = (($0b8f + $0b93) * 8 + $0b8b) * 20`**, held as a 32-bit
+value in `$0ba5` (low) / `$0ba7` (high). `$0b8b`, `$0b8f` and `$0b93` are
+three zone tallies; which zone each one counts is not yet established. The
+`* 8` weighting of two of them against the third, and the final `* 20`
+residents-per-unit, are the recognisable shape.
+
+`SC_WRAM_MAP` attributes the two stores to `03:81BF` / `03:81C4`, written 45
+times in 45 ticks — population is recomputed every tick.
+
+### The annual budget, `03:8df1`
+
+Called from the tick **only when `$0b55 == 1`** (`03:8087`), i.e. once per
+game year.
+
+```
+03:8dfe  STZ $0bc1
+03:8e01  LDA $0dc3 ; BEQ $8e07 ; RTS    ; re-entrancy guard
+...
+03:8ec8  LDA #$0001 ; STA $0dc3
+03:8ece  LDA $0dc3 ; BNE $8ece          ; spin until the UI clears it
+03:8ed6  LDY $0b1d ; BEQ $8ee1
+03:8edb  DEC $0b1d ; LDA #$01f4         ; 500 charged while $0b1d counts down
+03:8ee2  ADC $0dcf ; ADC $0dd1 ; ADC $0dcd
+03:8eeb  STA $00                        ; $00 = total outgoings
+03:8eed  LDA $0dc9 ; CLC ; ADC $0dd9 ; SEC ; SBC $00
+03:8ef7  STA $0bc1                      ; net balance for the year
+03:8efa  treasury($0b9d:$0b9f) += $0dc9:$0dcb, += $0dd9, -= $00
+03:8f27  LDA $0b9d ; CMP #$423f ; LDA $0bff ; SBC #$000f ; BCC $8f41
+03:8f35  clamp to $000F423F
+```
+
+| address | meaning |
+|---|---|
+| `$0b9d` / `$0b9f` | **treasury, 32-bit**, clamped to `$000F423F` = **999,999** |
+| `$0dc9` / `$0dcb` | annual income, 32-bit |
+| `$0dd9` | further income term, added separately |
+| `$0dcd`, `$0dcf`, `$0dd1` | three outgoing line items |
+| `$0bc1` | net balance for the year |
+| `$0dc3` | budget-dialog busy flag; set to 1, then spun on until the UI clears it |
+| `$0b1d` | counts down; while nonzero, **500 per year** is added to outgoings |
+| `$0dd5`, `$0dd7` | derived stats, each clamped to `#$270f` = 9999 |
+
+Three outgoing line items against one tax income is the shape of the game's
+budget screen. **`$0b1d` and its 500/year charge look like loan repayment
+and want confirming against actual play** rather than asserted from the code.
+
+The `$0dc3` spin at `03:8ece` also explains why the treasury never moves in
+an unattended replay: the routine parks there until the budget dialog is
+dismissed, so a headless run never reaches the arithmetic. `$0b9d` was
+written zero times across a full simulated year.
