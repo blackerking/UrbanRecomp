@@ -776,6 +776,52 @@ The three outgoing line items are written by **`02:a65f`, `02:a665` and
 automatic path. So bank 02 holds the funding allocator, and `$0dc3` was
 cleared from `01:9461` as predicted.
 
+### The loan instalment, verified
+
+A second state — December 1903, auto budget on, **loan outstanding** — closes
+the last term. Replaying it across the year rollover:
+
+| term | address | value |
+|---|---|---|
+| tax income | `$0dc9` | 604 |
+| gift income | `$0dd9` | 0 |
+| outgoings | `$0dcd`/`$0dcf`/`$0dd1` | 88 + 100 + 0 = 188 |
+| loan instalment | — | 500 |
+| net | `$0bc1` | `$FFAC` = **-84** |
+| treasury | `$0b9d`/`$0b9f` | 10196 -> **10112** |
+| loan counter | `$0b1d` | 21 -> **20** |
+
+`604 + 0 - 188 - 500 = -84`. `$0b1d` was written exactly once, from
+`03:8EDE` — the `DEC $0b1d` at `03:8edb` — so one instalment is charged and
+one repayment retired per year, as read.
+
+The complete annual equation is therefore
+
+```
+treasury += (tax + gift) - (out1 + out2 + out3) - (500 if $0b1d != 0)
+$0b1d    -= 1 while nonzero
+```
+
+with the treasury then clamped to `$000F423F` = 999,999.
+
+### `$0193` — the game speed
+
+The third settings word, edited by UI page 0 (`01:a886`). Two save states
+identical but for the speed setting differ in exactly this byte:
+
+| in-game speed | `$0193` |
+|---|---|
+| 3/3 | 0 |
+| 1/3 | 2 |
+
+so the field counts *down* from fastest; 2/3 = 1 and the menu's 0/3 = 3 follow
+by implication but were not captured. `$79`, the menu selection byte, mirrors
+it while the page is open.
+
+Both states also tick **zero times in 2,400 frames**, which confirms
+separately that the modal handler pauses the simulation while a settings page
+is open — the `COP`/poll loop at `01:a886` never returns to the tick.
+
 ## The `$01df` UI state machine — five menu handlers
 
 `$01df` selects through two parallel tables, `01:9d1a` (called) and
