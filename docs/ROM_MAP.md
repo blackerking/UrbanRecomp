@@ -1067,3 +1067,54 @@ looked like it would fall out of `JSR $c42a`, but that is the entity
 allocator, and `03:be04` is an event post. Neither touches the APU directly.
 The sound most likely follows from the entity or the event downstream rather
 than from the step, and is not established here.
+
+## The real disaster dispatcher: `03:b8ae` on `$0197`
+
+Not `$0199`. `03:b8ae` is a six-arm ladder over **`$0197`**, each arm calling a
+handler and then masking its own bit off:
+
+| bit | mask | handler | clears with |
+|---|---|---|---|
+| 0 | `$0001` | `03:bbb9` | `$fe` |
+| 1 | `$0002` | `03:bc0b` | `$fd` |
+| 2 | `$0004` | `03:b9cd` | `$fb` |
+| 3 | `$0008` | `03:b9db` | `$f7` |
+| 4 | `$0010` | `03:baf5` | `$ef` |
+| 5 | `$0020` | `03:ba47` | `$df` |
+
+```
+03:b8ae  LDA $0197 ; BEQ $b916          ; nothing pending -> ordinary path
+03:b8b3  AND #$0001 ; BEQ ; JSR $bbb9 ; LDA #$00fe ; BRA $b90e
+         ... one arm per bit ...
+03:b90e  AND $0197 ; STA $0197          ; clear the bit just serviced
+```
+
+**`$0197` is also the third settings word** — the page `01:aa39` renders. That
+page is the disaster-selection menu: choosing a disaster sets its bit, and
+this ladder fires the handler and clears it. An earlier note called `$0197` a
+"two-bit field" because `01:aa3b` shifts it left twice before `XBA`; that was
+wrong. Two shifts then `XBA` lifts **six** bits into the high byte, exactly as
+four shifts lift the four option bits of `$0195`.
+
+### Which are attributed, and how much is still dark
+
+Per-handler coverage over nine recorded sessions, with the two sessions that
+deliberately ran one disaster each broken out:
+
+| bit | handler | body executed | tornado session | monster session |
+|---|---|---|---|---|
+| 0 | `03:bbb9` | 31 / 82 | — | — |
+| 1 | `03:bc0b` | 4 / 8 | — | 4 |
+| 2 | `03:b9cd` | 4 / 14 | — | — |
+| 3 | `03:b9db` | 41 / 108 | **41** | — |
+| 4 | `03:baf5` | 47 / 117 | — | — |
+| 5 | `03:ba47` | 71 / 174 | 19 | **63** |
+
+So **bit 3 is the tornado and bit 5 is the monster**, attributed because those
+sessions ran one disaster deliberately. Bits 0, 2 and 4 have partial coverage
+from ordinary play — disasters fire on their own — but nothing says which is
+which. Roughly **60% of the six handlers' code has still never executed.**
+
+Attributing the rest needs one session per disaster, each triggering a single
+type, so that session's newly executed addresses name its bit the way the
+tornado and monster runs did.
