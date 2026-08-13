@@ -1386,5 +1386,23 @@ is weaker than attribution by containment — the session evidence only shows
 that it ran when the monster did, and the monster and fire were not separated
 at the time.
 
-Not rewritten above pending a session that runs fire alone with no monster
-active, which would settle it.
+### Resolved: `03:bb6a` is not fire's spread step
+
+The fire-alone session settles it, in favour of the original label. Fire was
+triggered and ran — `03:bbb9` executed — while **`03:bb6a` did not execute at
+all**, nor did the monster arm `03:ba47`:
+
+| probe | fire-alone session | ever |
+|---|---|---|
+| `03:bbb9` fire arm | **yes** | yes |
+| `03:bb6a` | **no** | yes |
+| `03:ba47` monster arm | no | yes |
+
+So `03:bb6a` is not driven by fire. It ran in the monster session and not in a
+session where fire ran without a monster, which is now a genuine dissociation
+rather than a co-occurrence. The shared type-`$0B` allocation is just both
+paths using the same damage/effect entity, which is what `$0B` appearing at
+two call sites meant all along.
+
+The doubt was worth raising — the original attribution was by difference and
+fire had never been isolated — but the label stands.
