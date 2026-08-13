@@ -1406,3 +1406,44 @@ two call sites meant all along.
 
 The doubt was worth raising — the original attribution was by difference and
 fire had never been isolated — but the label stands.
+
+## The Las Vegas UFO
+
+Captured with three save states bracketing an attack — before, during, and at
+the popup — in a confirmed Las Vegas run (`$0040` = 6, year 2097).
+
+**It is not a `$0197` disaster.** `$0197` reads `$0000` in all three states,
+so the six-arm ladder is not involved, which is consistent with all six of its
+arms already being accounted for.
+
+**It is entity type `$14`.** Reading the `$0ced` table (10 slots of 6 bytes,
+type in the first word) across the three states:
+
+| state | slot 0 | slot 1 |
+|---|---|---|
+| before | `$0000` | free |
+| during | `$0000` | free |
+| **popup** | `$0000` | **`$0014`** |
+
+and `03:bd34` — the only `LDA #$0014 ; JSR $c42a` in the bank — executed in
+that session:
+
+```
+03:bd2b  STZ $0af1
+03:bd2e  LDA #$0030 ; JSR $be04     ; post event $30
+03:bd34  LDA #$0014 ; JSR $c42a     ; allocate entity type $14
+03:bd3a  RTS
+```
+
+So the attack is an event post plus an entity allocation, the same shape the
+monster and earthquake arms use, but reached from outside the ladder. No
+`JSR`/`JSL` anywhere in the ROM targets `03:bd00-bd3a`, so `03:bd2b` is
+entered by fall-through or a branch from earlier in the routine; that entry
+point is not yet identified.
+
+**Worth noting: the session executed zero first-time addresses.** The UFO path
+was already covered by ordinary play in earlier recordings — it had simply
+never been *attributed*. That is the same pattern as the earthquake session,
+and it is the reason coverage growth stopped being a useful signal several
+sessions ago: what is left is naming code that already runs, not finding code
+that does not.
