@@ -149,15 +149,20 @@ month), the season tables at `03:8160`/`03:816d`, the population formula
 `(($0b8f + $0b93) * 8 + $0b8b) * 20`, and the annual budget at `03:8df1`
 with the treasury clamped to 999,999.
 
-Two follow-ups it raises:
+Both follow-ups it raised are now closed. The zone tallies are
+`$0b8b` = residential, `$0b93` = commercial, `$0b8f` = industrial, settled by
+the class bases in the three helpers (153 / 324 / 513) and confirmed by their
+relative magnitudes in a real city. `$0b1d` is the bank loan, confirmed from
+play, charging 500 a year.
 
-- **Which zone does each of `$0b8b`, `$0b8f`, `$0b93` count?** Two are
-  weighted `*8` against the third. Cheap to settle: build only one zone type
-  and watch which counter moves.
-- **Is `$0b1d` the loan?** While nonzero it decrements and charges 500 per
-  year. That reads like loan repayment, but it is inferred from code shape
-  and should be confirmed by taking a loan in play — the user has already
-  done so once.
+Gift-building income is also mapped: `03:ae61` pays 300/year for tile `$02fe`,
+200 for `$02ec`, and 100 for each of `$02f5`, `$0319`, `$032b`, `$0334`,
+`$033d`, `$034f`, accumulating into `$0ddd` -> `$0dd9`.
+
+**Still open: which building is which tile index.** Eight tile IDs pay out and
+none is identified. Placing each gift in play and watching `$0c71` and `$0ddd`
+would name them in one session — the casino is known to be one of the six
+100/year tiles.
 
 ### C5. Smaller open threads
 

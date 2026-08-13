@@ -507,10 +507,42 @@ exactly **4 times**, all from `03:80a5`.
 ```
 
 **`population = (($0b8f + $0b93) * 8 + $0b8b) * 20`**, held as a 32-bit
-value in `$0ba5` (low) / `$0ba7` (high). `$0b8b`, `$0b8f` and `$0b93` are
-three zone tallies; which zone each one counts is not yet established. The
-`* 8` weighting of two of them against the third, and the final `* 20`
-residents-per-unit, are the recognisable shape.
+value in `$0ba5` (low) / `$0ba7` (high).
+
+### Which zone each tally counts
+
+Three sibling accumulators at `03:924f`, `03:92fb`, `03:93b1` each call a
+helper that turns the tile index in `$0b89` into a capacity contribution.
+The helpers differ only in the class base they subtract:
+
+| helper | tile base | cycle | returns | tally |
+|---|---|---|---|---|
+| `03:842f` | `#$0099` = 153 | `#$24` = 36 | `Y * 8` | `$0b8b` |
+| `03:8456` | `#$0144` = 324 | `#$2d` = 45 | `Y` | `$0b93` |
+| `03:847a` | `#$0201` = 513 | `#$24` = 36 | `Y` | `$0b8f` |
+
+Each subtracts its base, returns 0 if the tile is below it, reduces modulo
+the cycle and then divides by 9 — i.e. 4 development levels of 9 tiles for
+residential and industrial, 5 for commercial.
+
+In tile-index order (153 < 324 < 513) that is **residential, commercial,
+industrial**:
+
+| tally | zone |
+|---|---|
+| `$0b8b` | **residential** |
+| `$0b93` | **commercial** |
+| `$0b8f` | **industrial** |
+
+Two independent checks agree. The residential helper applies its own `* 8`
+where the other two get it in the population formula, so all three end up in
+the same units. And in a real city residential dominates: savestate 2 holds
+`$0b8b` = 2718 against `$0b93` = 102 and `$0b8f` = 225.
+
+The formula was verified against save states directly — exact on every state
+where the tick has actually run (s2: 106,680; s6: 15,320). States that differ
+are scenarios still holding the starting population seeded from `03:cef9` /
+`03:cf09`, before the first recomputation.
 
 `SC_WRAM_MAP` attributes the two stores to `03:81BF` / `03:81C4`, written 45
 times in 45 ticks — population is recomputed every tick.
@@ -549,8 +581,37 @@ game year.
 | `$0dd5`, `$0dd7` | derived stats, each clamped to `#$270f` = 9999 |
 
 Three outgoing line items against one tax income is the shape of the game's
-budget screen. **`$0b1d` and its 500/year charge look like loan repayment
-and want confirming against actual play** rather than asserted from the code.
+budget screen. **`$0b1d` is the bank loan** — confirmed by the user from
+play — so `$0b1d` is the number of annual repayments outstanding and 500 is
+the yearly instalment.
+
+### Gift-building income: `03:ae61`, `$0ddd` -> `$0dd9`
+
+`$0dd9`, the income term added to the treasury separately from taxes, is a
+straight copy of `$0ddd` at `03:8e95`. `$0ddd` is zeroed at `03:8279` and
+accumulated one building at a time by `03:ae61`, which is a flat comparison
+ladder on the tile index:
+
+```
+03:ae61  INC $0c71                       ; count of paying buildings
+03:ae64  LDY #$012c ; CMP #$02fe ; BEQ   ; 300/year
+03:ae6c  LDY #$00c8 ; CMP #$02ec ; BEQ   ; 200/year
+03:ae74  LDY #$0064                      ; 100/year for any of:
+         CMP #$02f5 / #$034f / #$033d / #$0334 / #$032b / #$0319
+03:ae95  LDY #$0000                      ; everything else pays nothing
+03:ae98  $0ddd += Y
+```
+
+| payout per year | tile indices |
+|---|---|
+| 300 | `$02fe` |
+| 200 | `$02ec` |
+| **100** | `$02f5`, `$0319`, `$032b`, `$0334`, `$033d`, `$034f` |
+
+This matches the reported behaviour that **a casino pays $100 per year**, so
+the casino is one of the six tiles in the 100 group. Which building each of
+the eight tile indices is has not been established — that wants placing them
+in play and watching `$0c71`, not guessing from the ROM.
 
 The `$0dc3` spin at `03:8ece` also explains why the treasury never moves in
 an unattended replay: the routine parks there until the budget dialog is
