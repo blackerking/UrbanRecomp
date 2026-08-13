@@ -164,7 +164,52 @@ none is identified. Placing each gift in play and watching `$0c71` and `$0ddd`
 would name them in one session — the casino is known to be one of the six
 100/year tiles.
 
-### C5. Smaller open threads
+### C5. Disasters — mapped statically, never once executed
+
+Prepared ahead of a session that deliberately triggers them.
+
+`03:b84b` is the disaster step, called from the tick pipeline at `03:8010`.
+It gates on the No-Disasters cheat and then on `$0199`:
+
+```
+03:b858  LDA $0425 ; AND #$0001 ; BEQ $b863    ; No-Disasters bit
+03:b863  LDA $003e ; CMP #$0003 ; BNE $b86e ; JSR $b96f
+03:b86e  LDA $0199 ; BEQ $b8a1                 ; nothing pending -> skip
+03:b873  AND #$0001 ; BEQ $b87d ; LDA #$00fe ; BRA $b89b
+03:b87d  LDA $0199 ; AND #$0002 ; BEQ $b88d ; JSR $b9db ; LDA #$00fd
+03:b88d  LDA $0199 ; AND #$0004 ; BEQ $b8a1 ; JSR $ba47 ; LDA #$00fb
+03:b89b  ...  STA $0199                        ; clear the bit just handled
+```
+
+**`$0199` is a pending-disaster bitfield**, one bit per type, and each arm
+masks its own bit off with `$fe` / `$fd` / `$fb` after running. Handlers:
+bit 1 -> `03:b9db`, bit 2 -> `03:ba47`; bit 0 has no call in the dispatch
+itself. `$0199` is cleared at `03:c775` and set at `03:ca5e`.
+
+How much is unexplored, against the union of six recorded sessions:
+
+| region | executed |
+|---|---|
+| `03:b871-b8a1` dispatch body | **1 / 48 bytes** |
+| `03:b96f` | 36 / 108 |
+| `03:b9db` (bit 1) | 41 / 108 |
+| `03:ba47` (bit 2) | 73 / 185 |
+| whole `03:b871-bb00` | 208 / 655 |
+
+The dispatch body has essentially never run, so no disaster has ever fired in
+any recording. This is the largest single behavioural gap left.
+
+To make the session pay: `SC_ADDR_TRACE=03:b873` catches the first dispatch
+with a PC history, and `SC_WRAM_MAP` will attribute whatever the handlers
+write. Watching `$0199` identifies which bit each disaster type sets, and
+`03:ca5e` is where they are raised.
+
+Note the coverage has otherwise saturated — two further play sessions added
+only 52 new executed addresses (31,487 -> 31,539, +0.17%) and moved none of
+the frontier percentages. Ordinary play is exhausted; the remaining gaps are
+paths like this one.
+
+### C6. Smaller open threads
 
 - Moving-object entity identities (the sprite/vehicle table).
 - What `03:9035`'s 6-slot window smooths.
