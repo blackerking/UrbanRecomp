@@ -617,3 +617,51 @@ The `$0dc3` spin at `03:8ece` also explains why the treasury never moves in
 an unattended replay: the routine parks there until the budget dialog is
 dismissed, so a headless run never reaches the arithmetic. `$0b9d` was
 written zero times across a full simulated year.
+
+## The `$c5` reason-code dispatch, `01:897f`
+
+```
+01:897f  LDA $c5 ; REP #$10 ; ASL A ; TAX ; JSR ($88ef,X)
+```
+
+12 word entries at `01:88ef`, bounded by `01:8907` being its own node. What
+each handler *is* is only partly established; the table below separates what
+was read from the code from what is confirmed.
+
+| `$c5` | handler | what it does |
+|---|---|---|
+| 0 | `01:8d25` | bare `RTS` — **idle / no-op state** |
+| 1 | `01:8d26` | early-out on `$01f5`, then `JSR $8aa8` and `$01c1` — cursor sprite + direction dispatch (previously established) |
+| 2 | `01:8dce` | branches on `$01d7`, clears `$01ff` |
+| 3 | `01:8e28` | clears `$0249`, then a second dispatch on `$020d` (`ASL A ; TAX`) |
+| 4 | `01:8e3d` | `JSR $8e9b` with a carry result, `JSR $b42a`, also reads `$020d` |
+| 5 | `01:9d6b` | `JSR $b143`, then `LDA #$0000 ; COP #$00` — **waits for vblank** via COP service 0 |
+| 6 | `01:9f2d` | clears `$0379`, branches on `$d7 == 2` |
+| 7 | `01:c529` | early-out on `$01f5`, then reads `$c9` |
+| 8 | `01:93a8` | copies `$0111` -> `$0117` and `$03fa` -> `$03fc` (double-buffered UI state) |
+| 9 | `01:93a4` | `JSR $a640` then `RTS` — a one-line wrapper that falls into 8's neighbourhood |
+| 10 | `01:940f` | **the annual budget dialog** — see below |
+| 11 | `01:94e6` | `JSR $9790`, `JSR $9c9b`, clears `$0383` |
+
+`$020d` is a sub-selector shared by reasons 3 and 4.
+
+### Reason 10 closes the budget handshake
+
+The annual budget at `03:8ec8` sets `$0dc3 = 1` and then spins:
+
+```
+03:8ec8  LDA #$0001 ; STA $0dc3
+03:8ece  LDA $0dc3 ; BNE $8ece      ; parks here until the UI clears it
+```
+
+Reason code 10 is the other half. `01:9419` reads `$0dc3` and tests its sign
+(`BPL`), gates on `$d7`, `$0195` and `$01d7`, and on the accept path clears it:
+
+```
+01:945e  STZ $0dc3
+```
+
+`STZ $0dc3` also appears at `02:a311`, `02:a3e5` and `03:c7ba`; `03:8ebd` and
+`03:8ecb` are the two stores that raise it. This is why the treasury never
+moves in an unattended replay — nothing dismisses the dialog, so `03:8ece`
+never releases and the arithmetic after it is never reached.
