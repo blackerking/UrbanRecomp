@@ -53,6 +53,7 @@ variant, while the target address unions every caller.
 
     python tools/mx_exit_propose.py <mx_bitmap> [coverage_bitmap] [manifest]
 """
+import bisect
 import collections
 import json
 import re
@@ -118,12 +119,67 @@ def main():
     # contradictory split rather than a wrong directive.
     entries = sorted({int(k.split(':')[0], 16) for k in nodes})
 
+    def extent_of(addr):
+        """[addr, next entry above addr). Works for any address, not just an
+        entry: a routine can jump into the middle of a region that has no node
+        of its own, and that stretch still runs until the next known entry."""
+        i = bisect.bisect_right(entries, addr)
+        end = entries[i] - 1 if i < len(entries) else addr
+        if (end >> 16) != (addr >> 16):            # next entry is another bank
+            end = (addr & 0xFF0000) | 0xFFFF
+        return addr, end
+
+    def jump_targets(lo, hi):
+        """Executed unconditional direct jumps leaving [lo, hi]."""
+        out = set()
+        for pc in range(lo, hi + 1):
+            if pc not in executed:
+                continue
+            off = (pc >> 16) * 0x8000 + ((pc & 0xFFFF) - 0x8000)
+            if off + 4 > len(rom):
+                continue
+            op = rom[off]
+            if op == 0x4C:                                    # JMP abs
+                t = (pc & 0xFF0000) | rom[off + 1] | (rom[off + 2] << 8)
+            elif op == 0x5C:                                  # JMP long
+                t = (rom[off + 3] << 16) | rom[off + 1] | (rom[off + 2] << 8)
+            elif op == 0x80:                                  # BRA
+                d = rom[off + 1]
+                t = (pc & 0xFF0000) | ((pc + 2 + (d - 256 if d >= 128 else d)) & 0xFFFF)
+            else:
+                continue
+            if not (lo <= t <= hi):
+                out.add(t)
+        return out
+
     def body_of(target):
-        i = entries.index(target)
-        end = entries[i + 1] - 1 if i + 1 < len(entries) else target
-        if (end >> 16) != (target >> 16):          # next entry is another bank
-            end = (target & 0xFF0000) | 0xFFFF
-        return target, end
+        """Address ranges a routine can return from.
+
+        The contiguous [entry, next entry) extent is the starting point, but a
+        routine can `JMP` into a shared tail and return from there -- 02:8000
+        does exactly that at 02:803C (`JMP $824B`), exiting via 02:8374 in
+        m0x1 as well as via its own 02:8195 in m1x1. Missing that made the
+        routine look single-exit while its callers plainly returned in two
+        widths, which the conflict check caught. Following executed
+        unconditional direct jumps recovers the real exit set.
+
+        Conditional branches are deliberately not followed: they stay within
+        a routine far more often than not, and chasing them would merge
+        unrelated code. An unfollowed edge costs a rejection, never a wrong
+        directive.
+        """
+        ranges, seen, queue = [], set(), [target]
+        while queue:
+            e = queue.pop()
+            if e in seen:
+                continue
+            seen.add(e)
+            lo, hi = extent_of(e)
+            ranges.append((lo, hi))
+            for t in jump_targets(lo, hi):
+                if (t >> 16) == (target >> 16) and t not in seen:
+                    queue.append(t)
+        return ranges
 
     def exit_at_returns(target):
         """Widths recorded at the RTS/RTL instructions of the callee's body.
@@ -137,15 +193,16 @@ def main():
         """
         if target not in entries:
             return set(), 0, 0
-        lo, hi = body_of(target)
+        ranges = body_of(target)
         seen, observed, total = set(), 0, 0
         for pc in returns:
-            if lo <= pc <= hi:
-                total += 1
-                w = mx.widths(pc)
-                if w:
-                    seen.update(w)
-                    observed += 1
+            if not any(lo <= pc <= hi for lo, hi in ranges):
+                continue
+            total += 1
+            w = mx.widths(pc)
+            if w:
+                seen.update(w)
+                observed += 1
         return seen, observed, total
 
     proposals, rejected = [], []

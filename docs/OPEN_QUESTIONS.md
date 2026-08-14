@@ -673,6 +673,60 @@ explicit that broadcasting a variant-dependent exit "poisons non-default
 callers". Adding a parser for it is a small, clearly-scoped upstream change,
 and it is the natural next contribution to `mstan/snesrecomp` after #17.
 
+### F7. `02:8000` is genuinely multi-exit — and what that costs
+
+A recorded session that opened the map overlay windows reached it at last:
+`01:AB41`'s `JSL $028000` runs, the whole 167-address body executes, and the
+`RTL` at `02:8195` is measured in `m1x1`. That was supposed to be the last
+big directive — 6 nodes and 5,388 instructions.
+
+It is not emittable, and the tool refused it before anything was written:
+
+```
+CONFLICT: RTS/RTL says m1x1 but callers return in m0x1/m1x1
+```
+
+The conflict was the body bound. `body_of` assumed a routine is contiguous
+from its entry to the next entry, and `02:8000` is not: **`02:803C` is
+`JMP $824B`**, jumping into a shared tail that ends at `02:8374`, which
+returns in `m0x1`. So the routine really does exit two ways, and the caller's
+return-address widths were right all along. This is the contiguity assumption
+failing exactly as the code comment predicted — "shows up as a contradictory
+split rather than a wrong directive".
+
+`body_of` now follows executed unconditional direct jumps (`JMP`, `JML`,
+`BRA`) out of the extent, transitively. Conditional branches are deliberately
+not followed: they stay inside a routine far more often than not, and chasing
+them would merge unrelated code. An unfollowed edge costs a rejection, never a
+wrong directive. With that, `02:8000` reads 4/4 returns measured and SPLIT.
+
+**Both remaining large callees need something the cfg cannot express.**
+
+| callee | blocks | exits observed |
+|---|---|---|
+| `02:8000` | 6 nodes / 5,388 instr | `m0x1` **and** `m1x1` from a single `m0x0` entry |
+| `00:C3F9` | 4 nodes / 740 instr | `m0x0` **and** `m0x1` |
+
+Note what `02:8000` is *not*: this is not a per-entry-variant split, which
+`exit_mx_at_per_variant` would cover. One entry variant produces two exit
+widths depending on the path taken. The manifest already has a representation
+for that — `exit_mode_sets`, 184 of which the analyzer derives itself — but
+there is **no cfg directive that can declare a set**, only the single-valued
+`exit_mx_at`.
+
+So the upstream ask is now specific and evidenced: a cfg directive that
+declares a *set* of exit widths, feeding `callee_exit_mx_modes` the way
+`exit_mx_at` feeds `callee_exit_mx`. That plus the per-variant parser covers
+every remaining case in this ROM. Failing that, the SCC solver in A1 option 1
+derives both without any directive at all, which is why it keeps looking like
+the better investment.
+
+Everything else is small: `01:AC0E` (2 nodes / 44 instr), `01:AC23` (1 node /
+5 instr) and `02:8196` (1 node / 6 instr, also split on the same shared tail).
+
+State at this point: **1,375 call sites checked, 1,375 agree, 0 mismatches**,
+578 of them publishing an exit width that differs from the entry width.
+
 ### F6. `SC_FREEZE` runs must never enter an M/X measurement
 
 Trying to reach `02:8000` headlessly, the gate turned out to be explicit:
