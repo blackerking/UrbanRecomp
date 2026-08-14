@@ -896,6 +896,47 @@ hunting had been tuned for *breadth* — many short runs with varied input —
 when the missing code was gated on elapsed game time. Check what a path costs
 in frames before concluding it is unreachable.
 
+### F11. View mode closes the chain — 99.3% of executed code
+
+`01:AC23` was the last big blocker, needing its third return measured. It was
+not a coverage-luck problem: the branch that reaches it is `$01fb == 7`, the
+**View mode** entry of the UI menu, and View is locked behind `$01e7` bit 1
+(docs/ROM_MAP.md). Every automated hunt so far ran from save states where
+View was **locked** — 0, 1, 2, 7, 8 all have `$01e7 = 0`. The path was
+unreachable by construction, and roughly a hundred runs were spent on a closed
+door.
+
+Scenario states 3-6 carry `$01e7 = 0x0002` (View unlocked at init by
+`03:C687`). One session that loaded such a state and opened View captured all
+of it: `01:AAF6`, `01:AB0D`, `01:AB15`, `01:AC28`, `01:ACD0` and `01:AD03`.
+
+`01:AC23` is genuinely two-exit from one entry variant — `01:ACCF` returns
+`m0x1`, `01:AD03` returns `m0x0` — so it needs the set form:
+
+```
+exit_mx_set 01ac23 M0X0 M0X0,M0X1
+```
+
+| | before | after |
+|---|---|---|
+| AOT-eligible variants | 1,535 | **1,544** |
+| LLE-only | 91 | **84** |
+| AOT instructions | 67,283 | **73,364** |
+| **executed code inside an AOT node** | 97.7% | **99.3%** |
+
+Verified: 1,584 call sites checked, 1,584 agree, 0 mismatches (669 publishing
+an exit width that differs from the entry width); `gen_align_check` clean; 81
+framework tests pass; eleven save states byte-identical between tiers. The
+session was checked in isolation first (360/360, alignment clean) before being
+folded into the union.
+
+**What actually unblocked this was game knowledge, not tooling.** The static
+reading gave the gate (`$01e7` bit 1) but not its meaning; naming it as View
+and knowing scenarios have it from the start is what turned an unreachable
+branch into a ten-second capture. Worth remembering the next time automation
+stalls: check whether the path is *possible* from the state being driven
+before adding more runs.
+
 ### F6. `SC_FREEZE` runs must never enter an M/X measurement
 
 Trying to reach `02:8000` headlessly, the gate turned out to be explicit:
