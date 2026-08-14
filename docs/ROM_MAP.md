@@ -1540,3 +1540,47 @@ The exact edge is not established: the trace's last recorded PC before
 `03:bcc5` is `03:b195`, whose `BEQ $b19b` does not lead there, so either the
 history is not contiguous across the transition or the entry is via a path the
 14-entry buffer did not capture. Worth a longer history before asserting it.
+
+
+### `$01e7` — the View / extra-mode unlock bitfield
+
+A bitfield gating two entries of the `$01fb` UI menu. The menu index is
+computed at `01:AAEE` as `selector - 8`, giving 0-7, and two of those eight
+are locked:
+
+```
+01:AAF9  CMP #$04 ; BNE $ab08
+01:AAFE  LDA $01e7 ; AND #$01 ; BEQ $ab2d     ; index 4 needs bit 0
+01:AB08  CMP #$07 ; BNE $ab15
+01:AB0D  LDA $01e7 ; AND #$02 ; BEQ $ab2d     ; index 7 needs bit 1
+```
+
+`$ab2d` is the rejection path -- it jumps straight back to `01:AAD5`, so a
+locked entry silently does nothing.
+
+**Index 7 is the View mode** (the tilted Mode 7 map; cf. the `00:C0FB` view
+fix this host patches). Identified from play, not statically.
+
+Three ways the bit gets set, and the difference between them explains a
+surprise:
+
+| site | what |
+|---|---|
+| `01:BFF2` | `LDA $01e7 ; ORA #$02` when `$0397 == $0c` — **message/event ID 12** |
+| `01:BFD1` | `ORA #$01` when `$0397 == $1f` (31) — unlocks index 4 |
+| `03:C687` | `LDA #$0002 ; STA $01e7` — sets View outright, no condition |
+| `03:CA3B` | `STA $01e7` from SRAM `$700064,X` — the unlock persists per saved city |
+
+`$0397` is the pending message ID, queued at `03:BE04`
+(`LDY $0395 ; BNE ; STA $0397 ; INC $0395`).
+
+**So View is unlocked by the milestone *message*, not by the population
+value.** In play it arrives at 50,000 people, but cheating the population
+counter does not unlock it, because nothing queues message 12 — confirmed
+empirically: the population was cheated past the threshold and View stayed
+locked. Scenarios get it free instead, via `03:C687` setting it outright,
+which is why View is available in every scenario from the start.
+
+Measured across this repo's save states: `$01e7 = 0x0002` in savestates 3-6
+(scenarios, View unlocked), `0x0000` in 0/1/2/7/8 (practice/free play),
+`0x0001` in 9.
