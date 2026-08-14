@@ -608,10 +608,21 @@ working as designed) and 42 nodes blocked only by an unproven callee exit
 
 What stands between here and that ceiling is *coverage*, not method. The five
 bank-01 UI handlers are worth 766 instructions each and are the bulk of what
-is left; `coverage_union.bin` proves they execute during real play, but 18
-headless runs never enter them, because every preserved save state sits in
-the `$01df = 2` UI mode that does not tick. One interactive session with
-`SC_MX_BITMAP` set would finish it.
+is left. An earlier reading of this said only interactive play could reach
+them; that was wrong, and the reason is worth recording. The scripted input
+had been written with the `$4218`/`$4219` word layout, where B/Y/Select/Start
+land on bits 12-15 -- not button bits at all -- while the runner's
+`input*_currentState` takes *serial* order, `B=$0001 .. R=$0800`
+(mstan/snesrecomp#17). Those four buttons were never actually pressed, so the
+UI state machine never advanced.
+
+With correct masks, headless replay drives the UI, and `01:A97C` and
+`01:9D6B` became measurable and are now committed. They do **not** move the
+AOT share, which is the cycle behaving exactly as described: the 12 nodes
+those handlers block also call `A886`, `AA39`, `AAD5` and `AD54`, so
+publishing one of five buys nothing until all five land. It is all-or-nothing,
+which makes the upstream SCC solver the better investment than chasing the
+last four by hand.
 
 `tools/gen_align_check.py` also turned up a **pre-existing decode
 desynchronisation** in the emitted C, unrelated to the directives: a cfg

@@ -509,12 +509,25 @@ static uint8_t s_video_pixels[kVideoPitch * kVideoHeight];
  * `$4218 = SwapInputBits(input1_currentState) & 0xff; $4219 = ... >> 8`,
  * where SwapInputBits reverses all 16 bits. So bit i of input1_currentState
  * ends up at bit (15-i) of the value $4218/4219 are split from. Working
- * backwards from the real hardware $4218 (bit7=B..bit0=Right) / $4219
- * (bit7=A,6=X,5=L,4=R) layout the game actually reads, the constants below
- * are what must be set in input1_currentState -- verified empirically
- * against SimCity itself (a literal 0x1000 here reads back as "Up" at
- * $4218, not "Start", confirming the derivation). Do not "simplify" these
- * to the naive hardware bit order -- that was the original bug. */
+ * backwards from the real hardware layout the game actually reads --
+ *
+ *     $4218 (JOY1L)  bit7=A  bit6=X  bit5=L  bit4=R, bits3-0 = pad ID
+ *     $4219 (JOY1H)  bit7=B  bit6=Y  bit5=Select bit4=Start
+ *                    bit3=Up bit2=Down bit1=Left bit0=Right
+ *
+ * -- the constants below are what must be set in input1_currentState;
+ * verified empirically against SimCity itself (holding each direction moves
+ * exactly one cursor axis in the right direction: Left drives $01EB down,
+ * Right up, Up drives $01ED down, Down up). Do not "simplify" these to the
+ * naive hardware bit order -- that was the original bug.
+ *
+ * An earlier revision of this comment named the two registers the other way
+ * round ("$4218 bit7=B..bit0=Right / $4219 bit7=A,6=X,5=L,4=R"), which
+ * contradicted the enum three lines below it and is simply wrong: $4218 is
+ * the LOW byte, so it carries A/X/L/R. The enum was always right. Same class
+ * of defect as the stale keybinds.h comment corrected upstream in
+ * mstan/snesrecomp#17, and worth the same care -- a wrong comment next to
+ * right code is how the original transposition survived as long as it did. */
 enum {
   /* Serial order, LSB first -- the order the pad shifts out of $4016:
    * B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R. The runner

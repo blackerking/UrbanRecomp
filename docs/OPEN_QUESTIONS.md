@@ -230,6 +230,23 @@ Pressing B, Start, A, Select and X for six frames each changes nothing —
 `$01df` stays 2 and the tick counter never moves. So these states cannot be
 driven forward headless without knowing what input that mode expects.
 
+> **This paragraph is unsafe and should be re-tested before anything is built
+> on it.** "Pressing B, Start, A, Select and X" was almost certainly done with
+> `--input` masks taken from the `$4218`/`$4219` word layout, in which
+> B/Y/Select/Start are bits 12–15 and are **not button bits at all** — the
+> runner takes serial order, `B=$0001 … R=$0800` (mstan/snesrecomp#17, and see
+> §F3). Under the wrong masks those four presses were no-ops, so the
+> experiment could not have moved `$01df` whatever the game does.
+>
+> Re-measured with correct masks at frame 400: `$01df` is **3**, not 2, in
+> savestates 1, 2, 7 and 9, and the tick counter `$0b51` is advancing in all
+> four. On `savestate_9` any button press moves `$01df` 3 → 1. So the states
+> are neither frozen nor input-deaf, and "these states cannot be driven
+> forward headless" does not survive.
+>
+> The disaster hunt should be retried on that basis before falling back to
+> "let it burn during a recorded session" below.
+
 ### What would actually settle it
 
 The coverage bitmap records every executed address, so **no save state is
@@ -522,22 +539,39 @@ prize — 12 nodes and 766 instructions each. They are **not** unmeasurable in
 principle: `coverage_union.bin`, recorded from real interactive play, shows
 every one of them executing, with their `RTS` instructions executing too.
 
-They are unmeasurable from *this* session's recordings. 18 headless runs (a
-boot plus every preserved save state, with scripted input, some 20,000 frames
-long) reach 11,352 distinct PCs against the 31,730 in `coverage_union.bin`,
-and none of them enters those handlers — consistent with C5's finding that
-all the preserved save states sit in `$01df = 2`, a UI mode that does not
-tick and does not respond to scripted input.
+> **Corrected.** The first version of this section concluded that only an
+> interactive session could reach them, because 18 headless runs never did.
+> That was an artefact of *the runs*, not of headless replay: the scripted
+> input was written with the `$4218`/`$4219` word layout, in which
+> B/Y/Select/Start are bits 12–15 — **not button bits at all** — so those four
+> were never actually pressed and the UI state machine never advanced. The
+> runner's `input*_currentState` is the *serial* order, `B=$0001 … R=$0800`
+> (mstan/snesrecomp#17). Re-running with the correct masks reached
+> `01:A97C` immediately.
 
-**What would finish it: one interactive session with `SC_MX_BITMAP` set**,
-played through the UI states that the five handlers implement (C3). Nothing
-else is needed — the tooling, the checks and the directive path all exist and
-are exercised. Every M/X bitmap recorded so far is a strict subset of
-`coverage_union.bin`, with zero addresses outside it, so the recording is
-known to be consistent with the existing coverage; it is simply thinner.
+With correct masks, headless replay drives the UI fine: input moves `$01df`
+(on `savestate_9`, 3 → 1 on any button), and distinct PCs went 11,352 →
+14,702. Two more callees became measurable and are now committed, each
+derived independently from two disjoint halves of the recording:
 
-Failing that, option 1 in A1 — the upstream SCC solver — is the route that
-does not depend on anyone playing the right screens.
+```
+exit_mx_at 019d6b 0 0       # $c5 reason-code handler 5
+exit_mx_at 01a97c 0 0       # $01df UI handler
+```
+
+**They did not move the AOT share, and that is the SCC being an SCC.** The 12
+nodes those handlers block also call `A886`, `AA39`, `AAD5` and `AD54`, so
+publishing one of five changes nothing until all five land. The unproven set
+went 18 → 16; coverage stayed at 94.93%. It is all-or-nothing by construction.
+
+So the remaining work is coverage of the other four handlers, and it is no
+longer known to need a human at the controller — targeted input from a state
+that reaches each `$01df` mode should do it. What `01:A97C` cost was one
+correctly-masked run, not a play session.
+
+Option 1 in A1 — the upstream SCC solver — remains the route that does not
+depend on reaching every handler at all, and given that four-of-five buys
+nothing, it is looking like the better investment.
 
 ### F4. A decode desynchronisation found in the emitted C, and fixed
 
