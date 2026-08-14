@@ -82,31 +82,51 @@ Options, best first:
    directive now in the cfgs came from measurement and is re-checked after
    regeneration.
 
-### A2. `brk_at_*` is probably *correct* — confirm and close
+### A2. `brk_at_*` is correct — **CLOSED**
 
-67 nodes, 638 instructions. Measured: **65 of the 67 have an executed entry
-point, but 0 of the 67 BRK sites ever executed.** That is exactly the
-signature of a genuine width refutation — real code, entered correctly,
-decoded at a width that eventually lands on a `$00` the CPU never reaches.
+67 nodes, 715 instructions. Re-measured against the full coverage union
+(32,107 executed addresses), and the picture is stronger than the earlier
+reading:
 
-So this is the poison working as designed, not a coverage bug. Worth one pass
-to confirm the two nodes with unexecuted entries, then stop treating this as
-a blocker.
-
-### A3. The last 96 executed-but-unanalyzed addresses
-
-Down from 228. Remaining regions:
-
-| region | size | note |
+| | earlier | now |
 |---|---|---|
-| `01:8988-8A3C` | 181 b | continuation past `01:8985`'s `JSR ($88ef,X)`; blocked by A1, not by table recovery |
-| `01:AD12-AD2D` | 28 b | |
-| `01:ACF4-AD03` | 16 b | |
-| `01:8E37-8E3C` | 6 b | |
-| `01:946B-946F` | 5 b | |
-| `00:805F`, `00:80B1` | 1 b each | single addresses; likely interrupt-path fragments |
+| poisoned nodes whose entry point executed | 65 of 67 | **67 of 67** |
+| BRK sites ever executed | 0 of 67 | **0 of 71** |
 
-Most of this falls out of A1 for free.
+The two nodes with unexecuted entries are covered now, so every poisoned
+node is real code that the CPU genuinely enters, and not one of the BRK
+sites the analyzer decoded is ever reached.
+
+**That much is only *consistent* with the poison being right — an
+unexercised path would look the same.** The positive proof comes from the
+operand-byte set `gen_align_check` already builds: decode every executed
+address at the width it was executed in, and the interior bytes are
+definitely operands.
+
+```
+brk sites proven to be operand bytes of a real executed instruction: 60 of 71
+brk sites with no such proof (never-executed region)               : 11
+```
+
+So for 60 of the 71 sites the `$00` the analyzer tripped over is
+**demonstrably the middle of an instruction the CPU really ran** — e.g.
+`00:C74A` is an operand byte of the instruction at `00:C748`. That is a
+misaligned decode, which is exactly what the poison exists to reject. The
+remaining 11 lie in regions with no measurement, so they are unproven in
+either direction rather than suspicious.
+
+**Stop treating this as a blocker.** The 715 instructions are the
+irreducible remainder of the static approach, not a coverage gap.
+
+### A3. Executed-but-unanalyzed addresses — **CLOSED, zero remain**
+
+228 -> 96 -> **0**. Every one of the 32,107 addresses the game is known to
+execute now falls inside an analyzed node.
+
+It did fall out of A1 for free, as predicted: the regions listed here were
+continuations past calls with unproven exits (`01:8988-8A3C` past
+`01:8985`'s `JSR ($88ef,X)`, `01:ACF4-AD03` in the View path), and
+publishing those exits pulled them into the frontier.
 
 ### A4. Upstream items already written up, not yet filed
 
