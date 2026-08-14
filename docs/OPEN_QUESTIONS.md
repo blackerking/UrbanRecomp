@@ -727,6 +727,73 @@ Everything else is small: `01:AC0E` (2 nodes / 44 instr), `01:AC23` (1 node /
 State at this point: **1,375 call sites checked, 1,375 agree, 0 mismatches**,
 578 of them publishing an exit width that differs from the entry width.
 
+### F8. `exit_mx_set` — the set-valued directive, implemented
+
+F7 ended by naming the missing piece: a cfg directive that declares a *set*
+of exit widths. It now exists, in the submodule on branch `feat-exit-mx-set`
+(commit `31c0e8a`), in both the Rust analyzer and the Python path.
+
+```
+exit_mx_set <hex_addr24> <entry MmXn> <exit MmXn>[,<exit MmXn>...]
+exit_mx_set 028000 M0X0 M0X1,M1X1      # recomp/bank02.cfg
+exit_mx_set 00c3f9 M0X0 M0X0,M0X1      # recomp/bank00.cfg
+```
+
+The decoder needed nothing: `callee_exit_mx_modes` already forks the post-call
+continuation once per exit mode and the emitter picks the live one with a
+runtime width switch. Only the *declaration* path was missing. Three places
+beyond the parser mattered, and the third is the interesting one:
+
+- `declared_exit_sets` seeds `active_sets` rather than joining
+  `declared_exit_modes`, because that map is single-valued and a set is a
+  different kind of fact, not a stronger one.
+- The round loop must not let an inferred exact fact replace a declared set.
+- **The truncation sweep** drops derived exits for any node carrying
+  `truncated_call_continuation`, guarded only by `declared_exit_modes`.
+  Without a matching `declared_exit_sets` arm, a declared set is discarded for
+  exactly the callees it exists to describe — the ones the solver truncated
+  and therefore could never derive an exit for. `00:C3F9` is that case, and
+  its directive was silently dropped until this was fixed. Worth remembering
+  as a general shape: a new authoritative input has to be threaded through
+  every place the old one was privileged, and the compiler cannot find them.
+
+Rejects a single-element set, pointing at `exit_mx_at`, so it cannot be used
+to smuggle in an exact fact under another name.
+
+### F9. Where it actually got to, and the cascade
+
+| | after F5 | now |
+|---|---|---|
+| AOT-eligible variants | 1,531 | **1,532** |
+| AOT instructions | 67,178 | **67,182** |
+| executed code inside an AOT node | 97.6% | 97.6% |
+| edges | 6,632 | **6,705** |
+
+`02:8000` published its set and decode ran on past it — which exposed
+`01:AD04`, previously invisible, blocking 6 nodes and 5,460 instructions. It
+measured cleanly (single return, `m1x1`, caller corroborates) and is now
+declared. That in turn exposed more of `01:AC23`, whose demands went from 1 to
+7.
+
+**This is the pattern to expect from here: each unblocked callee reveals the
+next.** The AOT instruction count barely moves while the frontier grows,
+because the newly decoded code arrives already blocked by the callee behind
+it. Nothing is wrong; it is just that the remaining work is a chain, not a
+set, and the ceiling estimates in A1 assumed a fixed denominator.
+
+Remaining, all small or structural:
+
+| callee | blocks | why |
+|---|---|---|
+| `01:AC23` | 7 demands | 1 of 3 executed returns measured |
+| `00:C3F9` | 4 demands | **all four cite the `m0x1` demand**, a variant the machine never enters — the bitmap has `00:C3F9` and its call site `00:813A` at `m0x0` only. Declaring `m0x1` would be an assertion about dead code, so it is deliberately not done; the real fix is upstream width tracking at the call site. |
+| `01:AC0E` | 4 demands | return `01:AC22` executed, never measured |
+| `02:8196` | 1 demand | genuinely split on the shared tail |
+
+State: **1,388 call sites checked, 1,388 agree, 0 mismatches**, 584 publishing
+an exit width that differs from the entry width; `gen_align_check` clean; 81
+framework tests pass; eleven save states byte-identical between tiers.
+
 ### F6. `SC_FREEZE` runs must never enter an M/X measurement
 
 Trying to reach `02:8000` headlessly, the gate turned out to be explicit:
