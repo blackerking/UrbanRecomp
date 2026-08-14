@@ -123,12 +123,32 @@ filing-ready. Still open:
 
 ### A5. Repo integrity: the submodule pointer is local-only
 
-The submodule remote is `mstan/snesrecomp` (upstream), but `master` now
-points at three commits that exist only on this machine — `61df24b`
-(inline args), `88d05b8` (joypad revert), `d4aaf40` (COP). **A fresh
-`git clone --recurse-submodules` cannot check out the submodule.** Either
-push a fork and repoint `.gitmodules`, or carry the three as patch files in
-this repo. This affects anyone trying to reproduce the results.
+**Much reduced.** Upstream merged both of the PRs this repo was carrying
+local versions of — #17 (auto-joypad byte order) and #19 (pop/push inline
+arguments) are in `origin/main` as of `9d6ad3c`. Our local `b48daf4`/`88d05b8`
+and `61df24b`/`cebda0b` were add-then-revert pairs that cancelled to nothing,
+so rebasing onto upstream lost no work: the regeneration is identical
+(1,625 variants, 1,532 AOT-eligible, 6,705 edges) and all eleven save states
+remain byte-identical between tiers.
+
+The submodule now sits on `simcity-main` = `origin/main` + **two** commits,
+both genuinely ours and both upstreamable:
+
+| commit | what | status |
+|---|---|---|
+| `0183d9a` | Model COP as a tier-to-LLE call instead of structural poison | write-up ready in `docs/UPSTREAM_cop_syscall.md`, never offered |
+| `3dbd292` | `cfg: add exit_mx_set` | PR-ready on branch `pr-exit-mx-set` (`origin/main` + one commit, 56 Rust + 81 Python tests pass) |
+
+**Still true: a fresh `git clone --recurse-submodules` cannot check these out**,
+because neither commit is pushed anywhere. But the fix is now two PRs rather
+than a fork-and-repoint, and if both land the submodule can point at plain
+upstream.
+
+Moving to upstream `main` needed one integration fix, carried in this repo's
+`CMakeLists.txt`: upstream added `runner/src/snes/tier2_capture.c`, which
+`interp_bridge.c` now calls into, so every target compiling `interp_bridge.c`
+needs it too (three of them here). Without it the AOT target fails to link on
+`tier2_capture_manifest_path` / `tier2_capture_append_discovery`.
 
 ---
 

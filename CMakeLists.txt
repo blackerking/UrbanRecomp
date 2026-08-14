@@ -122,6 +122,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
         ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
         ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
         ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
         ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
@@ -186,6 +187,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/host_report.c
         ${SNESRECOMP_ROOT}/runner/src/framedump.c
         ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
         ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
         ${SIMCITY_DEVICE_SOURCES}
     )
@@ -230,6 +232,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/host_report.c
         ${SNESRECOMP_ROOT}/runner/src/framedump.c
         ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
         ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
         ${SIMCITY_DEVICE_SOURCES}
     )
