@@ -814,6 +814,67 @@ State: **1,388 call sites checked, 1,388 agree, 0 mismatches**, 584 publishing
 an exit width that differs from the entry width; `gen_align_check` clean; 81
 framework tests pass; eleven save states byte-identical between tiers.
 
+### F10. The rest of bank 01 is the annual budget dialog
+
+After `02:8000` and `01:AD04` landed, `01:AC23` became the head of the chain —
+7 nodes, 5,663 instructions — needing two of its three returns measured.
+Fifty randomised headless runs hit none of them. Reading the code instead of
+hunting found the gate, the same way it did for `02:8000`:
+
+```
+01:AC94  LDA $0bcb
+01:AC97  BNE $accf        <- always falls through in every recording
+```
+
+`$0bcb` is set to `$00ff` at `01:AB96`, which is itself behind:
+
+```
+01:AB89  LDA $0b35 ; BEQ $abc0
+01:AB8E  LDA $0dc3 ; BEQ $abc0
+01:AB93  LDA #$00ff ; STA $0bcb
+```
+
+**`$0dc3` is the budget-dialog busy flag** — already in `docs/ROM_MAP.md`:
+`03:8EC8` sets it to 1 and then spins at `03:8ECE` until the UI clears it. So
+the whole remaining bank-01 chain is the **annual budget dialog path**, and
+`01:AC23` is the routine that services it.
+
+That also explains the misses, and it is an embarrassing arithmetic error
+rather than anything subtle: a year is 200 frames per tick x 4 ticks per month
+x 12 months = **9,600 frames**, and the hunt runs were 2,600. They could not
+have reached a year-end no matter how the buttons were pressed. Every
+randomised hunt in F3/F5 was structurally incapable of finding this.
+
+Re-running at 30,000 frames (three-plus in-game years) reaches it: `03:8EC8`
+fires, the `03:8ECE` spin runs in every run, and `01:ACCF` and `01:AC22` are
+measured for the first time.
+
+Result: `01:AC0E` became fully measured and is declared; `01:AC23` went from
+1/3 to 2/3 returns measured.
+
+| | before | after |
+|---|---|---|
+| AOT-eligible variants | 1,532 | **1,535** |
+| LLE-only | 93 | **91** |
+| AOT instructions | 67,182 | **67,283** |
+| executed code inside an AOT node | 97.6% | **97.7%** |
+
+`mx_exit_propose.py` now separates **"SPLIT, fully measured"** from **"SPLIT
+but INCOMPLETE"** and prints a paste-ready `exit_mx_set` line for the former.
+The distinction matters more than it looks: a set missing one of a routine's
+real exit widths is worse than no set at all, because the decoder forks the
+post-call continuation once per declared width and an omitted width is a
+continuation never decoded. "It splits" and "it splits and we have seen all of
+it" are different claims, and only the second is safe to declare.
+
+Under that rule `00:C3F9` (2/2) and `02:8196` (3/3) are declarable and
+`01:AC23` (2/3) is not — it still needs `01:AD03`.
+
+**The lesson worth keeping is about run length, not budgets.** Coverage
+hunting had been tuned for *breadth* — many short runs with varied input —
+when the missing code was gated on elapsed game time. Check what a path costs
+in frames before concluding it is unreachable.
+
 ### F6. `SC_FREEZE` runs must never enter an M/X measurement
 
 Trying to reach `02:8000` headlessly, the gate turned out to be explicit:

@@ -265,8 +265,26 @@ def main():
             continue
 
         if len(rts_exits) > 1:
-            rejected.append((head, f'SPLIT exit: {detail} -- no single '
-                                   f'exit_mx_at can be correct for this routine'))
+            # A split is the input to `exit_mx_set`, so say whether the set is
+            # COMPLETE. A set missing one of the routine's real exit widths is
+            # worse than no set at all: the decoder forks the post-call
+            # continuation once per declared width, so an omitted width is a
+            # continuation never decoded -- the miscompile this whole exercise
+            # exists to avoid. 'Split' and 'split, and we have seen all of it'
+            # are different claims.
+            if n_obs < n_rts:
+                rejected.append((head, f'SPLIT but INCOMPLETE: {detail} -- only '
+                                       f'{n_obs} of {n_rts} executed return points '
+                                       f'measured, so the set may be missing a '
+                                       f'width; not safe for exit_mx_set yet'))
+            else:
+                rejected.append((head, f'SPLIT exit, fully measured ({n_obs}/{n_rts}): '
+                                       f'{detail} -- no single exit_mx_at can be '
+                                       f'correct; declare with exit_mx_set '
+                                       f'{target:06x} M{next(iter(entered)) >> 1}'
+                                       f'X{next(iter(entered)) & 1} '
+                                       + ','.join(NAMES[v].upper().replace("M", "M").replace("X", "X")
+                                                  for v in sorted(rts_exits))))
             continue
 
         # Partial evidence is the failure mode this whole exercise exists to
