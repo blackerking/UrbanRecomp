@@ -6,11 +6,13 @@ This is the third piece of "measure and check" (docs/OPEN_QUESTIONS.md A1/F).
 the measurement, and this turns a measurement into a directive -- but only
 where the measurement is unambiguous, and it says out loud where it is not.
 
-21 callees block 43 nodes and 2,861 instructions, the whole difference between
-94.83% and 99.06% AOT. None of them is undecodable; the solver simply has no
-fixed point, because the bank-01 UI handlers dispatch to each other in a cycle
-and each is unproven because the other four are. The machine has no such
-problem -- it just runs them.
+None of the blocked callees is undecodable; the solver simply has no fixed
+point, because the bank-01 UI handlers dispatch to each other in a cycle and
+each is unproven because the other four are. The machine has no such problem
+-- it just runs them. That cycle is now closed: all five handlers publish a
+measured exit, taking AOT-eligible variants from 1475 to 1531 and executed-code
+coverage from 96.5% to 97.6%. Five callees remain, of which 02:8000 is worth
+6 nodes and 5,388 instructions on its own.
 
 **The evidence is read at the callee's own RTS/RTL, not at its callers'
 return addresses.** The return-address reading, which is what
@@ -34,6 +36,16 @@ Two properties of the cfg directive constrain what can honestly be emitted:
     ways cannot be expressed at all, and saying so is the point -- `00:C3F9`
     is the case that would have miscompiled silently had the widths been
     guessed from "it looks like it always returns m0x0".
+
+**Never feed an `SC_FREEZE` run into this.** Holding a WRAM byte at a value
+the ROM never holds there drives execution into states it never reaches, and
+the widths recorded in them are not evidence about anything. Measured: adding
+20 frozen runs to a 99-run union turned a clean `mx_exit_check` (1205/1205)
+into 2 mismatches, made `gen_align_check` report a desynchronised label that
+is fine in every natural run, and recorded executed PCs in bank $18 -- outside
+the 512KB ROM image altogether, i.e. the CPU running off into open bus. Freeze
+is a fine instrument for answering "is byte X the thing gating behaviour Y";
+it is not a way to manufacture coverage.
 
 Entry variant is read at the **call site**, not the callee's target address: a
 JSR changes neither M nor X, so the site's own width is that site's entry

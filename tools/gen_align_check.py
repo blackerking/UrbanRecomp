@@ -65,8 +65,14 @@ def main():
                 addr = 0x8000 + byte_i * 8 + bit
                 pc24 = (bank << 16) | addr
                 starts += 1
-                lengths = []
+                # A LoROM image has ROM only for the first len(rom)/0x8000
+                # banks; the M/X bitmap covers banks $00-$3F because that is
+                # the address space, not the cartridge. Anything recorded
+                # beyond the image (open bus, mirrors) has no bytes to decode.
                 off = bank * 0x8000 + (addr - 0x8000)
+                if off + 4 > len(rom):
+                    continue
+                lengths = []
                 for p in mx.widths(pc24):
                     ins = decode_insn(rom, off, addr, bank, m=(p >> 1), x=(p & 1))
                     if ins is not None:

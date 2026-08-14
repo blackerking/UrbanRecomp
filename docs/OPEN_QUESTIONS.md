@@ -673,6 +673,41 @@ explicit that broadcasting a variant-dependent exit "poisons non-default
 callers". Adding a parser for it is a small, clearly-scoped upstream change,
 and it is the natural next contribution to `mstan/snesrecomp` after #17.
 
+### F6. `SC_FREEZE` runs must never enter an M/X measurement
+
+Trying to reach `02:8000` headlessly, the gate turned out to be explicit:
+`01:AB22` is `LDA $01fb ; CMP #$0002 ; BCC $ab38`, and the `JSL $028000` sits
+on the taken branch. So freeze `$01fb` below 2 and the path should open.
+
+It does not, for a mundane reason worth writing down: **`SC_FREEZE` is applied
+once per emulated frame**, and the ROM writes `$01fb = 2` at `01:AC10` within
+the same frame before the read. A frame-granular freeze cannot win a race
+inside a frame. (`$01fb` is also a 16-bit read -- `REP #$20` two instructions
+earlier -- so freezing only `$1fb` and not `$1fc` fails even on paper.)
+
+The important part is what happened when those runs were folded into the
+union anyway:
+
+| union | mx_exit_check |
+|---|---|
+| 99 natural runs, 23,691 PCs | **1205 checked, 1205 agree, 0 mismatch** |
+| + 20 `SC_FREEZE` runs | 1189 checked, 1187 agree, **2 mismatch** |
+| the 20 frozen runs alone | 462 checked, 460 agree, **2 mismatch** |
+
+`gen_align_check` independently flagged a desynchronised label in the frozen
+union that is clean in every natural run, and the frozen runs recorded
+executed PCs in **bank $18** -- outside the 512 KB ROM image, i.e. the CPU
+running off into open bus.
+
+Holding a byte at a value the ROM never holds there produces states the ROM
+never reaches, and widths recorded in them are evidence about nothing. Freeze
+remains a good instrument for "is byte X what gates behaviour Y"; it is not a
+way to manufacture coverage. Both checks catching it independently is the
+system working.
+
+The 119-run frozen union has been deleted rather than kept; `mx_union.bin` is
+the natural-runs union and is the one to extend.
+
 ### F4. A decode desynchronisation found in the emitted C, and fixed
 
 `tools/gen_align_check.py` is the third check, and the one that would actually
