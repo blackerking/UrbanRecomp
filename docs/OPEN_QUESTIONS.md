@@ -1,8 +1,9 @@
 # What is left for investigation
 
-State as of the measured-exit-M/X work (AOT share **94.93%** analyzed, 1,475
-of 1,584 variants). Ordered by value, not by area. Each item says what is
-actually known, so the next session does not re-derive it.
+State as of the measured-exit-M/X work: **1,531 of 1,624 variants**
+AOT-eligible, **97.6% of all executed code**. Ordered by value, not by area.
+Each item says what is actually known, so the next session does not
+re-derive it.
 
 ---
 
@@ -10,13 +11,29 @@ actually known, so the next session does not re-derive it.
 
 ### A1. The exit-M/X fixpoint — the whole remaining 5%
 
-**Partly closed.** The worked example below is fixed; the bank-01 cycle is
-not, and is now blocked by *coverage*, not by method. See §F for the
-measurement machinery and §F2 for what remains.
+**Closed for the cycle that motivated it.** All five bank-01 UI handlers now
+publish measured exits, and the SCC they formed is broken. See §F for the
+machinery and §F5 for the bounding bug that had been hiding half the
+evidence.
 
-Current state: 1,584 nodes, 1,475 AOT-eligible, 109 LLE-only, **94.93%** of
-analyzed instructions (was 94.83%). 107 nodes still publish no exit M/X, and
-an unpublished exit truncates *every* caller, transitively.
+Current state: **1,624 nodes, 1,531 AOT-eligible, 93 LLE-only.**
+
+| | before | after |
+|---|---|---|
+| AOT-eligible variants | 1,475 | **1,531** |
+| LLE-only | 109 | **93** |
+| AOT instructions | 64,386 | **67,178** |
+| executed code inside an AOT node | 96.5% | **97.6%** |
+| analyzed share | 94.93% | 90.08% |
+
+**The analyzed share fell because the denominator moved.** Publishing an exit
+lets decode continue past a call that used to truncate, so the frontier grew
+from 67,828 to 74,576 instructions and edges from 4,518 to 6,632. The same
+thing happened during the COP work, where the frontier grew by 27,000. Judge
+this by absolute AOT instructions and by executed-code share, both of which
+rose; the percentage-of-analyzed is a ratio with a moving bottom.
+
+An unpublished exit still truncates *every* caller, transitively.
 
 > The "300 of 1,584" figure this section used to carry was stale — it predates
 > the inline-argument fix, which took LLE-only from 348 to 110 on its own.
@@ -525,12 +542,28 @@ The rejections are the useful part:
 | callee | why not |
 |---|---|
 | `00:C3F9` | genuinely split, `m0x0` **and** `m0x1` — no single `exit_mx_at` can be right |
-| `02:A3E0` | split at the `RTS`, `m0x0`/`m1x0` — **the return-address reading alone said `m0x0` and would have proposed it** |
+| `02:A3E0` | ~~split at the `RTS`~~ — **retracted, see below** |
 | `02:8000` | four executed `RTL`s, one measured; the other three could differ |
 | 13 others | never observed returning — no evidence either way |
 
-`02:A3E0` is the concrete argument for reading the `RTS`: the weaker method
-was one step from emitting a wrong directive, and the stronger one caught it.
+> **The `02:A3E0` claim is withdrawn.** It read as the argument for preferring
+> the `RTS` over the return address — the weaker method "one step from a wrong
+> directive, and the stronger one caught it." That split was an artefact of how
+> the tool bounded a routine's body, not a property of the routine. With the
+> bounding fixed (§F5) `02:A3E0` has exactly one executed return, `m0x0`, which
+> is precisely what the return-address reading said. The two methods agree, and
+> `A3E0` is now emitted as a directive.
+>
+> Reading the `RTS` is still the right primary source, for the reason given
+> above — 44 of the 60 call sites are `JSR (abs,X)`, so return-address widths
+> union over whichever handler the dispatch picked. That argument stands on its
+> own. It just never needed this example, and the example was wrong.
+
+### F3. The bank-01 cycle — CLOSED
+
+> All five handlers now publish measured exits and the SCC is broken (§F5).
+> The section below is kept for the reasoning and for the correction it
+> carries, but its conclusion — that this still needed doing — is superseded.
 
 ### F3. The bank-01 cycle is now a coverage problem, not a solver problem
 
@@ -572,6 +605,73 @@ correctly-masked run, not a play session.
 Option 1 in A1 — the upstream SCC solver — remains the route that does not
 depend on reaching every handler at all, and given that four-of-five buys
 nothing, it is looking like the better investment.
+
+### F5. The bounding bug that was hiding half the evidence — and the close-out
+
+`mx_exit_propose.py` bounded a routine's body by its node's
+`min_pc24..max_pc24`. That is wrong in both directions, and it was quietly
+rejecting routines whose evidence was actually complete:
+
+- **Nesting.** `01:AAD5`'s node spans 541 bytes and physically contains the
+  whole of `01:AC0E` and `01:AC23`. Their returns were counted as AAD5's, so
+  it looked like a three-return routine with one measured and was rejected as
+  PARTIAL. It has exactly one return, `01:AC0D`, and it was measured all along.
+- **Truncation.** `01:AC0E`'s node stops at `AC19`, because the `JSR $ac23`
+  there has an unproven exit. Its real return at `AC22` therefore lies outside
+  every node's range and got attributed to whatever enclosed it.
+
+Bounding a routine by **the next entry address** fixes both, and assumes only
+that routines are laid out contiguously — which, if violated, surfaces as a
+contradictory split rather than a wrong directive. The bug was conservative:
+it over-counted return points, so it under-proposed and never mis-proposed.
+
+With that fixed, plus two recorded play sessions and 65 correctly-masked
+headless runs, eight directives became emittable — including **all five**
+bank-01 handlers, every one exiting `m0x0`:
+
+```
+exit_mx_at 008061 0 0     exit_mx_at 01aad5 0 0     exit_mx_at 02a3dc 0 0
+exit_mx_at 01a886 0 0     exit_mx_at 01ad54 0 0     exit_mx_at 02a3e0 0 0
+exit_mx_at 01aa39 0 0     exit_mx_at 02a0e8 1 1
+```
+
+Verified after regeneration: **1,109 call sites checked, 1,109 agree, 0
+mismatches** (435 of them publishing an exit that differs from the entry
+width); 790/790 on a holdout half alone; `gen_align_check` clean over 16,039
+emitted labels; 81 framework tests pass; and all eleven save states remain
+byte-identical in 128 KB WRAM between the interpreter and AOT tiers.
+
+Caveat worth keeping: `01ad54` and `02a0e8` are supported by the full union
+only. Each disjoint half saw one of `01:AD54`'s two return points but not
+both, so neither half alone clears the "every executed return measured" bar.
+The other six are confirmed independently by both halves.
+
+### What is left
+
+93 LLE-only nodes: 715 instructions of `brk_at_*` poison (A2, working as
+designed) and 6,683 instructions blocked by **five** callees still without a
+publishable exit:
+
+| callee | blocks | status |
+|---|---|---|
+| `02:8000` | 6 nodes / **5,388 instr** | its own return `02:8195` is executed but not yet measured — by far the biggest remaining prize |
+| `00:C3F9` | 4 nodes / 740 instr | **proven split** (`m0x0` and `m0x1`), both returns measured |
+| `01:AC0E` | 2 nodes / 44 instr | return `01:AC22` executed, not measured |
+| `01:AC23` | 1 node / 5 instr | 2 returns executed, neither measured |
+| `02:8196` | 1 node / 6 instr | 1 of 3 returns measured |
+
+Four of the five are ordinary coverage gaps — the return points are known,
+executed, and simply have not been caught in an M/X recording yet. `02:8000`
+alone is worth more than everything this session added.
+
+`00:C3F9` is the exception and needs something the cfg cannot currently
+express: a **per-entry-variant** exit. `cfg_loader` has the
+`exit_mx_at_per_variant` field and `v2_regen._rebuild_callee_exit_mx` consumes
+it, but only `exit_mx_autoroute` populates it — there is no cfg directive. The
+broadcast `exit_mx_at` cannot be used here, and the autoroute docstring is
+explicit that broadcasting a variant-dependent exit "poisons non-default
+callers". Adding a parser for it is a small, clearly-scoped upstream change,
+and it is the natural next contribution to `mstan/snesrecomp` after #17.
 
 ### F4. A decode desynchronisation found in the emitted C, and fixed
 

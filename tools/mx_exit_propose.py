@@ -89,6 +89,30 @@ def main():
     returns = {pc for pc in executed
                if rom[(pc >> 16) * 0x8000 + ((pc & 0xFFFF) - 0x8000)] in (0x60, 0x6B)}
 
+    # A routine's body runs from its entry to just before the next entry, NOT
+    # to its node's max_pc24. Two things break the max_pc24 reading, in
+    # opposite directions:
+    #
+    #   * **Nesting.** 01:AAD5's node spans 541 bytes and physically contains
+    #     the whole of 01:AC0E and 01:AC23. Their returns are not AAD5's, and
+    #     counting them made AAD5 look like a 3-return routine with 1 measured
+    #     -- rejected as PARTIAL when it actually has exactly one return.
+    #   * **Truncation.** 01:AC0E's node stops at AC19 because the JSR there
+    #     has an unproven exit, so its real return at AC22 lies outside every
+    #     node's range and is attributed to whatever encloses it.
+    #
+    # Bounding by the next entry address handles both, and assumes only that
+    # routines are laid out contiguously -- which, if violated, shows up as a
+    # contradictory split rather than a wrong directive.
+    entries = sorted({int(k.split(':')[0], 16) for k in nodes})
+
+    def body_of(target):
+        i = entries.index(target)
+        end = entries[i + 1] - 1 if i + 1 < len(entries) else target
+        if (end >> 16) != (target >> 16):          # next entry is another bank
+            end = (target & 0xFF0000) | 0xFFFF
+        return target, end
+
     def exit_at_returns(target):
         """Widths recorded at the RTS/RTL instructions of the callee's body.
 
@@ -99,14 +123,9 @@ def main():
         nothing about the other three, and a single width read off it would
         be a guess wearing a measurement's clothes.
         """
-        lo = hi = None
-        for k, node in nodes.items():
-            if int(k.split(':')[0], 16) != target:
-                continue
-            lo = node['min_pc24'] if lo is None else min(lo, node['min_pc24'])
-            hi = node['max_pc24'] if hi is None else max(hi, node['max_pc24'])
-        if lo is None:
+        if target not in entries:
             return set(), 0, 0
+        lo, hi = body_of(target)
         seen, observed, total = set(), 0, 0
         for pc in returns:
             if lo <= pc <= hi:

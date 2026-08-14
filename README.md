@@ -616,13 +616,30 @@ land on bits 12-15 -- not button bits at all -- while the runner's
 (mstan/snesrecomp#17). Those four buttons were never actually pressed, so the
 UI state machine never advanced.
 
-With correct masks, headless replay drives the UI, and `01:A97C` and
-`01:9D6B` became measurable and are now committed. They do **not** move the
-AOT share, which is the cycle behaving exactly as described: the 12 nodes
-those handlers block also call `A886`, `AA39`, `AAD5` and `AD54`, so
-publishing one of five buys nothing until all five land. It is all-or-nothing,
-which makes the upstream SCC solver the better investment than chasing the
-last four by hand.
+With correct masks, headless replay drives the UI. Combined with two recorded
+play sessions and a fix to how the proposer bounds a routine's body -- it used
+the node's `max_pc24`, which both swallows nested routines and stops short of
+a truncated one's real return -- **all five handlers now publish measured
+exits, every one `m0x0`, and the cycle is broken.**
+
+| | before | after |
+|---|---|---|
+| AOT-eligible variants | 1,475 | **1,531** |
+| LLE-only | 109 | **93** |
+| AOT instructions | 64,386 | **67,178** |
+| executed code inside an AOT node | 96.5% | **97.6%** |
+
+The *analyzed* share reads lower afterwards (94.93% -> 90.08%) purely because
+the denominator moved: publishing an exit lets decode continue past a call
+that used to truncate, so the frontier grew from 67,828 to 74,576 instructions
+and edges from 4,518 to 6,632 -- the same effect the COP work had, where the
+frontier grew by 27,000. Absolute AOT instructions and executed-code share
+both rose.
+
+Verified after regeneration: 1,109 call sites checked and 1,109 agree with 0
+mismatches, 790/790 on a holdout half alone, `gen_align_check` clean over
+16,039 emitted labels, 81 framework tests pass, and all eleven save states
+byte-identical in 128 KB WRAM between the two tiers.
 
 `tools/gen_align_check.py` also turned up a **pre-existing decode
 desynchronisation** in the emitted C, unrelated to the directives: a cfg
