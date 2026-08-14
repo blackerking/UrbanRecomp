@@ -315,3 +315,81 @@ first run will look like a codegen failure.
 This is worth an upstream question in its own right: two tiers of the same
 framework disagreeing on cycle counts for the same routine is a portability
 problem beyond this game.
+
+## 7. Step 3d attempted: the guest does run inside the fiber, and then deadlocks
+
+`SC_FIBER=1` on the AOT build now creates the game fiber, installs the vblank
+yield, and runs the guest inside it. `src/simcity_fiberdrive.c` is the driver;
+it is strictly opt-in and the default path is untouched, verified byte-identical
+between tiers on five save states with the fiber code linked in but inert.
+
+### §5's premise is half obsolete
+
+§5 said the ar-recomp transplant was impossible because "there is no compiled
+entry point to hand the fiber" -- both architectural entries were `lle_only`.
+**RESET is compiled now.** `03:d283`, the screen-mode dispatcher whose
+unproven exit blocked it, is `aot_eligible`, so `008000:M1X1` is too, with an
+empty `reasons` list, and the dispatch table carries it as `I_RESET_M1X1`.
+NMI is still LLE, but does not need compiling for this model -- the host owns
+the frame boundary and releases the wait itself, as ar-recomp's does.
+
+So the straight transplant *is* available for the reset path, and it was taken.
+Measured: the fiber switch works and the compiled reset handler is entered.
+
+```
+[fiber] driving the guest inside the fiber (entry I_RESET_M1X1)
+[fiber] entering I_RESET_M1X1
+<hangs>
+```
+
+### The real blocker is device-register spins, not the entry point
+
+The guest never reaches the vblank HLE, so the fiber never yields and the host
+never regains control. The cause is structural, and §1 has it in outline
+without drawing the conclusion:
+
+**Devices only advance while the host holds the fiber.** So any guest loop that
+spins on a device register waiting for hardware to change deadlocks -- the
+guest cannot make progress, and the host cannot advance the device that would
+release it.
+
+The boot path contains exactly such a loop, and it executes in every recorded
+session:
+
+```
+00:9280  LDA $4212
+00:9283  AND #$01
+00:9285  BNE $9280      ; spin until auto-joypad read is not busy
+```
+
+`$4212` bit 0 clears as the beam advances. Under the per-opcode interpreter
+that happens naturally; inside the fiber it never does.
+
+### What that means for the design
+
+ar-recomp gets away with a pure coroutine because its waits are vblank-shaped
+and HLE'd. SimCity has at least one hardware-status spin *before* the first
+vblank wait, so the pure transplant cannot boot no matter how good the
+coverage gets. Three ways forward, and the first is the cheapest:
+
+1. **HLE the status spins too.** `hle_func 927c` and any siblings, the same
+   way `hle_func 930d` handles the vblank wait. ar-recomp declares 13 HLEs
+   and calls most of them optimisations; SimCity would need a few as
+   *necessities*. Requires finding them all -- a missed one is another
+   deadlock, and it will look exactly like this one.
+2. **Let the fiber yield on device reads.** Any read of a status register
+   while the guest holds the fiber becomes a yield point. General, no
+   per-routine knowledge needed, but it puts a yield check on the hot path.
+3. **`interp_bridge_run_scheduler` instead of a bare call.** The framework's
+   own model, and the direction `snesrecomp/docs/LLE_SCHEDULER.md` says it is
+   moving in. Note `interp_bridge_lle_master_deadline_reached` -- which every
+   generated block already polls -- is inert outside the scheduler: it
+   requires `s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0`. A bare
+   `I_RESET_M1X1()` call therefore has **no bound on execution at all**, which
+   is why the hang is unbreakable from the host side rather than merely slow.
+
+That last point is the strongest argument for option 3: the runtime already
+has the bounding mechanism, and calling a compiled body directly opts out of
+it. §5's guess that the eventual driver "looks more like `interp_bridge`-with-
+a-fiber than like ar-recomp's pure coroutine" survives, for a different reason
+than it gave.

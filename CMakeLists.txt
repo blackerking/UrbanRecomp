@@ -117,6 +117,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c
+        src/simcity_fiberdrive.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -178,6 +179,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c
+        src/simcity_fiberdrive.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -223,6 +225,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c
+        src/simcity_fiberdrive.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c

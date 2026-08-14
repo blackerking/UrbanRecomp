@@ -175,11 +175,37 @@ needs it too (three of them here). Without it the AOT target fails to link on
 
 ## B. Static recompilation
 
-### B1. Step 3d — drive the guest inside the fiber
+### B1. Step 3d — the guest runs inside the fiber, and deadlocks
 
-The fiber layer and the frame-boundary HLE (`hle_func 930d`) exist and
-self-test. What is missing is an interpreter-with-bouncing driver so the
-guest actually runs inside the fiber. See `docs/MIGRATION_step3.md`.
+**Attempted; the driver exists and the diagnosis is now specific.**
+`SC_FIBER=1` on the AOT build creates the game fiber, installs the vblank
+yield, and enters the guest. `src/simcity_fiberdrive.c`, strictly opt-in;
+the default path is verified byte-identical between tiers with the fiber
+code linked but inert.
+
+Two things changed the picture:
+
+- **A compiled entry point exists now.** §5 of `MIGRATION_step3.md` ruled out
+  ar-recomp's design because both architectural entries were `lle_only`.
+  `03:d283` is compiled, so `008000:M1X1` is too, and the dispatch table
+  carries it as `I_RESET_M1X1`. Measured: the fiber switch works and the
+  compiled reset handler is entered.
+- **It then hangs, for a reason the entry point was masking.** Devices only
+  advance while the *host* holds the fiber, so any guest loop spinning on a
+  hardware status register deadlocks. The boot path has one, and it executes
+  in every recorded session: `00:9280 LDA $4212 ; AND #$01 ; BNE $9280`,
+  waiting on auto-joypad-busy, which clears only as the beam advances.
+
+Worse, a bare call to a compiled body has **no execution bound at all**:
+`interp_bridge_lle_master_deadline_reached`, which every generated block
+polls, requires `s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0`
+and is inert outside `interp_bridge_run_scheduler`. So the host cannot even
+time the guest out.
+
+Next step is a choice between HLE-ing the status spins, yielding on device
+reads, or driving through `interp_bridge_run_scheduler` — laid out with
+trade-offs in `docs/MIGRATION_step3.md` §7. The third is the framework's own
+direction and the only one that restores the bound.
 
 ### B2. Is the AOT tier actually faster here?
 

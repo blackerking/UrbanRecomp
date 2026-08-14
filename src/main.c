@@ -47,7 +47,9 @@
  * needing any copying between them. Defining them here too would just be a
  * duplicate symbol, so the AOT build defers to the runtime's copies. */
 #ifdef SIMCITY_AOT_TIER
+#include "common_rtl.h"
 #include "common_rtl.h"          /* extern uint8 g_ram[0x20000]; */
+#include "simcity_fiberdrive.h"
 #else
 uint8_t    g_ram[0x20000];
 #endif
@@ -829,7 +831,45 @@ static void apply_power_fix(void) {
             (unsigned long long)s_frames);
 }
 
+#ifdef SIMCITY_AOT_TIER
+/* ── SC_FIBER=1: run the guest inside the fiber (migration step 3d) ───────
+ *
+ * The driver itself lives in src/simcity_fiberdrive.c, because it needs
+ * cpu_state.h and that header declares a global `CpuState g_cpu` which
+ * collides with this file's `Interp816 *g_cpu`. Keeping it in its own
+ * translation unit is cheaper than renaming a symbol used several hundred
+ * times here.
+ *
+ * Strictly opt-in. Without SC_FIBER the interpreter path below is untouched,
+ * because that path is this project's correctness baseline and every
+ * `--qualify` number rests on it. */
+static bool s_fiber_mode;
+
+/* One host frame in the fiber model: advance the PPU and devices for a whole
+ * frame (so raster effects still work line by line, per MIGRATION_step3 §4),
+ * release the vblank wait the way the NMI handler would, then let the guest
+ * run until its vblank HLE hands the frame back. */
+static bool run_one_frame_fiber(void) {
+  uint64_t before = s_frames;
+
+  unsigned guard = 0;
+  while (s_frames == before && guard++ < 400000) {
+    handle_pos_stuff();
+    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+  }
+  snes_catchupApu(g_snes);
+
+  /* Release the wait: the real NMI handler's INC $b9 at 00:80bc. */
+  g_ram[0xb9] = 1;
+
+  return SimCityFiberDrive_RunGuestFrame(s_frames);
+}
+#endif /* SIMCITY_AOT_TIER */
+
 static bool run_one_frame(void) {
+#ifdef SIMCITY_AOT_TIER
+  if (s_fiber_mode) return run_one_frame_fiber();
+#endif
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -1984,6 +2024,21 @@ int main(int argc, char **argv) {
         s_wram_map = true;
       }
     } }
+#ifdef SIMCITY_AOT_TIER
+  /* SC_FIBER=1: drive the guest inside the fiber instead of interpreting it
+   * per opcode (migration step 3d). Only meaningful in the AOT build, and
+   * deliberately opt-in -- see run_one_frame_fiber(). */
+  { const char *e = getenv("SC_FIBER");
+    if (e && *e && *e != '0') {
+      if (!SimCityFiberDrive_Init()) {
+        fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
+        return 1;
+      }
+      s_fiber_mode = true;
+      fprintf(stderr, "[fiber] driving the guest inside the fiber "
+                      "(entry I_RESET_M1X1)\n");
+    } }
+#endif
   { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_MENU_PREVIEW");
