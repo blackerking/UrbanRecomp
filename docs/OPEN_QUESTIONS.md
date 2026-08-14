@@ -1,7 +1,7 @@
 # What is left for investigation
 
-State as of the measured-exit-M/X work: **1,531 of 1,624 variants**
-AOT-eligible, **97.6% of all executed code**. Ordered by value, not by area.
+State as of the measured-exit-M/X work: **1,544 of 1,628 variants**
+AOT-eligible, **99.3% of all executed code**. Ordered by value, not by area.
 Each item says what is actually known, so the next session does not
 re-derive it.
 
@@ -16,15 +16,14 @@ publish measured exits, and the SCC they formed is broken. See §F for the
 machinery and §F5 for the bounding bug that had been hiding half the
 evidence.
 
-Current state: **1,624 nodes, 1,531 AOT-eligible, 93 LLE-only.**
+Current state: **1,628 nodes, 1,544 AOT-eligible, 84 LLE-only.**
 
-| | before | after |
+| | at the start of this work | now |
 |---|---|---|
-| AOT-eligible variants | 1,475 | **1,531** |
-| LLE-only | 109 | **93** |
-| AOT instructions | 64,386 | **67,178** |
-| executed code inside an AOT node | 96.5% | **97.6%** |
-| analyzed share | 94.93% | 90.08% |
+| AOT-eligible variants | 1,475 | **1,544** |
+| LLE-only | 109 | **84** |
+| AOT instructions | 64,386 | **73,364** |
+| **executed code inside an AOT node** | 96.5% | **99.3%** |
 
 **The analyzed share fell because the denominator moved.** Publishing an exit
 lets decode continue past a call that used to truncate, so the frontier grew
@@ -55,8 +54,10 @@ The remaining LLE-only set splits cleanly:
 | genuine width refutation (`brk_at_*` / `structural_poison`, = A2) | 67 | 715 |
 | blocked only by an unproven callee exit | 42 | 2,727 |
 
-So the ceiling for this line of work is **99%**, and the last 1% is A2, which
-is the poison working as designed rather than a bug.
+The 99% ceiling this section used to predict has been reached, measured
+against executed code. What remains is A2's poison plus three callees
+(§F11), and one of those is blocked only by a variant the machine never
+enters.
 
 The shape that defeats the solver is a mutually recursive dispatch cycle.
 Bank 01's UI state machine is the clean example: `$01df` selects through two
@@ -317,6 +318,20 @@ plumbing rather than new research.
 
 Requested. Once a scenario has been beaten, allow carrying on in it freely
 instead of being evaluated and ended.
+
+**Practice/free play is a second existing model for this, and a closer one.**
+Reported from play: the practice map *does* run a win check against
+population, and you can carry on playing after it fires. So "evaluated, and
+then not ended" is not hypothetical behaviour that has to be invented — the
+ROM already does it in the mode people spend the most time in. Worth reading
+how practice differs at `03:c548` before choosing between the two routes
+below, because it may already be the exact path a won scenario should take.
+
+Related, and now mapped: the 50,000-population milestone in that mode fires
+**message 12**, which is what unlocks View (`$01e7` bit 1, docs/ROM_MAP.md).
+That is the one confirmed case of a population threshold driving a message
+rather than a state change, and the win check is likely to be built the same
+way.
 
 The ROM already implements exactly that state for one index. The win/lose
 evaluator at `03:c548` **deliberately returns without writing a result for
