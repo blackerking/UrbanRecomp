@@ -870,6 +870,27 @@ it" are different claims, and only the second is safe to declare.
 Under that rule `00:C3F9` (2/2) and `02:8196` (3/3) are declarable and
 `01:AC23` (2/3) is not — it still needs `01:AD03`.
 
+### Dense input is worse than sparse, measured
+
+The obvious follow-up to "the runs were too short" was to also make the input
+continuous — 60 presses each held ~450 frames, back to back across 27,000
+frames, so no dialog window could be missed. It is **strictly worse**:
+
+| run set (12 each, 30k frames) | `01:ACCF` | `01:AC22` | `01:AD03` | annual budget | `01:AC94` gate |
+|---|---|---|---|---|---|
+| sparse input (gaps of 300-600 frames) | 3/12 | 3/12 | 0/12 | 3/12 | **3/12** |
+| dense input (held ~450, back to back) | 0/12 | 0/12 | 0/12 | 3/12 | **0/12** |
+
+Both reach the annual budget equally often, because that is driven by elapsed
+time rather than input. But continuous input reaches the `01:AC94` gate in
+**none** of twelve runs against three of twelve for sparse: holding buttons
+suppresses the very dialogs the coverage needs, presumably by dismissing or
+blocking them as fast as they appear.
+
+So the two knobs pull in opposite directions. Long runs are needed for
+time-gated code; *idle gaps* are needed for UI-state code. Tuning one without
+the other loses the thing you were hunting.
+
 **The lesson worth keeping is about run length, not budgets.** Coverage
 hunting had been tuned for *breadth* — many short runs with varied input —
 when the missing code was gated on elapsed game time. Check what a path costs
