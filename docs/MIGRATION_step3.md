@@ -393,3 +393,72 @@ has the bounding mechanism, and calling a compiled body directly opts out of
 it. §5's guess that the eventual driver "looks more like `interp_bridge`-with-
 a-fiber than like ar-recomp's pure coroutine" survives, for a different reason
 than it gave.
+
+## 8. Option 3 tried too: the two device models are the real blocker
+
+§7 ended by recommending `interp_bridge_run_loop` -- the framework's own
+model, which restores the execution bound and keeps compiled bodies live. It
+was implemented (`src/simcity_fiberdrive.c`) with SimCity's wait mapped
+exactly:
+
+```
+interp_bridge_run_loop(&cpu, resume_pc24,
+                       0x009311,   /* 930d's spin: INC $c7 ; LDA $b9 ; BEQ */
+                       0x00b9,     /* the flag the NMI handler sets */
+                       0x00);      /* cleared while waiting */
+```
+
+**It hangs in the same place, and the reason is the same one wearing a
+different coat.** `interp_bridge_run_loop` never returns from its first call,
+and `SNESRECOMP_YIELD_DIAG=1` prints nothing -- the guest never reaches
+`00:9311` at all.
+
+The bridge advances the APU (`snes_catchupApu`) and accumulates
+`cpu->master_cycles`. **It never advances the PPU beam.** Upstream that is
+correct, because the host advances the PPU around `RtlRunFrame`, per frame.
+This host advances it *per opcode*, from `handle_pos_stuff()` in
+`src/main.c`, and nothing outside that loop drives it. So `$4212` is frozen
+inside the bridge exactly as it was inside the fiber, and `00:9280` spins
+there too.
+
+There is no hook to bridge them with. `interp816_opcode_hook` is declared in
+`interp816.h` and defined as a no-op in `interp_bridge.c`, and is **never
+called anywhere in the runner** -- a dead extension point.
+
+### The finding, stated plainly
+
+Every driver design fails at the same place, and it is not the entry point,
+not the fiber, and not AOT coverage:
+
+> **This host owns a per-opcode device model that no framework driver drives.**
+> Any design that runs the guest outside `src/main.c`'s opcode loop freezes
+> the PPU, and the ROM's boot spins on a beam-derived register before it ever
+> reaches a vblank wait.
+
+That reframes §1. Its three options were about *timing fidelity* -- how much
+dot accuracy a driver gives up. The real question is more basic: **who steps
+the beam.** Until something outside `handle_pos_stuff()` can, no driver boots
+at all, faithful or otherwise.
+
+Two ways to close it, both structural:
+
+1. **Give the bridge a per-opcode host callback.** Upstream change; the dead
+   `interp816_opcode_hook` is the natural place. Small, and it would let this
+   host keep its per-opcode beam -- the thing the accuracy story and the HDMA
+   fix rest on.
+2. **Adopt the runner's per-frame model** (§1 option 3). Larger, and it
+   replaces the loop this project's `--qualify` baseline is built on. ar-recomp
+   ships widescreen on it, so it is not disqualifying -- but it is a rewrite,
+   not a wiring job.
+
+Option 1 is the smaller change and preserves more. It is also the one that has
+to go upstream, which makes it the third candidate PR alongside `exit_mx_set`
+and the COP fix.
+
+### State on disk
+
+`SC_FIBER=1` is wired end to end and does not work; everything else is
+unaffected. The default path is byte-identical between tiers on all eleven
+save states with the driver linked in, the fiber self-test passes, and 81
+framework tests pass. The driver is kept rather than reverted because the
+diagnosis is in it, and because both remaining options reuse most of it.
