@@ -462,3 +462,79 @@ unaffected. The default path is byte-identical between tiers on all eleven
 save states with the driver linked in, the fiber self-test passes, and 81
 framework tests pass. The driver is kept rather than reverted because the
 diagnosis is in it, and because both remaining options reuse most of it.
+
+## 9. Driving through the bridge: two blockers removed, one left
+
+`SC_FIBER=1` now drives the guest through `interp_bridge_run_loop` rather than
+calling a compiled body directly. The mapping is right and two real obstacles
+are gone; it still does not boot, and the remaining cause is now pinned rather
+than guessed.
+
+### Removed: the auto-joypad spin
+
+`00:9280 LDA $4212 ; AND #$01 ; BNE $9280` waits on auto-joypad-busy, from
+`00:8151` and `00:8201` -- both per-frame, in the NMI path, not boot-only. But
+`$4212` bit 0 is literally `autoJoyTimer > 0` in `snes.c`, armed with 4224 at
+vblank start and counted down by the beam.
+
+So the host can simply **not hand over a frame whose input latch is still
+busy**: `sc_advance_until_input_ready()` in `src/main.c` drains it before the
+guest runs. ~4224 master cycles at the top of the frame, no HLE, no
+per-routine knowledge. This is the general shape of the answer for any
+hardware-status wait -- advance the device before handing over, rather than
+HLE-ing the routine that waits on it.
+
+### Removed: the missing execution bound
+
+`interp_bridge_set_master_deadline(cpu->master_cycles + 357368)` is now armed
+per frame. The bridge's own step cap counts **interpreted steps only**;
+once it bounces into a compiled body nothing counts, and every generated block
+polls `interp_bridge_lle_master_deadline_reached()` which returns false unless
+a deadline is set.
+
+### Left: something inside the bridge never returns
+
+Measured, with `SC_FRAME_TRACE=1`:
+
+```
+[frame 1] a: draining input latch
+[frame 1] b: latch drained, bridge at 008000
+   <no "c: bridge returned">
+```
+
+So the latch drain completes, `interp_bridge_run_loop` is entered at the reset
+vector, and it never comes back. Three things are ruled out by measurement:
+
+- **not an interpreter loop** -- `SNESRECOMP_INTERP_STEP_CAP=200000` still
+  hangs; a spinning interpreter would bail and return 0.
+- **not the vblank wait** -- `SNESRECOMP_YIELD_DIAG=1` prints nothing, so
+  `00:9311` is never reached.
+- **not the auto-joypad latch** -- drained before entry, and the beam is
+  frozen inside the bridge so it cannot re-arm.
+
+That leaves an unbounded loop inside a **compiled** body, with the deadline
+not firing. The likely reason, unconfirmed: the guard is
+
+```c
+s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0
+```
+
+and `run_loop` sets the first but only the bridge's own bounce path sets the
+second. A body entered through the generated dispatch table's tier call rather
+than through that path would poll a deadline that is permanently inert. If
+that is right, the bound cannot be armed from the host at all and it is an
+upstream fix.
+
+### Next diagnostic
+
+`SNESRECOMP_INTERP_TRACE=1` dumps the entry path and the stuck loop on a
+step-cap bail -- but only on a bail, which is exactly what is not happening.
+So the cheap next step is instead to print `s_lle_sched_depth` and
+`s_interp_bounce_owner_depth` from inside
+`interp_bridge_lle_master_deadline_reached`, or to bisect by disabling the
+dispatch table so everything stays interpreted and seeing whether the step cap
+then fires. Either answers it in one build.
+
+The default path is untouched throughout: `--qualify 600` PASS and four save
+states byte-identical between tiers with the frame-model code linked but
+inert.

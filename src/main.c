@@ -855,6 +855,41 @@ static bool s_fiber_mode;
  * frame (so raster effects still work line by line, per MIGRATION_step3 §4),
  * release the vblank wait the way the NMI handler would, then let the guest
  * run until its vblank HLE hands the frame back. */
+/* Beam advance, exposed to the frame driver (src/simcity_fiberdrive.c).
+ * handle_pos_stuff() is static and deeply tied to this file, so the driver
+ * calls in rather than duplicating the device model. */
+void sc_advance_beam_one_frame(void) {
+  uint64_t before = s_frames;
+  unsigned guard = 0;
+  while (s_frames == before && guard++ < 400000) {
+    handle_pos_stuff();
+    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+  }
+  snes_catchupApu(g_snes);
+}
+
+/* Advance until the auto-joypad read has finished.
+ *
+ * This is what makes a per-frame host viable for this ROM at all. $4212 bit 0
+ * is literally `autoJoyTimer > 0` (snes.c), armed with 4224 at vblank start
+ * and counted down by the beam. The game waits on it every frame at 00:9280
+ * (`LDA $4212 ; AND #$01 ; BNE`), from both 00:8151 and 00:8201. If the guest
+ * gets the frame while that timer is still running, it spins forever, because
+ * nothing advances the beam while the guest holds the CPU -- which is exactly
+ * how the first fiber attempt deadlocked.
+ *
+ * Draining it here costs ~4224 master cycles at the top of the frame and needs
+ * no HLE and no per-routine knowledge: the host simply does not hand over a
+ * frame whose input latch is still busy. */
+void sc_advance_until_input_ready(void) {
+  unsigned guard = 0;
+  while (g_snes->autoJoyTimer && guard++ < 40000) {
+    handle_pos_stuff();
+    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+  }
+  snes_catchupApu(g_snes);
+}
+
 static bool run_one_frame_fiber(void) {
   uint64_t before = s_frames;
 

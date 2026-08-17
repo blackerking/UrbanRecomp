@@ -65,6 +65,7 @@
  * `Interp816 *g_cpu`.
  */
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "cpu_state.h"
 #include "common_rtl.h"
@@ -93,59 +94,75 @@ extern unsigned long g_simcity_vblank_hle_calls;
 #define SC_VBLANK_FLAG  0x00b9u
 #define SC_VBLANK_WAITING 0x00u
 
+/* Beam advance lives in src/main.c, which owns the device model. */
+void sc_advance_beam_one_frame(void);
+void sc_advance_until_input_ready(void);
+
 static CpuState s_cpu;
 static bool     s_started;
-static uint32_t s_resume_pc24;
-static unsigned long s_bails;
+static uint32   s_resume_pc24;
+static unsigned s_bail_streak;
 
 bool SimCityFiberDrive_Init(void) {
     if (s_started) return true;
-
     cpu_state_init(&s_cpu, g_ram);
-    /* 65816 reset contract: native mode, 8-bit A and index, stack in page 1,
-     * DB and D zeroed. The ROM's own prologue re-establishes most of this;
-     * setting it here keeps the first interpreted step well-defined. */
-    s_cpu.PB = 0x00;
-    s_cpu.DB = 0x00;
-    s_cpu.D  = 0x0000;
-    s_cpu.S  = 0x01ff;
-    s_cpu.m_flag = 1;
-    s_cpu.x_flag = 1;
+    /* 65816 reset contract: native mode, 8-bit A and index, stack in page 1. */
+    s_cpu.PB = 0x00; s_cpu.DB = 0x00; s_cpu.D = 0x0000;
+    s_cpu.S = 0x01ff;
+    s_cpu.m_flag = 1; s_cpu.x_flag = 1;
     s_cpu.emulation = 0;
     s_cpu.P = 0x30;
     cpu_p_to_mirrors(&s_cpu);
     s_cpu.host_return_valid = 0;
-
     s_resume_pc24 = SC_RESET_PC24;
     s_started = true;
     return true;
 }
 
 bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
-    if (!s_started) return false;
+    /* Do not hand over a frame whose input latch is still busy -- see the long
+     * note on sc_advance_until_input_ready() in src/main.c. */
+    const int trace = getenv("SC_FRAME_TRACE") != NULL;
+    if (trace) fprintf(stderr, "[frame %llu] a: draining input latch\n",
+                       (unsigned long long)frame);
+    sc_advance_until_input_ready();
+    if (trace) fprintf(stderr, "[frame %llu] b: latch drained, bridge at %06X\n",
+                       (unsigned long long)frame, (unsigned)s_resume_pc24);
 
-    int ok = interp_bridge_run_loop(&s_cpu, s_resume_pc24, SC_YIELD_PC24,
-                                    SC_VBLANK_FLAG, SC_VBLANK_WAITING);
+    /* Release the wait the way the NMI handler does with INC $b9 at 00:80bc. */
+    g_ram[SC_VBLANK_FLAG] = 1;
 
-    /* Resume where the wait blocked, not at the reset vector: re-entering at
-     * 00:8000 every frame would reboot the game once per frame, which looks
-     * superficially like it is running. */
-    uint32_t resume = (uint32_t)interp_bridge_lle_resume_pc();
+    /* ARM THE EXECUTION BOUND. The bridge's step cap counts *interpreted*
+     * steps only; once it bounces into a compiled body, nothing counts. Every
+     * generated block polls interp_bridge_lle_master_deadline_reached(), but
+     * that returns false unless a deadline is set, so an unbounded compiled
+     * loop -- e.g. the 00:9280 $4212 spin as AOT code -- hangs the host with no
+     * step cap to catch it. One frame of master cycles is the natural bound. */
+    interp_bridge_set_master_deadline(s_cpu.master_cycles + 357368u);
+
+    unsigned long hle_before = g_simcity_vblank_hle_calls;
+    int ok = interp_bridge_run_loop(&s_cpu, s_resume_pc24,
+                                    SC_YIELD_PC24,
+                                    SC_VBLANK_FLAG,
+                                    SC_VBLANK_WAITING);
+    if (trace) fprintf(stderr, "[frame %llu] c: bridge returned ok=%d\n",
+                       (unsigned long long)frame, ok);
+    uint32 resume = interp_bridge_lle_resume_pc();
     if (resume) s_resume_pc24 = resume;
 
     if (!ok) {
-        /* 0 = the bridge hit its iteration cap. One is not fatal (a long
-         * boot step can outrun it), a run of them means no progress. */
-        if (++s_bails > 120) {
-            fprintf(stderr, "[fiber] bridge bailed %lu times by frame %llu "
-                    "(vblank hle calls = %lu, resume = $%06X) -- the guest is "
-                    "not reaching the vblank wait.\n",
-                    s_bails, (unsigned long long)frame,
-                    g_simcity_vblank_hle_calls, (unsigned)s_resume_pc24);
+        /* The bridge hit its step cap instead of reaching the wait. One of
+         * these is survivable (a long init frame); a run of them is not. */
+        if (++s_bail_streak > 30) {
+            fprintf(stderr, "[frame] bridge bailed %u frames running at "
+                    "frame %llu (resume=%06X, vblank hle calls=%lu)\n",
+                    s_bail_streak, (unsigned long long)frame,
+                    (unsigned)s_resume_pc24, g_simcity_vblank_hle_calls);
             return false;
         }
     } else {
-        s_bails = 0;
+        s_bail_streak = 0;
     }
+    (void)hle_before;
     return true;
 }
