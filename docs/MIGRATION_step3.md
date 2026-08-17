@@ -664,3 +664,62 @@ not.
 The default path is untouched throughout: `--qualify 600` PASS and four save
 states byte-identical between tiers with the frame-model code linked but
 inert.
+
+## 10. The bounce, logged: it stops in `00:8D65` and never unwinds home
+
+`SNESRECOMP_IBRWATCH="000000-ffffff"` turns on the bridge's own bounce trace,
+which already existed and is the tool this needed three sections ago:
+
+```
+[ibr] ENTER frame=0 pc=$008000 s_exit=$01FF cpu->S=$01FF
+[ibr] call op=$20 pc=$008053 -> $008D65 sp_pre=$1FFD aot_ret=1073741824 sp_post=$1FFD
+[ibr] yield-unwind -> $008D65 sp=$1FFD
+<nothing further>
+```
+
+So the whole sequence is now visible:
+
+1. the bridge enters at the reset vector,
+2. the interpreter runs ~131,000 steps of boot correctly,
+3. at `00:8053` a `JSR` bounces into the compiled body for **`00:8D65`**,
+4. that body returns `0x40000000`, a yield-unwind,
+5. the bridge begins unwinding to `$008D65`,
+6. **control never returns to the host driver** -- `run_loop` does not return,
+   so `SimCityFiberDrive_RunGuestFrame` never prints its `c:` marker.
+
+### The deadline is not the cause
+
+The obvious reading of step 4 is that the one-frame deadline fired mid-boot,
+since boot legitimately needs many frames of cycles. Tested: raising it to 600
+frames changes nothing -- same trace, same stall. So the yield-unwind is not
+a deadline expiry, and the bound can stay at one frame.
+
+This also explains the earlier `DEADLINE_DIAG` silence without contradicting
+it: that probe fires only when a deadline has been passed *and suppressed*.
+Neither was happening.
+
+### What is left to find
+
+Why a compiled body returns a yield-unwind here at all, and why the unwind
+does not complete back to the host. Two concrete directions:
+
+- **`00:8D65` itself.** Disassemble it and check what the emitted body does at
+  entry -- the generated prologue tests
+  `interp_bridge_lle_master_deadline_reached()` and, in tiering builds, other
+  conditions that unwind. Knowing which one fires names the bug.
+- **The unwind path.** `interp_bridge_lle_yield_unwind()` sets
+  `s_lle_unwind_owner_depth = s_interp_bounce_owner_depth` and expects the
+  owning bridge frame to notice and return. If the owner depth bookkeeping is
+  wrong for a host that entered through `run_loop` rather than through the
+  runner's own frame driver, the unwind has no frame to land in -- which is
+  exactly the symptom.
+
+The second is the more likely of the two, and it would be an upstream fix
+rather than a game one.
+
+### Method note
+
+`SNESRECOMP_IBRWATCH` existed the whole time and would have produced this trace
+immediately. Three sections of this document -- a deadlock, a slowness, an
+aliasing artefact -- were spent building diagnostics that the runner already
+had. Check the framework's existing switches before adding new ones.

@@ -138,6 +138,8 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
      * that returns false unless a deadline is set, so an unbounded compiled
      * loop -- e.g. the 00:9280 $4212 spin as AOT code -- hangs the host with no
      * step cap to catch it. One frame of master cycles is the natural bound. */
+    /* One frame. Tested at 600 frames too: the run behaves identically, so the
+     * deadline is NOT what stops it -- see MIGRATION_step3 §10. */
     interp_bridge_set_master_deadline(s_cpu.master_cycles + 357368u);
 
     unsigned long hle_before = g_simcity_vblank_hle_calls;
