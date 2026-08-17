@@ -525,7 +525,51 @@ than through that path would poll a deadline that is permanently inert. If
 that is right, the bound cannot be armed from the host at all and it is an
 upstream fix.
 
-### Measured: the hypothesis above is WRONG
+### Correction: it is not a hang, it is ~1000x too slow
+
+Two readings in this section were wrong, both from the same mistake --
+treating a killed timeout as a deadlock.
+
+Adding markers either side of `interp816_runOpcode` shows the interpreter
+advancing perfectly normally:
+
+```
+[pctrace] step=0 pre-runOpcode  pc=008000
+[pctrace] step=0 post-runOpcode cyc=2 pc=00:8001
+[pctrace] step=1 post-runOpcode cyc=2 pc=00:8002
+[pctrace] step=3 post-runOpcode cyc=3 pc=00:8005
+```
+
+So **"stuck inside a single step on `CLC`" was wrong.** The earlier trace
+printed only `step=0` because the modulo interval was 200,000 and the run
+never got that far -- not because it never left step 0.
+
+Measured rate: **~131,000 steps in 20 s, about 6,550 steps/sec.** A 65816
+interpreter should manage millions. The default step cap of 2,000,000 needs
+~5 minutes at that rate, which is why every 40-60 s timeout looked like a
+hang. A 600 s run still did not return, so the true rate is lower again or
+time is going somewhere the step counter does not see.
+
+`SNESRECOMP_INTERP_NOAPU=1` (added for this bisect) does not change it, so the
+bridge's APU catch-up is not the cost.
+
+**This is a performance problem, not a deadlock**, which makes every earlier
+"deadlock" conclusion in this section suspect -- including the fiber one in
+§8. The fiber may equally have been slow rather than stuck; that was never
+measured, only assumed from a timeout.
+
+What is genuinely established: the mapping is right (`run_loop` at 00:9311 on
+`$b9`), the latch drain works, the guest executes real instructions under the
+bridge, and the host's beam advance is correctly ordered around it. What is
+not established is why per-step cost is three orders of magnitude off.
+
+Next step is profiling, not deadlock-hunting: attach a sampling profiler to a
+`SC_FIBER=1` run, or bisect the per-step work by stubbing pieces of
+`_interp_run_core`'s loop body the way `SNESRECOMP_INTERP_NOAPU` stubs the APU.
+The auto-quiescent bookkeeping, the pre-opcode hook scan and the write-log
+sync are all per-step and all candidates.
+
+### Superseded: the hypothesis below was WRONG
 
 Both diagnostics were added to the submodule
 (`SNESRECOMP_DEADLINE_DIAG`, `SNESRECOMP_INTERP_PCTRACE`; commit `93d4dd1`)
