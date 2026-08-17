@@ -525,7 +525,59 @@ than through that path would poll a deadline that is permanently inert. If
 that is right, the bound cannot be armed from the host at all and it is an
 upstream fix.
 
-### Correction: it is not a hang, it is ~1000x too slow
+### Profiled: interpreted progress stops dead at ~131,000 steps
+
+The rate reading in the section below was also wrong, and the ablation that
+settled it is simple -- sample the step counter at several wall-clock
+deadlines:
+
+```
+  5s -> step 131000
+ 10s -> step 131000
+ 20s -> step 131000
+ 40s -> step 131000
+```
+
+Not slow: **stopped**. The interpreter reaches ~131,000 steps within five
+seconds -- a perfectly normal rate -- and then never advances another step.
+The earlier "6,550 steps/sec" divided a plateau by the wall clock.
+
+Those 131,000 steps are real boot work, correctly executed: `00:8000` does
+`CLC ; XCE ; SEI ; REP #$10 ; SEP #$20`, sets a stack, then runs several large
+clear loops (`LDY #$2000` at `00:801B`, the `STA $7e2000,X ; INX ; DEY ; BNE`
+loop at `00:802F`). So the entry state handed to the bridge is fine -- the ROM
+sets its own widths, and the loop trip counts match the ROM's own constants.
+
+**A sampling trap worth remembering:** `PCTRACE=1000` reported `pc=00802F` at
+steps 129000, 130000 and 131000, which reads like a stuck PC. It is not -- the
+loop is four instructions and 1000 is a multiple of 4, so every sample lands
+on the same instruction. Choose an interval coprime with small loop lengths,
+or the aliasing invents a hang.
+
+### Where it actually stops
+
+Interpreted steps stop permanently, while the process keeps running. Combined
+with the earlier measurements -- no `YIELD_DIAG` (never reaches `00:9311`), no
+`DEADLINE_DIAG` (never past the deadline), `NOAPU=1` no help, step cap never
+reached -- that leaves one shape: **the bridge bounced into a compiled body
+and did not return**, and the deadline cannot catch it because
+`cpu->master_cycles` is not advancing past the deadline inside it.
+
+This is the original hypothesis from §9, which the `DEADLINE_DIAG` silence
+appeared to refute. It does not: that diagnostic only fires when the deadline
+has been *passed* and then suppressed. A body that loops without advancing
+`master_cycles` never passes it, so silence is consistent with -- not evidence
+against -- a spinning compiled body.
+
+### Next step, and it is small
+
+Log the bounce: print the target `pc24` each time the bridge enters a compiled
+body, and the last one before the plateau names the routine. `interp_tier_note()`
+already counts tier-downs and would be the natural place. Then either that
+routine has a genuine hardware wait in it (HLE it, as `00:930d` is), or the
+block is failing to advance `master_cycles` (an emitter bug worth reporting).
+
+### Superseded: the rate reading below was wrong
 
 Two readings in this section were wrong, both from the same mistake --
 treating a killed timeout as a deadlock.
