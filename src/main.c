@@ -22,7 +22,13 @@
 #include <string.h>
 #include <ctype.h>
 
-#include <SDL.h>
+/* Shared SDL2/SDL3 include boundary. SNESRECOMP_SDL3 is set by
+ * snesrecomp_target_sdl() in CMakeLists.txt; the shim pulls in the right
+ * SDL and turns on the transitional old-name aliases so constants and types
+ * keep their SDL2 spellings. Calls whose SIGNATURES changed are handled
+ * explicitly at their call sites -- see runner/src/desktop/mmx23_host_main.inc
+ * for how upstream does each one. */
+#include "sc_sdl_compat.h"
 
 #include "snes/snes.h"
 #include "snes/apu.h"
@@ -1015,7 +1021,25 @@ static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
   if (w <= 0 || h <= 0) return false;
   uint32_t *buf = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
   if (!buf) return false;
+#if SNESRECOMP_SDL3
+  /* SDL3 returns a freshly allocated surface rather than filling a caller
+   * buffer, so convert to the format this dumper expects and copy out. */
+  bool ok = false;
+  { SDL_Surface *shot = SDL_RenderReadPixels(renderer, NULL);
+    if (shot) {
+      SDL_Surface *conv = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_ARGB8888);
+      if (conv) {
+        for (int y = 0; y < h && y < conv->h; y++)
+          memcpy(buf + (size_t)y * w, (const uint8_t *)conv->pixels + (size_t)y * conv->pitch,
+                 (size_t)w * 4);
+        SDL_DestroySurface(conv);
+        ok = true;
+      }
+      SDL_DestroySurface(shot);
+    } }
+#else
   bool ok = SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, buf, w * 4) == 0;
+#endif
   if (ok) {
     FILE *f = fopen(path, "wb");
     if (f) {
@@ -2265,9 +2289,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
-  SDL_Window *window = SDL_CreateWindow(
-      "SimCitySNESRecomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-      kVideoWidth * scale, kVideoHeight * scale, SDL_WINDOW_SHOWN);
+  SDL_Window *window = snesrecomp_sdl_create_window(
+      "SimCitySNESRecomp", kVideoWidth * scale, kVideoHeight * scale, 0);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
@@ -2277,24 +2300,22 @@ int main(int argc, char **argv) {
    * animation, not just this cursor), while the interpreter itself was
    * never the bottleneck (SC_FRAME_TIME showed zero frames exceeding the
    * 16.67ms budget). Pace manually against the wall clock instead below. */
-  SDL_Renderer *renderer = SDL_CreateRenderer(
-      window, -1, SDL_RENDERER_ACCELERATED);
+  /* vsync off deliberately -- see the comment above; pacing is manual. */
+  SDL_Renderer *renderer = snesrecomp_sdl_create_renderer(window, false, false);
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
       kVideoWidth, kVideoHeight);
 
-  SDL_AudioSpec want, have;
-  SDL_memset(&want, 0, sizeof(want));
-  want.freq = 32040;
-  want.format = AUDIO_S16SYS;
-  want.channels = 2;
-  want.samples = 1024;
-  SDL_AudioDeviceID audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+  /* Queued (pushed) audio, not a pull callback: this host owns the DSP drain
+   * loop and hands over finished samples. SDL3 removed SDL_QueueAudio and
+   * folded the same behaviour into SDL_AudioStream, so the backend difference
+   * lives in sc_sdl_compat.h rather than here. */
+  ScAudio audio; SDL_memset(&audio, 0, sizeof(audio));
+  bool audio_dev = sc_audio_open(&audio, 32040, 2, 1024);
   if (audio_dev) {
-    SDL_PauseAudioDevice(audio_dev, 0);
-    fprintf(stderr, "audio: opened freq=%d format=%04x channels=%d samples=%d\n",
-            have.freq, have.format, have.channels, have.samples);
+    fprintf(stderr, "audio: opened freq=%d channels=%d samples=%d\n",
+            audio.freq, audio.channels, audio.samples);
   } else {
     /* Previously silent on failure -- every audio code path below is
      * gated on `if (audio_dev)`, so a failed open just ran the whole
@@ -2320,8 +2341,8 @@ int main(int argc, char **argv) {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) quit = true;
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) quit = true;
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F1) {
+      if (ev.type == SDL_KEYDOWN && SNESRECOMP_SDL_EVENT_KEY(ev) == SDLK_ESCAPE) quit = true;
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F1) {
         if (s_pc_bitmap_bank != -1) {
           if (s_pc_bitmap_bank == -2) memset(s_pc_bitmap_all, 0, sizeof(s_pc_bitmap_all));
           else memset(s_pc_bitmap, 0, sizeof(s_pc_bitmap));
@@ -2336,14 +2357,14 @@ int main(int argc, char **argv) {
        * the "Goodbye! See you soon" quit-confirmation screen, instead of
        * hand-timing all 16 inputs. !ev.key.repeat so holding F2 doesn't
        * re-queue every auto-repeat tick. */
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F2 && !ev.key.repeat) {
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F2 && !ev.key.repeat) {
         queue_debug_menu_code(s_frames + 1);
       }
       /* F3: toggle host-mouse cursor control (see apply_mouse_delta below).
        * Off by default -- it's a ported experimental community patch, and
        * incidental OS mouse movement over the window shouldn't silently
        * steer the game cursor unless asked for. */
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F3 && !ev.key.repeat) {
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F3 && !ev.key.repeat) {
         s_mouse_enabled = !s_mouse_enabled;
         if (s_mouse_enabled) SDL_GetRelativeMouseState(NULL, NULL); /* discard stale accumulated delta */
         fprintf(stderr, "[F3] mouse cursor control %s\n", s_mouse_enabled ? "ON" : "OFF");
@@ -2351,7 +2372,7 @@ int main(int argc, char **argv) {
       /* F9: toggle the fast D-pad cursor (see apply_mouse_delta/
        * s_fast_cursor_enabled above). Off by default -- same "opt-in,
        * not authentic ROM behavior" reasoning as F3. */
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F9 && !ev.key.repeat) {
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F9 && !ev.key.repeat) {
         s_fast_cursor_enabled = !s_fast_cursor_enabled;
         fprintf(stderr, "[F9] fast D-pad cursor %s\n", s_fast_cursor_enabled ? "ON" : "OFF");
       }
@@ -2359,12 +2380,12 @@ int main(int argc, char **argv) {
        * above) -- toggles a host-side overlay listing this project's
        * existing toggles/actions in one generic, table-driven list instead
        * of each needing its own memorized hotkey. */
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F10 && !ev.key.repeat) {
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F10 && !ev.key.repeat) {
         s_menu_open = !s_menu_open;
         fprintf(stderr, "[F10] settings menu %s\n", s_menu_open ? "OPEN" : "CLOSED");
       }
       if (s_menu_open && ev.type == SDL_KEYDOWN) {
-        switch (ev.key.keysym.scancode) {
+        switch (SC_EVENT_SCANCODE(ev)) {
           case SDL_SCANCODE_UP:
             /* Step until a non-header lands under the cursor. Bounded by
              * kSettingCount so an all-header table cannot spin forever. */
@@ -2392,7 +2413,7 @@ int main(int argc, char **argv) {
        * down exact WRAM byte values at a precise live moment (e.g. hold a
        * button combo, press F4, inspect $7e011b/$7e011c directly) instead
        * of inferring values from instruction traces. */
-      if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_F4 && !ev.key.repeat) {
+      if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F4 && !ev.key.repeat) {
         const char *path = "wram_snapshot.bin";
         if (write_wram_dump(path))
           fprintf(stderr, "[F4] dumped WRAM to %s at frame %llu\n", path, (unsigned long long)s_frames);
@@ -2416,7 +2437,7 @@ int main(int argc, char **argv) {
        * turns out wrong. */
       if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
         const char *label = NULL; uint8_t bit = 0;
-        switch (ev.key.keysym.scancode) {
+        switch (SC_EVENT_SCANCODE(ev)) {
           case SDL_SCANCODE_F5: label = "No Disasters (unconfirmed bit)"; bit = 0x01; break;
           case SDL_SCANCODE_F6: label = "Needless Money"; bit = 0x02; break;
           case SDL_SCANCODE_F7: label = "Valve Max"; bit = 0x04; break;
@@ -2446,10 +2467,10 @@ int main(int argc, char **argv) {
           { SDL_SCANCODE_0, '0' },
         };
         for (size_t i = 0; i < sizeof(kSlotKeys) / sizeof(kSlotKeys[0]); i++) {
-          if (ev.key.keysym.scancode != kSlotKeys[i].sc) continue;
+          if (SC_EVENT_SCANCODE(ev) != kSlotKeys[i].sc) continue;
           char path[32];
           snprintf(path, sizeof(path), "savestate_%c.bin", kSlotKeys[i].digit);
-          if (ev.key.keysym.mod & KMOD_SHIFT) {
+          if (SC_EVENT_KEYMOD(ev) & KMOD_SHIFT) {
             if (save_state(path))
               fprintf(stderr, "[state] saved slot %c -> %s at frame %llu\n",
                       kSlotKeys[i].digit, path, (unsigned long long)s_frames);
@@ -2506,13 +2527,13 @@ int main(int argc, char **argv) {
     static SDL_Scancode sc_l, sc_r, sc_x, sc_a, sc_y, sc_b, sc_select;
     static bool binds_ready = false;
     if (!binds_ready) {
-      sc_l      = SDL_GetScancodeFromKey(SDLK_q);   /* Q -> L      */
-      sc_r      = SDL_GetScancodeFromKey(SDLK_w);   /* W -> R      */
-      sc_x      = SDL_GetScancodeFromKey(SDLK_a);   /* A -> X      */
-      sc_a      = SDL_GetScancodeFromKey(SDLK_s);   /* S -> A      */
-      sc_y      = SDL_GetScancodeFromKey(SDLK_y);   /* Y -> Y      */
-      sc_b      = SDL_GetScancodeFromKey(SDLK_x);   /* X -> B      */
-      sc_select = SDL_GetScancodeFromKey(SDLK_b);   /* B -> Select */
+      sc_l      = sc_scancode_from_key(SDLK_q);   /* Q -> L      */
+      sc_r      = sc_scancode_from_key(SDLK_w);   /* W -> R      */
+      sc_x      = sc_scancode_from_key(SDLK_a);   /* A -> X      */
+      sc_a      = sc_scancode_from_key(SDLK_s);   /* S -> A      */
+      sc_y      = sc_scancode_from_key(SDLK_y);   /* Y -> Y      */
+      sc_b      = sc_scancode_from_key(SDLK_x);   /* X -> B      */
+      sc_select = sc_scancode_from_key(SDLK_b);   /* B -> Select */
       binds_ready = true;
     }
     if (keys[sc_l]) input |= kPad_L;
@@ -2653,7 +2674,7 @@ int main(int argc, char **argv) {
        * actually running: while the settings menu is open no frames are
        * simulated, so no samples are produced and there is nothing to pace
        * against. (This is the immediate half of the fix below.) */
-      if (!s_menu_open) audio_acc += (double)have.freq / 60.0988;
+      if (!s_menu_open) audio_acc += (double)audio.freq / 60.0988;
       /* Hard-clamp the accumulator to exactly the drain condition's upper
        * bound, which is also audio_buf's capacity. Without this, ANY stall
        * of two or more host iterations where the ring hasn't refilled --
@@ -2680,7 +2701,7 @@ int main(int argc, char **argv) {
       if (available >= 534 && wantN > 0 && wantN <= 1024) {
         audio_acc -= (double)wantN;
         dsp_getSamples(dsp, audio_buf, wantN);
-        int qrc = SDL_QueueAudio(audio_dev, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
+        int qrc = sc_audio_queue(&audio, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
         s_audio_dbg_calls++;
         if (qrc != 0) s_audio_dbg_fails++;
         else s_audio_dbg_queued += (uint64_t)wantN;
@@ -2695,7 +2716,7 @@ int main(int argc, char **argv) {
        * for next time. */
       if (getenv("SC_AUDIO_DEBUG") && (s_frames % 180) == 0) {
         fprintf(stderr, "audio: f=%llu queued_dev=%u drained_total=%llu calls=%llu fails=%llu\n",
-                (unsigned long long)s_frames, SDL_GetQueuedAudioSize(audio_dev),
+                (unsigned long long)s_frames, sc_audio_queued(&audio),
                 (unsigned long long)s_audio_dbg_queued, (unsigned long long)s_audio_dbg_calls,
                 (unsigned long long)s_audio_dbg_fails);
       }
@@ -2746,7 +2767,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (audio_dev) SDL_CloseAudioDevice(audio_dev);
+  if (audio_dev) sc_audio_close(&audio);
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);

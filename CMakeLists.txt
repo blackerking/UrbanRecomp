@@ -5,8 +5,8 @@ set(CMAKE_C_STANDARD 11)
 
 # Prerequisites: a snesrecomp checkout at ./snesrecomp (pinned submodule); the
 # generated C for the variant you build (run `bash tools/regen.sh` with the
-# verified ROM staged, see CONTRIBUTING.md); SDL2 (vcpkg: `sdl2:x64-windows`,
-# or your platform's SDL2 dev package).
+# verified ROM staged, see CONTRIBUTING.md); SDL3 (vcpkg: `sdl3:x64-windows`),
+# or SDL2 with -DSNESRECOMP_SDL_BACKEND=SDL2.
 set(SNESRECOMP_ROOT "${CMAKE_SOURCE_DIR}/snesrecomp" CACHE PATH
     "Path to the snesrecomp checkout used by this game")
 
@@ -75,29 +75,19 @@ set(SIMCITY_DEVICE_SOURCES
 )
 target_sources(SimCitySNESRecomp PRIVATE ${SIMCITY_DEVICE_SOURCES})
 
-target_compile_definitions(SimCitySNESRecomp PRIVATE SDL_MAIN_HANDLED)
 
 if(NOT MSVC)
     target_compile_options(SimCitySNESRecomp PRIVATE
         -w -Wno-implicit-function-declaration)
 endif()
 
-find_package(SDL2 CONFIG QUIET)
-if(TARGET SDL2::SDL2)
-    target_link_libraries(SimCitySNESRecomp PRIVATE SDL2::SDL2)
-else()
-    find_package(SDL2 REQUIRED)
-    target_include_directories(SimCitySNESRecomp PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(SimCitySNESRecomp PRIVATE ${SDL2_LIBRARIES})
-endif()
-
-if(WIN32)
-    add_custom_command(TARGET SimCitySNESRecomp POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:SDL2::SDL2>
-            $<TARGET_FILE_DIR:SimCitySNESRecomp>
-        COMMENT "Copying SDL2.dll next to SimCitySNESRecomp.exe")
-endif()
+# Desktop SDL comes from the runner helper rather than a per-game
+# find_package: it picks the backend (SDL3 by default, SDL2 via
+# -DSNESRECOMP_SDL_BACKEND=SDL2), sets SNESRECOMP_SDL3 and SDL_MAIN_HANDLED,
+# and copies the runtime DLL beside the exe on Windows. Rolling our own is
+# how this project stayed on SDL2 without noticing SDL3 had become the
+# default -- see docs/SDL_BACKENDS.md upstream.
+snesrecomp_target_sdl(SimCitySNESRecomp)
 
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
 #
@@ -149,19 +139,13 @@ if(SIMCITY_GEN_SOURCES)
         # dir rather than on the shared runner include path.
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
-    target_compile_definitions(SimCityAOTProbe PRIVATE SDL_MAIN_HANDLED)
     if(NOT MSVC)
         target_compile_options(SimCityAOTProbe PRIVATE
             -w -Wno-implicit-function-declaration)
     endif()
     # config.h -> sdl_compat.h -> SDL.h, so the probe needs SDL's headers even
     # though it opens no window.
-    if(TARGET SDL2::SDL2)
-        target_link_libraries(SimCityAOTProbe PRIVATE SDL2::SDL2)
-    else()
-        target_include_directories(SimCityAOTProbe PRIVATE ${SDL2_INCLUDE_DIRS})
-        target_link_libraries(SimCityAOTProbe PRIVATE ${SDL2_LIBRARIES})
-    endif()
+    snesrecomp_target_sdl(SimCityAOTProbe)
 endif()
 
 # -- AOT-tier build of the real host (migration step 2) ----------------------
@@ -200,7 +184,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
     target_compile_definitions(SimCitySNESRecompAOT PRIVATE
-        SDL_MAIN_HANDLED SIMCITY_AOT_TIER)
+        SIMCITY_AOT_TIER)
     if(MSVC)
         # See the note on SimCityAOTProbe: cpu_state.c's weak-marked fallback
         # guard table is a strong definition under MSVC.
@@ -209,12 +193,7 @@ if(SIMCITY_GEN_SOURCES)
         target_compile_options(SimCitySNESRecompAOT PRIVATE
             -w -Wno-implicit-function-declaration)
     endif()
-    if(TARGET SDL2::SDL2)
-        target_link_libraries(SimCitySNESRecompAOT PRIVATE SDL2::SDL2)
-    else()
-        target_include_directories(SimCitySNESRecompAOT PRIVATE ${SDL2_INCLUDE_DIRS})
-        target_link_libraries(SimCitySNESRecompAOT PRIVATE ${SDL2_LIBRARIES})
-    endif()
+    snesrecomp_target_sdl(SimCitySNESRecompAOT)
 endif()
 
 # -- AOT differential harness (migration step 3a) ----------------------------
@@ -245,19 +224,13 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
-    target_compile_definitions(SimCityAOTDiff PRIVATE SDL_MAIN_HANDLED)
     if(MSVC)
         target_link_options(SimCityAOTDiff PRIVATE /FORCE:MULTIPLE)
     else()
         target_compile_options(SimCityAOTDiff PRIVATE
             -w -Wno-implicit-function-declaration)
     endif()
-    if(TARGET SDL2::SDL2)
-        target_link_libraries(SimCityAOTDiff PRIVATE SDL2::SDL2)
-    else()
-        target_include_directories(SimCityAOTDiff PRIVATE ${SDL2_INCLUDE_DIRS})
-        target_link_libraries(SimCityAOTDiff PRIVATE ${SDL2_LIBRARIES})
-    endif()
+    snesrecomp_target_sdl(SimCityAOTDiff)
 endif()
 
 # -- Fiber layer self-test ---------------------------------------------------
