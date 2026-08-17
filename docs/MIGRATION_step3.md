@@ -525,15 +525,45 @@ than through that path would poll a deadline that is permanently inert. If
 that is right, the bound cannot be armed from the host at all and it is an
 upstream fix.
 
+### Measured: the hypothesis above is WRONG
+
+Both diagnostics were added to the submodule
+(`SNESRECOMP_DEADLINE_DIAG`, `SNESRECOMP_INTERP_PCTRACE`; commit `93d4dd1`)
+and they refute it:
+
+- `SNESRECOMP_DEADLINE_DIAG=1` prints **nothing**. Nothing is polling the
+  deadline past its expiry, so the hang is not an unbounded compiled body with
+  a suppressed bound. The depth-guard theory is dead.
+- `SNESRECOMP_INTERP_PCTRACE=200000` prints **exactly one line**:
+
+```
+[pctrace] step=0 pc=008000 op=18
+```
+
+The interpreter never reaches step 200000. It is not looping over
+instructions -- **it is stuck inside a single step, the first one**. `$18` is
+`CLC`, which cannot hang.
+
+So the problem is in the per-step host plumbing between the bridge and this
+host, not in guest code, not in coverage, and not in the deadline. Everything
+the bridge does around an opcode is suspect: the APU catch-up path
+(`bridge_apu_flush`, `snes_catchupApu`, `apu_runToGuestCycle`), the
+`g_interp_apu_driving = 1` the bridge sets on entry, or a bus access that
+waits on a device this host advances only from `handle_pos_stuff()`.
+
+Note this host defines its own `rtl_sync_apu_to_cpu_locked` / `RtlApuWrite` as
+no-ops and they win the link over `common_rtl.c`'s (the LNK4006 warnings are
+exactly that), so the bridge may be calling into APU plumbing that this host
+has deliberately stubbed out -- which would fit "hangs on the first step"
+better than anything in the ROM does.
+
 ### Next diagnostic
 
-`SNESRECOMP_INTERP_TRACE=1` dumps the entry path and the stuck loop on a
-step-cap bail -- but only on a bail, which is exactly what is not happening.
-So the cheap next step is instead to print `s_lle_sched_depth` and
-`s_interp_bounce_owner_depth` from inside
-`interp_bridge_lle_master_deadline_reached`, or to bisect by disabling the
-dispatch table so everything stays interpreted and seeing whether the step cap
-then fires. Either answers it in one build.
+Attach a debugger, or bisect the loop body: the answer is inside one iteration
+of `_interp_run_core`'s `for (; steps < step_cap; steps++)`, between the
+`pctrace` print and the next one. Comment out the APU catch-up first -- that is
+the only part of the per-step work this host has stubbed and the runner has
+not.
 
 The default path is untouched throughout: `--qualify 600` PASS and four save
 states byte-identical between tiers with the frame-model code linked but
