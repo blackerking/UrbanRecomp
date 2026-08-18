@@ -29,6 +29,20 @@
  * explicitly at their call sites -- see runner/src/desktop/mmx23_host_main.inc
  * for how upstream does each one. */
 #include "sc_sdl_compat.h"
+/* SDL3 switched the renderer rect APIs from SDL_Rect (int) to SDL_FRect
+ * (float). SDL_ENABLE_OLD_NAMES preserves the NAMES but not the signatures,
+ * so passing an SDL_Rect* to SDL_RenderFillRect under SDL3 reinterprets four
+ * ints as two floats: the rect lands somewhere meaningless and the overlay
+ * silently does not appear. That is what hid the F10 settings menu -- it was
+ * toggling (the OPEN/CLOSED log proves it) and drawing off-screen. */
+#if SNESRECOMP_SDL3
+typedef SDL_FRect ScRect;
+#define SC_RECT(x, y, w, h) ((ScRect){ (float)(x), (float)(y), (float)(w), (float)(h) })
+#else
+typedef SDL_Rect ScRect;
+#define SC_RECT(x, y, w, h) ((ScRect){ (int)(x), (int)(y), (int)(w), (int)(h) })
+#endif
+
 /* SDL3 returns true on success where SDL2 returned 0. */
 #if SNESRECOMP_SDL3
 #define SC_SDL_OK
@@ -1781,7 +1795,7 @@ static void draw_text(SDL_Renderer *renderer, int x, int y, int px, const char *
     for (int row = 0; row < 5; row++)
       for (int col = 0; col < 5; col++)
         if (rows[row] & (1 << (4 - col))) {
-          SDL_Rect r = { cx + col * px, y + row * px, px, px };
+          ScRect r = SC_RECT(cx + col * px, y + row * px, px, px);
           SDL_RenderFillRect(renderer, &r);
         }
     cx += 6 * px; /* 5 cols of glyph + 1 col of spacing */
@@ -1816,7 +1830,7 @@ static void render_settings_menu(SDL_Renderer *renderer) {
 
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
-  SDL_Rect bg = { menu_x, menu_y, menu_w, menu_h };
+  ScRect bg = SC_RECT(menu_x, menu_y, menu_w, menu_h);
   SDL_RenderFillRect(renderer, &bg);
   SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
   SDL_RenderDrawRect(renderer, &bg);
@@ -2863,12 +2877,22 @@ int main(int argc, char **argv) {
        * drift after a one-off slow frame. */
       next_frame_deadline = now;
     }
-    { bool _pok = SDL_RenderPresent(renderer) SC_SDL_OK;
+    /* SDL_RenderPresent returns void on SDL2 and bool on SDL3, so it cannot
+     * share the SC_SDL_OK spelling with the other calls. */
+#if SNESRECOMP_SDL3
+    { bool _pok = SDL_RenderPresent(renderer);
+#else
+    { SDL_RenderPresent(renderer); bool _pok = true;
+#endif
       static int pdiag = -1;
       if (pdiag < 0) pdiag = getenv("SC_SDL_DIAG") ? 0 : 99;
       if (pdiag < 99 && (s_frames % 60) == 0) {
         int ow = 0, oh = 0;
+#if SNESRECOMP_SDL3
         SDL_GetRenderOutputSize(renderer, &ow, &oh);
+#else
+        SDL_GetRendererOutputSize(renderer, &ow, &oh);
+#endif
         fprintf(stderr, "[sdl] present=%d out=%dx%d same_renderer=%d err=%s\n",
                 (int)_pok, ow, oh,
                 (int)(SDL_GetRenderer(window) == renderer), SDL_GetError());

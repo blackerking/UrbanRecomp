@@ -1076,7 +1076,15 @@ This is worth generalising upstream. A cfg `func` silently defaulting to
 the resulting body looks completely clean — same signature as the
 inline-argument bug, and found the same way.
 
-### E1. Old save states restore with broken tiles
+### E1. Old save states restore with broken tiles — **CLOSED, stale files**
+
+> Re-tested on a clean run: states load and render correctly ("works as
+> intended, no problems"). The broken tiles were seen while the SDL3 texture
+> blend bug was live, and did not survive its fix. Nothing to repair -- and
+> had it been a genuine format incompatibility it would still have been a bug
+> with no fix, since old blobs cannot be migrated. Kept for the reasoning
+> below, which correctly ruled out both candidate causes.
+
 
 Reported after the SDL3 black-screen fix: loading a pre-existing save state
 renders the map with broken tiles, while **starting a new map renders

@@ -186,3 +186,41 @@ coverage. Keep such runs out of any union you draw conclusions from.
 - **When the person who knows the game contradicts your static reading, the
   reading is wrong.** That held every time it came up here, including the case
   that unblocked 5,663 instructions.
+
+---
+
+## 8. SDL3: every incompatibility we hit was silent
+
+If you take the runner's SDL3 default (`runner.cmake` +
+`snesrecomp_target_sdl()`), budget for this. Three defects, and **all three had
+the same signature: the code runs, every API returns success, and nothing
+appears.**
+
+| symptom | cause |
+|---|---|
+| window never opens, `SDL_GetError()` empty | `SDL_Init` returns **true** on success in SDL3, `0` in SDL2 -- `!= 0` reads success as failure |
+| window opens, audio plays, **black screen** | SDL3 defaults textures to blending; a framebuffer that carries no alpha (`A=0`) renders fully transparent. Fix: `SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE)` |
+| overlay/menu toggles but is invisible | SDL3 renderer rects are `SDL_FRect` (float), not `SDL_Rect` (int). `SDL_ENABLE_OLD_NAMES` keeps the *names*, not the *signatures*, so four ints are read as two floats and the rect lands off-screen |
+
+Two more that only bite when you touch them:
+
+- `SDL_RenderPresent` returns `void` on SDL2 and `bool` on SDL3 -- a shared
+  "check the return" macro will not compile on both.
+- `SDL_GetRendererOutputSize` (SDL2) is `SDL_GetRenderOutputSize` (SDL3), and
+  the old name does not alias.
+- `SDL_RenderReadPixels` returns an `SDL_Surface *` rather than filling a
+  buffer, and on at least one Windows backend **returns black regardless** --
+  so any screenshot-based self-check silently reports an empty screen.
+
+### The method point, which matters more than the list
+
+**A headless test bar cannot verify a renderer change.** `--qualify`, WRAM
+differentials and unit tests all passed on every one of the broken builds,
+because none of them initialises video. Two defects reached a build reported as
+"fully verified" through that gate.
+
+What does work, and costs nothing: dump the *framebuffer* (not the renderer)
+and compare it byte-for-byte between backends. It touches no SDL rendering API,
+so it validates emulation and picture content independently of the backend, and
+it would have caught the black screen immediately. Everything else needs a
+human looking at the window -- which is how all three were actually found.
