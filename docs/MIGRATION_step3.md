@@ -871,3 +871,60 @@ Worth recording as a pattern: this is the third §-level hypothesis in this
 document to be killed by direct measurement, after the "deadlock" and the
 "1000x slow" readings. The measurements have been cheap and the hypotheses
 expensive; the ordering should have been the other way round.
+
+## 14. Frame 2, traced: it blocks inside 00:8D65's OAM DMA trigger
+
+`SNESRECOMP_IBRWATCH` across both frames:
+
+```
+[frame 1] bridge at 008000
+[ibr] ENTER pc=$008000 s_exit=$01FF
+[ibr] call op=$20 pc=$008053 -> $008D65 aot_ret=1073741824
+[frame 1] c: bridge returned ok=1
+[frame 2] bridge at 008D65
+[ibr] ENTER pc=$008D65 s_exit=$1FFD cpu->S=$1FFD
+   <nothing further>
+```
+
+and `PCTRACE=5000` shows frame 2 reaching `step=0 pc=008D65 op=E2` and never
+step 5000. So it blocks within a few dozen interpreted instructions, with no
+second bounce -- it is *interpreted* code that stops, not compiled.
+
+`00:8D65` programs an OAM DMA and triggers it:
+
+```
+8d69  STA $2102/$2103        ; OAM address
+8d7a  STA $4300,X  DMAP=0
+8d7f  STA $4301,X  BBAD=$04  ; OAMDATA
+8d84  STA $4302-$4304,X      ; A1T = $7E:2000
+8d93  STA $4305/$4306,X      ; size = $0220
+8d9b  LDA $b7 ; ORA #$01     ; -> MDMAEN
+```
+
+`$420B` in `snes.c` drains synchronously:
+
+```c
+dma_startDma(snes->dma, val, false);
+while (dma_cycle(snes->dma)) {}
+```
+
+By inspection that terminates -- `dma_doDma` counts `dmaTimer` down, then
+clears `dmaBusy` once no channel is active, and the transfer is 544 bytes. So
+the drain loop is not obviously the hang, and DMA is **not** ruled in; it is
+merely the most conspicuous thing in the blocking region.
+
+### What this narrows it to
+
+The block is inside a single interpreted instruction's bus access, somewhere in
+`00:8D65`'s register writes. That is a much smaller search space than anything
+earlier in this document: roughly a dozen `STA` sites to $2102/$2103,
+$4300-$4306 and $420B.
+
+The obvious next probe is a bus-access trace over that window -- print each
+register write as it is issued, and the last one printed is the one that does
+not return. `SC_GFX_TRACE` already logs $2105/Mode-7/HDMA registers and could be
+widened, or a temporary print in `bridge_bus_write` scoped to $2100-$43FF would
+do it directly.
+
+**Do not assume it is the DMA.** Three hypotheses in this document have already
+died that way, and the drain loop reads as terminating.
