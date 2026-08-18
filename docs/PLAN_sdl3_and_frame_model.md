@@ -177,3 +177,37 @@ the first thing to check: instrument `sc_audio_open` / the per-frame push in
 Worth noting the diagnostic nearly misled: it prints only three times by
 design, so "three lines then nothing" looked like a stalled loop and was
 actually just the cap. The title bar, not the log, is what identified this.
+
+### Narrowed again: the loop is healthy too
+
+`SC_SDL_DIAG` made periodic (one line per 60 frames) rather than capped at
+three:
+
+```
+20 lines in a 20s run  ->  a steady 60 fps
+```
+
+So the frame loop is **not** stalling either. Combined with the blit
+diagnostics, three things are now measured as working in the SDL3 build:
+
+| | status |
+|---|---|
+| frame loop | iterating at 60 fps |
+| `SDL_LockTexture` / pitch / `memcpy` / `SDL_RenderCopy` | all succeed |
+| window + renderer creation shim | correct for SDL3 |
+
+Which contradicts the reported symptom (no video, frozen FPS in the title), and
+that contradiction is the most useful thing here. Either the presentation step
+is dropping the frame after a successful copy, or **the window being watched
+was not the instance being measured** — several instances were launched across
+this session, including SDL2 and SDL3 builds and short `timeout` runs that open
+their own windows.
+
+Rule that out first, before more instrumentation: run exactly one instance,
+confirm its PID, and watch that window. It is the cheapest remaining
+experiment and it invalidates or confirms every measurement above.
+
+If it survives that, the next suspects in order are `SDL_RenderPresent`
+silently failing (its return is currently unchecked), and the title update at
+`SDL_SetWindowTitle` — a frozen title with a live loop is itself odd and may be
+the clearer signal of the two.

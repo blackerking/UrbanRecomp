@@ -2831,7 +2831,7 @@ int main(int argc, char **argv) {
     bool _cok = SDL_RenderCopy(renderer, texture, NULL, NULL) SC_SDL_OK;
     { static int diag = -1;
       if (diag < 0) diag = getenv("SC_SDL_DIAG") ? 0 : 99;
-      if (diag < 3) { diag++;
+      if (diag < 99 && (s_frames % 60) == 0) {
         fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
                 (int)_lok, pitch, (int)kVideoPitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
