@@ -175,47 +175,73 @@ needs it too (three of them here). Without it the AOT target fails to link on
 
 ## B. Static recompilation
 
-### B1. Step 3d — the guest runs inside the fiber, and deadlocks
+### B1. Step 3d — the guest runs inside the fiber — **CLOSED, it works**
 
-**Attempted; the driver exists and the diagnosis is now specific.**
-`SC_FIBER=1` on the AOT build creates the game fiber, installs the vblank
-yield, and enters the guest. `src/simcity_fiberdrive.c`, strictly opt-in;
-the default path is verified byte-identical between tiers with the fiber
-code linked but inert.
-
-Two things changed the picture:
-
-- **A compiled entry point exists now.** §5 of `MIGRATION_step3.md` ruled out
-  ar-recomp's design because both architectural entries were `lle_only`.
-  `03:d283` is compiled, so `008000:M1X1` is too, and the dispatch table
-  carries it as `I_RESET_M1X1`. Measured: the fiber switch works and the
-  compiled reset handler is entered.
-- **It then hangs, for a reason the entry point was masking.** Devices only
-  advance while the *host* holds the fiber, so any guest loop spinning on a
-  hardware status register deadlocks. The boot path has one, and it executes
-  in every recorded session: `00:9280 LDA $4212 ; AND #$01 ; BNE $9280`,
-  waiting on auto-joypad-busy, which clears only as the beam advances.
-
-Worse, a bare call to a compiled body has **no execution bound at all**:
-`interp_bridge_lle_master_deadline_reached`, which every generated block
-polls, requires `s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0`
-and is inert outside `interp_bridge_run_scheduler`. So the host cannot even
-time the guest out.
-
-Next step is a choice between HLE-ing the status spins, yielding on device
-reads, or driving through `interp_bridge_run_scheduler` — laid out with
-trade-offs in `docs/MIGRATION_step3.md` §7. The third is the framework's own
-direction and the only one that restores the bound.
-
-### B2. Is the AOT tier actually faster here?
-
-Never measured. Both tiers are byte-identical on seven save states, so a
-straight wall-clock comparison over a fixed frame count is now cheap and
-would say whether continuing to push coverage is worth anything at runtime,
-or whether the interpreter is already fast enough on a modern host.
+> The frame-model host boots, services NMI through the real 00:80B2, paces
+> audio, presents video, and passes `--qualify` at 600 frames. Three things had
+> to be true at once and each was found by measurement: the AOT bus globals had
+> to be published (a NULL `g_dma` was the frame-2 wedge), NMI had to be
+> *delivered* rather than simulated, and the APU had to be paced off total
+> elapsed master time rather than the host's share of the beam. Full account in
+> docs/MIGRATION_step3.md 20-23.
+>
+> It is **not** shown equivalent to the per-opcode host -- WRAM agrees to 99.9%
+> and the rest is unattributed. The per-opcode path stays the correctness
+> baseline and remains the only host that records coverage bitmaps.
 
 ---
+### B2. Is the AOT tier actually faster here? — **MEASURED: no**
 
+Now answerable, because there is finally a host that routes execution through
+compiled bodies. 600 frames, Release/MSVC, three runs each:
+
+| path | wall clock | per guest frame |
+|---|---|---|
+| interpreter (per-opcode) | 3.06 / 3.08 / 3.57 s | ~5.2 ms |
+| fiber (bridge + AOT bodies) | 3.60 / 3.63 / 3.70 s | ~6.0 ms |
+
+**The AOT path is ~15-17% slower**, not faster.
+
+The obvious objection -- that the fiber run might have quietly interpreted
+everything, which would look identical -- is ruled out by counting:
+
+```
+fiber   aot: bounces=5263  interp_steps=2790629
+interp  aot: bounces=0     interp_steps=0
+```
+
+So compiled bodies genuinely execute: 5,263 entries through the paired ABI,
+about 8.8 per frame, with ~530 interpreted opcodes between them. For scale, the
+per-opcode host runs on the order of 7,400 opcodes/frame, so the compiled
+bodies are carrying a real minority share of the work rather than a token one.
+
+### What this means for coverage work
+
+Pushing AOT coverage further buys **nothing at runtime for this game on this
+host**. The interpreter already runs 600 frames (9.98 s of game) in about 3.1 s
+-- roughly 3x real time -- so there is no performance problem to solve, and the
+bridge overhead on the compiled path currently exceeds what the compiled bodies
+save.
+
+That is an argument about *this* game on *this* host, and not an argument
+against the coverage work, whose value here was always the analysis artifact:
+the exit-M/X fixpoint, the decode-alignment checking, and the cfg directives are
+what make the ROM legible. It does mean runtime speed should stop being cited
+as a reason to chase the last few percent.
+
+### Caveats, stated because they are load-bearing
+
+- The two paths do not do identical work. The fiber run services 600 NMIs
+  against 592 and accounts master cycles differently (280M vs 214M), so the
+  per-guest-frame column is the fairer of the two comparisons.
+- The bridge calls `snes_sync_master_clock()` after **every** interpreted
+  opcode, which is overhead the per-opcode host does not pay in the same shape.
+  A meaningful part of the 17% may be that rather than anything about compiled
+  code quality.
+- One interpreter sample came in at 3.57 s against 3.06/3.08. This is a VM;
+  treat single runs with suspicion.
+
+---
 ## C. Reverse engineering
 
 ### C1. How is the tick routine entered? (narrowed)

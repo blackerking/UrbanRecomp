@@ -2198,6 +2198,24 @@ static int run_qualification(uint64_t frames) {
       rc = 1;
     }
   }
+#ifdef SIMCITY_AOT_TIER
+  /* Did the guest actually run COMPILED code? Without this the wall-clock
+   * comparison in OPEN_QUESTIONS B2 is unreadable: a fiber run that quietly
+   * interpreted everything would look exactly like a slow AOT tier. Tier-downs
+   * are only reachable FROM a compiled body, so a nonzero count is positive
+   * evidence that compiled code executed. */
+  { extern long interp_tier_hit_count(void);
+    extern void interp_tier2_stats(int *sites, unsigned long long *clean,
+                                   unsigned long long *bail);
+    int sites = 0; unsigned long long clean = 0, bail = 0;
+    interp_tier2_stats(&sites, &clean, &bail);
+    extern unsigned long long g_interp_bridge_bounces;
+    extern unsigned long long g_interp_bridge_steps;
+    fprintf(stderr, "aot: bounces=%llu interp_steps=%llu tier_downs=%ld gap_sites=%d clean=%llu bail=%llu",
+            g_interp_bridge_bounces, g_interp_bridge_steps,
+            interp_tier_hit_count(), sites, clean, bail);
+    fprintf(stderr, "\n"); }
+#endif
   fprintf(stderr,
           "qualify: %s frames=%llu master=%llu logic_changes=%llu "
           "logic_stall_max=%llu audio_samples=%u audio_active_frames=%llu "
