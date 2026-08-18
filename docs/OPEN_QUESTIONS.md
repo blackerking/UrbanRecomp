@@ -1075,3 +1075,35 @@ This is worth generalising upstream. A cfg `func` silently defaulting to
 `M1X1` is a trap whenever the routine is only entered at another width, and
 the resulting body looks completely clean — same signature as the
 inline-argument bug, and found the same way.
+
+### E1. Old save states restore with broken tiles
+
+Reported after the SDL3 black-screen fix: loading a pre-existing save state
+renders the map with broken tiles, while **starting a new map renders
+correctly**.
+
+That "new map is fine" is what makes it diagnosable. The renderer, the tile
+decoder and the PPU path are all evidently working — so this is a
+**save-state restore** problem, not a rendering one, and not SDL-related at
+all (SDL cannot affect guest VRAM).
+
+The likely shape: the state blob captures WRAM and CPU/PPU registers, but the
+tile data lives in VRAM, and either it is not captured, not restored, or is
+restored without whatever re-upload the game normally performs on a screen
+change. A new map runs the game's own tile upload and therefore looks right.
+
+Worth checking in this order, cheapest first:
+
+1. **Does the save/load path cover VRAM at all?** `snes_saveload` in the runner
+   handles PPU state; confirm VRAM is inside that blob rather than assumed to
+   be rebuilt.
+2. **Do the existing states predate a format change?** All nine were captured
+   over several sessions and the submodule has moved a long way since --
+   including a rebase onto upstream `main`. A silently changed field order
+   would produce exactly this.
+3. **Does forcing a tile re-upload after load fix it?** If so the state is
+   fine and only the post-load refresh is missing.
+
+Note this may be long-standing rather than new: until the SDL3 fix, a black
+window would have hidden it completely on that backend, and nobody had reason
+to load an old state and stare at the tiles on the SDL2 one.
