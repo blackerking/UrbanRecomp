@@ -903,7 +903,17 @@ static bool run_one_frame_fiber(void) {
   /* Release the wait: the real NMI handler's INC $b9 at 00:80bc. */
   g_ram[0xb9] = 1;
 
-  return SimCityFiberDrive_RunGuestFrame(s_frames);
+  {
+    static uint64_t last_guest_master;
+    bool ok = SimCityFiberDrive_RunGuestFrame(s_frames);
+    /* Mirror the guest clock into the host counter the qualify bar and the
+     * APU pacing read. Without this the frame path reports master=0 and every
+     * cycle-derived check reads as dead. */
+    uint64_t now = SimCityFiberDrive_MasterCycles();
+    if (now > last_guest_master) g_master_cycles += now - last_guest_master;
+    last_guest_master = now;
+    return ok;
+  }
 }
 #endif /* SIMCITY_AOT_TIER */
 

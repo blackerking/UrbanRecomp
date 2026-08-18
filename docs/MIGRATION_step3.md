@@ -1133,3 +1133,48 @@ expected, none mysterious:
 
 These are wiring, not architecture. The hard part -- getting the guest to
 execute and yield under the bridge -- is done.
+
+## 19. Yield wiring: the HLE was for the fiber, and the clock now advances
+
+Two wiring items from §18, both fixed, and one left.
+
+**Dropped `hle_func 930d`.** The HLE existed for the *fiber* design, where it
+was the only way to hand a frame back from arbitrary call depth. Under
+`run_loop` the bridge detects the same wait itself through `yield_pc`
+(`00:9311` on `$b9`) -- but only in **interpreted** code. An HLE'd `00:930d`
+inside a compiled body returned immediately and the frame was never paced, so
+the HLE was actively defeating the mechanism meant to replace it. Commented out
+in `recomp/bank00.cfg`; `src/simcity_hle.c` is kept, since the fiber design is
+still a live option if the bridge route stalls.
+
+**Mirrored the guest clock.** `--qualify` and the APU pacing read
+`g_master_cycles`, which only the per-opcode loop increments, so the frame path
+reported `master=0` and every cycle-derived check read as dead. The driver now
+exposes `SimCityFiberDrive_MasterCycles()` and the frame path advances the host
+counter by the guest's own delta:
+
+```
+master=0  ->  master=173445708 over 300 frames
+```
+
+### What is left: nobody runs the NMI handler
+
+```
+qualify: FAIL frames=300 master=173445708 logic_changes=298
+         video_changes=0 nmi_requests=180 nmi_serviced=0
+```
+
+`nmi_requests=180, nmi_serviced=0` is the whole remaining story. The host
+releases the vblank wait by writing `$b9` directly -- the *effect* of
+`00:80bc`'s `INC $b9` -- but never runs the NMI handler itself. On this game
+the handler does the per-frame PPU work (OAM and VRAM uploads), so the guest
+computes frames that are never presented. Video frozen, audio idle, logic
+changing: exactly the signature of a simulation running with its output stage
+missing.
+
+The fix is the piece ar-recomp's host does explicitly: re-arm NMI and let the
+guest service it. `snes->forceNmi` / `nmiAvail` exist for this, and `00:80B2`
+is already declared as a func. Note it is `lle_only`, blocked through
+`00:C3F9`'s `m0x1` demand -- which does not matter here, since the bridge will
+interpret it, but it does mean the handler will not be compiled until that
+variant is resolved.

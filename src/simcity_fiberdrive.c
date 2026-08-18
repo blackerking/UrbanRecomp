@@ -193,3 +193,9 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
     (void)hle_before;
     return true;
 }
+
+/* The qualify counters and the APU pacing in src/main.c are driven from
+ * g_master_cycles, which only the per-opcode loop increments. Expose the
+ * guest clock so the frame path can advance it by the same amount the guest
+ * actually consumed. */
+uint64_t SimCityFiberDrive_MasterCycles(void) { return s_cpu.master_cycles; }

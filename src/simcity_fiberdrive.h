@@ -19,4 +19,6 @@ bool SimCityFiberDrive_Init(void);
  * for diagnostics. */
 bool SimCityFiberDrive_RunGuestFrame(uint64_t frame);
 
+uint64_t SimCityFiberDrive_MasterCycles(void);
+
 #endif /* SIMCITY_FIBERDRIVE_H */
