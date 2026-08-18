@@ -1689,3 +1689,59 @@ observed that its ongoing behaviour is not ladder-driven. The initiator and the
 process are separate, and only the initiator is a `$0197` bit. Worth keeping
 both readings: "not in the ladder" is right about the spread and wrong only if
 read as "no bit starts it".
+
+## `03:B92E` — the spontaneous disaster selector (never executed)
+
+After the difficulty-scaled RNG draw passes (`03:B91E`, 1 in 4801/2401/1201),
+a second draw picks *which* disaster. The whole selector at `03:B93E-B966` has
+**never executed in any recording**, and it decodes at m=0 — a width-blind read
+here produces `BRK` garbage, which is presumably why it stayed dark.
+
+```
+03:b92e  JSR $907e ; AND #$07        ; random 0..7
+03:b934  CMP #$02 ; BCS $b93e
+03:b939  JSR $bb6a                   ; draws 0-1
+03:b93e  CMP #$0004 ; BCS $b948
+03:b943  JSR $bc0b                   ; draws 2-3   flood
+03:b948  CMP #$0005 ; BNE $b952
+03:b94d  JSR $b9db                   ; draw  5     tornado
+03:b952  CMP #$0006 ; BNE $b95c
+03:b957  JSR $baf5                   ; draw  6     earthquake
+03:b95c  LDA $0c07 ; CMP #$0050 ; BCC $b967
+03:b964  JSR $ba47                   ; draws 4,7   monster, gated
+```
+
+| draw | disaster | share |
+|---|---|---|
+| 0-1 | `03:bb6a` | 2/8 |
+| 2-3 | flood | 2/8 |
+| 5 | tornado | 1/8 |
+| 6 | earthquake | 1/8 |
+| 4, 7 | monster, **if `$0c07` >= `$50`** | 2/8 |
+
+Note draw 4 falls through both equality tests and lands on the monster gate, so
+the monster gets two draws rather than one.
+
+**`$0c07 >= 80` gates the monster.** That is a threshold on city state the
+monster needs before it can appear — the shape of a population or size gate,
+though which is not established here.
+
+`03:bb6a` taking draws 0-1 is the only arm of this selector that has ever run,
+which fits: an earlier session established it is *not* fire's spread step. Fire
+(`03:bbb9`) and the plane crash (`03:b9cd`) are the two ladder handlers this
+selector never calls directly, so `03:bb6a` choosing between them is the
+obvious hypothesis — and explicitly only a hypothesis.
+
+### What this says about the meltdown
+
+The meltdown is not here either. The spontaneous path can raise flood,
+tornado, earthquake, monster and whatever `03:bb6a` picks — six ladder
+handlers, no seventh. Combined with the ladder itself being fully attributed,
+the meltdown is not reachable by setting any `$0197` bit or by any random
+draw, which is consistent with the reported behaviour that it comes with the
+scenario.
+
+So a menu trigger for it cannot work the way the six do. It needs whatever the
+Boston scenario sets up at load time, and that is the next thing to find —
+`03:ce2e` (scenario map loader) and `03:ddb6` (scenario select) are the places
+to look.
