@@ -1178,3 +1178,54 @@ is already declared as a func. Note it is `lle_only`, blocked through
 `00:C3F9`'s `m0x1` demand -- which does not matter here, since the bridge will
 interpret it, but it does mean the handler will not be compiled until that
 variant is resolved.
+
+## 20. Two ways to service NMI, both tried, both blocked
+
+Neither works yet, and both failures are informative.
+
+**ar-recomp's pattern does not exist here.** Its host does
+`g_snes->forceNmi = true; g_snes->nmiAvail = true;` around the coroutine
+switch. Neither field is in this runner's `Snes` -- they are additions in
+ar-recomp's own fork of snesrecomp. So the reference implementation cannot be
+copied directly, which is worth knowing before anyone else plans around it.
+
+**`interp_bridge_run_interrupt()` runs, but stalls the guest.** This runtime
+does have a documented entry for the job, and `00:80B2` is the NMI vector.
+Calling it per frame:
+
+| | before | with run_interrupt |
+|---|---|---|
+| `logic_changes` | 298 | **0** |
+| `logic_stall_max` | 0 | **298** |
+| `master` | 173M | **897M** |
+| `nmi_serviced` | 0 | 0 |
+
+So the handler consumes a great deal of guest time and the main `run_loop`
+then cannot make progress at all -- strictly worse than not calling it, and
+`nmi_serviced` still reads 0, so the host's own NMI accounting never sees it
+either. Reverted; the driver keeps writing `$b9` directly, with both attempts
+recorded in the comment there.
+
+### Why this is not "stuck"
+
+The current failure is a simulation running with its output stage missing:
+`logic_changes=298` over 300 frames means the guest is computing, and
+`video_changes=0` means nothing presents it. That is one missing mechanism,
+not an unknown.
+
+Three routes remain, none exhausted:
+
+1. **Understand the `run_interrupt` stall.** It is the runtime's own API for
+   this and it does execute; the question is why re-entering the bridge for the
+   handler starves the outer `run_loop`. `SNESRECOMP_IBRWATCH` during the
+   interrupt would show what it bounces into.
+2. **Port `forceNmi`/`nmiAvail`.** They are a small, well-understood pair in
+   ar-recomp's fork, and adding them to this runner is a contained change --
+   plausibly upstreamable, since every fiber/frame host needs this.
+3. **Drive presentation host-side.** The per-opcode path already renders
+   correctly; the frame path could call the same presentation directly and
+   leave NMI purely for guest state. Weaker, but it would produce a picture and
+   make the remaining gap visible instead of invisible.
+
+Route 2 is the most likely to work and the most useful to others; route 1 is
+the cheapest to investigate and would inform route 2.

@@ -154,7 +154,27 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
     if (trace) fprintf(stderr, "[frame %llu] b: latch drained, bridge at %06X\n",
                        (unsigned long long)frame, (unsigned)s_resume_pc24);
 
-    /* Release the wait the way the NMI handler does with INC $b9 at 00:80bc. */
+    /* Arm NMI for this frame and let the guest SERVICE it, rather than faking
+     * its effect. Writing $b9 directly releases 00:930d's wait but skips the
+     * rest of 00:80B2 -- which on this game is the per-frame PPU work, so the
+     * guest computed frames that were never presented (video_changes=0,
+     * nmi_serviced=0). ar-recomp does exactly this around its coroutine
+     * switch: forceNmi + a fresh RDNMI token before, cleared after. */
+    /* Release the wait the way 00:80bc's INC $b9 does.
+     *
+     * This is a stand-in for servicing NMI, and it is why video stays frozen:
+     * it skips the rest of 00:80B2, which on this game does the per-frame PPU
+     * work. Two ways to do it properly were tried and neither works yet:
+     *
+     *   - ar-recomp arms g_snes->forceNmi / nmiAvail around its coroutine
+     *     switch. Neither field exists in this runner; they are additions in
+     *     ar-recomp's own fork.
+     *   - interp_bridge_run_interrupt(&s_cpu, 0x0080B2) runs, but the guest
+     *     then stalls: logic_changes 298 -> 0 with logic_stall_max 298, and
+     *     master jumps 173M -> 897M. Measured, not guessed. Something about
+     *     re-entering the bridge for the handler leaves the main run_loop
+     *     unable to make progress; that is the next thing to understand.
+     */
     g_ram[SC_VBLANK_FLAG] = 1;
 
     /* ARM THE EXECUTION BOUND. The bridge's step cap counts *interpreted*
