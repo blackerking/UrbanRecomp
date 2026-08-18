@@ -723,3 +723,54 @@ rather than a game one.
 immediately. Three sections of this document -- a deadlock, a slowness, an
 aliasing artefact -- were spent building diagnostics that the runner already
 had. Check the framework's existing switches before adding new ones.
+
+## 11. The numbers: a correct unwind that never comes home
+
+`SNESRECOMP_DEADLINE_DIAG` extended to report the *firing* case (not only the
+suppressed one) gives the whole answer in one line:
+
+```
+[deadline_diag] FIRED master=2867964 deadline=357368 sched=1 bounce=1
+```
+
+Reading it:
+
+- `sched=1 bounce=1` — both depth guards are set, so the machinery is wired up
+  correctly. The §9 worry that `s_interp_bounce_owner_depth` might never be set
+  from a `run_loop` host is disproved.
+- `master=2867964` vs `deadline=357368` — the bound was armed at
+  `master_cycles + one frame`, from a `master_cycles` of 0 at the first call.
+  **Boot legitimately needs ~2.87M master cycles, about 8 frames, before it
+  reaches its first vblank wait.** So the deadline is passed honestly, and the
+  compiled body at `00:8D65` is right to unwind.
+
+`00:8D65` itself is unremarkable and is not the problem: it sets the OAM
+address (`$2102`/`$2103`) and programs a DMA channel (`$4300,X`, `BBAD=$04` =
+OAMDATA). It is an OAM upload, and it happens to be the first compiled body
+boot bounces into after the deadline has already expired.
+
+### The actual defect
+
+The unwind is correct; it just does not come home. `interp_bridge_run_loop`
+never returns to `SimCityFiberDrive_RunGuestFrame` after
+`interp_bridge_lle_yield_unwind()` propagates out of the bounce, so the host
+never gets the chance to re-arm the deadline and resume. That is the one thing
+left to fix, and it is squarely in the bridge rather than in this game.
+
+Raising the bound to 600 frames does *not* work around it, and that is
+consistent rather than contradictory: with no unwind, boot then runs into an
+unbounded wait in compiled code with nothing left to interrupt it. The two
+symptoms have one cause -- the host cannot regain control from inside a bounce.
+
+### Where a fix goes
+
+A host driving through `run_loop` needs the deadline unwind to surface as a
+return, exactly as the vblank yield does. Either `run_loop` should treat an
+unwound bounce as a cooperative block point and return 1 with the resume PC
+set, or it needs a documented way for the caller to detect and resume one.
+Note the resume PC in the trace is the callee's *entry* (`-> $008D65`), which
+is the right place to resume from, so the information is already there.
+
+The pragmatic interim for this repo is to arm the deadline generously enough
+to cover boot (~8 frames) and only tighten it once the guest is running --
+but that is a workaround for a missing return path, not a fix.
