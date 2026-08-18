@@ -917,10 +917,23 @@ static bool run_one_frame_fiber(void) {
 }
 #endif /* SIMCITY_AOT_TIER */
 
+static int      s_disaster_bit = -1;
+static uint64_t s_disaster_frame;
+
+/* Fire the scripted SC_DISASTER trigger once, at its frame. */
+static void sc_maybe_trigger_disaster(void) {
+  if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
+  g_ram[0x0197] |= (uint8_t)(1u << s_disaster_bit);
+  fprintf(stderr, "[disaster] set $0197 bit %d -> $0197=%02x at frame %llu\n",
+          s_disaster_bit, g_ram[0x0197], (unsigned long long)s_frames);
+  s_disaster_bit = -1;
+}
+
 static bool run_one_frame(void) {
 #ifdef SIMCITY_AOT_TIER
   if (s_fiber_mode) return run_one_frame_fiber();
 #endif
+  sc_maybe_trigger_disaster();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -2108,6 +2121,24 @@ int main(int argc, char **argv) {
                       "(entry I_RESET_M1X1)\n");
     } }
 #endif
+  /* SC_DISASTER=<bit>@<frame>: set one $0197 disaster bit at a given frame,
+   * headlessly. Exactly what the F10 menu does interactively -- the game's own
+   * disaster-selection page sets these bits and 03:b8ae services them -- but
+   * scriptable, so a single-disaster run can be recorded per bit without a
+   * human driving menus. That is what docs/ROM_MAP.md asks for to attribute
+   * the four unidentified arms.
+   *
+   * Not a freeze: the bit is set once and the ROM clears it itself after its
+   * handler runs, so execution stays on paths the game really takes. */
+  { const char *e = getenv("SC_DISASTER");
+    if (e && *e) {
+      unsigned bit = 0; unsigned long long at = 0;
+      if (sscanf(e, "%u@%llu", &bit, &at) == 2 && bit < 6) {
+        s_disaster_bit = (int)bit; s_disaster_frame = at;
+      } else {
+        fprintf(stderr, "SC_DISASTER: want <bit 0-5>@<frame>\n");
+      }
+    } }
   { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
   { const char *e = getenv("SC_VIEW_WATCH"); if (e && *e) s_view_watch = true; }
   { const char *e = getenv("SC_MENU_PREVIEW");

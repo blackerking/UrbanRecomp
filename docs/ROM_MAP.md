@@ -1121,6 +1121,14 @@ tornado and monster runs did.
 
 ### Reading the unattributed arms
 
+> **SUPERSEDED — bit 2 is the plane crash, not the meltdown.** See "Bit 2 is
+> the plane crash" further down: `$0a8d` counts **airports**, not nuclear
+> plants, and the meltdown is not in the `$0197` ladder at all. The paragraph
+> below is kept because its *mechanism* reading is right — the arm really is
+> just a guard on `$0a8d`, which is why it shows so few covered bytes — only
+> the identification was wrong. Left in place rather than deleted so the
+> correction stays visible; the table further down carries the right answer.
+
 **Bit 2 (`03:b9cd`) is the nuclear meltdown.** Its whole body is a guard:
 
 ```
@@ -1178,7 +1186,7 @@ random-cell picker starts. Corrected spans are used in the table below.
 |---|---|---|---|
 | 0 | `03:bbb9` | 82 | roaming destroyer, needs tile property bit 2 — unplaced |
 | 1 | `03:bc0b` | 148 | unplaced; runs in most sessions, so not disaster-specific |
-| 2 | `03:b9cd` | 14 | **nuclear meltdown** — confirmed via `$0a8d` |
+| 2 | `03:b9cd` | 14 | **plane crash** — `$0a8d` is the airport count; see the correction below |
 | 3 | `03:b9db` | 108 | **tornado** — confirmed by session |
 | 4 | `03:baf5` | 117 | **earthquake** — confirmed by session; epicentre `$0ba9`/`$0baa`, entity `$0E` |
 | 5 | `03:ba47` | 174 | **monster** — confirmed by session, entity `$0B` |
@@ -1584,3 +1592,55 @@ which is why View is available in every scenario from the start.
 Measured across this repo's save states: `$01e7 = 0x0002` in savestates 3-6
 (scenarios, View unlocked), `0x0000` in 0/1/2/7/8 (practice/free play),
 `0x0001` in 9.
+
+## Meltdown and UFO are scenario-driven, not `$0197` bits
+
+Reported from play, and it fits everything measured:
+
+> "Meltdown is triggered when you open up the scenario, and it is more likely
+> when you started a difficult game."
+
+So the nuclear meltdown is **not** one of the six `$0197` arms. That resolves
+the long-running confusion in this file, where bit 2 was first read as the
+meltdown and later corrected to the plane crash — the meltdown was never in
+the ladder to be found.
+
+The same is true of the UFO, already established as entity type `$14` and
+outside the `$0197` ladder. Both are scenario-scoped events:
+
+| event | scope | mechanism |
+|---|---|---|
+| six `$0197` arms | any city | disaster-selection page sets a bit, `03:b8ae` services it |
+| nuclear meltdown | Boston scenario | set up when the scenario is opened |
+| UFO | Las Vegas scenario | entity type `$14` |
+
+The difficulty half of the report is already quantified here: `$0b57` indexes
+`03:b969`, and each step **doubles** the per-tick disaster chance (1 in 4801 /
+2401 / 1201). Whether that same word also gates the scenario-scoped events, or
+only the ladder's spontaneous firing, is not established — the RNG draw at
+`03:b91e` is on the ladder path, so on present evidence it scales the six, and
+the report's "more likely on hard" may be about those rather than the meltdown
+specifically.
+
+### Confirmed: each `$0197` bit drives its own arm
+
+`SC_DISASTER=<bit>@<frame>` (src/main.c) sets one bit headlessly — the same
+thing the F10 menu and the game's own disaster page do. One run per bit from
+`savestate_9`, diffed against a no-disaster baseline, counting newly executed
+addresses inside each handler body:
+
+| bit set | new addresses in its own handler |
+|---|---|
+| 0 | 33 |
+| 1 | 65 |
+| 2 | 4 |
+| 3 | 41 |
+| 4 | 46 |
+| 5 | 46 |
+
+Every bit lights its own arm, and bits 3 and 5 reproduce the tornado and
+monster attributions that came from hand-played sessions — so the method is
+validated against known answers before being trusted on the unknown ones.
+
+Bit 2's mere 4 addresses are the `$0a8d` guard bailing out: `savestate_9` has
+no airport, so the plane crash has nothing to crash.
