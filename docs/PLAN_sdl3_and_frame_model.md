@@ -211,3 +211,49 @@ If it survives that, the next suspects in order are `SDL_RenderPresent`
 silently failing (its return is currently unchecked), and the title update at
 `SDL_SetWindowTitle` — a frozen title with a live loop is itself odd and may be
 the clearer signal of the two.
+
+### Fixed: SDL3 defaults textures to blending, and the framebuffer has no alpha
+
+The black screen was alpha. `s_video_pixels` is `ARGB8888` but the PPU never
+writes an alpha byte, so every pixel carries `A=0`. Under SDL2 that was
+harmless — a texture defaults to `SDL_BLENDMODE_NONE` and alpha is ignored.
+**SDL3 defaults the same texture to blending**, so `A=0` renders it fully
+transparent.
+
+```c
+SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
+```
+
+Confirmed by looking at the window: picture.
+
+That explains why every diagnostic said the pipeline was healthy — it *was*.
+The loop ran at 60 fps, `SDL_LockTexture` succeeded with the right pitch, the
+`memcpy` ran, `SDL_RenderCopy` returned success, `SDL_RenderPresent` returned
+success, the output size was right and the renderer belonged to the window.
+Every one of those was true and the screen was still black, because the failure
+was in how the correct pixels were *composited*, which no return code reports.
+
+### A second bug, still open: the screenshot path
+
+`write_renderer_ppm` still reads back an all-black image (3 non-black bytes of
+1,548,288) while the window visibly shows the game. So `SDL_RenderReadPixels`
+under SDL3 is not capturing what is displayed, independently of the fix above.
+Row-by-row copying with the surface's own pitch — a real bug in the first SDL3
+port of that function — did not change it, so the remaining cause is elsewhere.
+
+That matters beyond screenshots: `SC_MENU_PREVIEW` and any future
+render-output check depend on it, and while it is broken those checks report
+black regardless of truth.
+
+### The method note this whole episode earns
+
+**Four separate times in this thread, my instrumentation was wrong and the
+window was right.** The stale-instance theory, the "loop is stalling" reading,
+the capped diagnostic, and finally a readback that reports black while the
+screen shows a picture. Every measurement I built agreed with itself and
+disagreed with reality.
+
+The rule that would have saved all of it: for a change to what is drawn,
+**look at it first**, and only then reach for instrumentation — and treat a
+verification path you had to modify for the same migration as a suspect, not
+as evidence.

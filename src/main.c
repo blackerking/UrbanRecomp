@@ -1107,7 +1107,14 @@ static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
   SDL_Surface *_shot = SDL_RenderReadPixels(renderer, NULL);
   bool ok = _shot != NULL;
   if (ok) {
-    SDL_memcpy(buf, _shot->pixels, (size_t)w * h * 4);
+    /* Copy row by row: the surface pitch is not necessarily w*4, and a flat
+     * memcpy of w*h*4 silently produces a skewed or blank image -- which is
+     * exactly what made this readback untrustworthy as a self-check. */
+    for (int _y = 0; _y < h; _y++) {
+      SDL_memcpy((uint8_t *)buf + (size_t)_y * w * 4,
+                 (const uint8_t *)_shot->pixels + (size_t)_y * _shot->pitch,
+                 (size_t)w * 4);
+    }
     SDL_DestroySurface(_shot);
   }
 #else
@@ -2408,6 +2415,13 @@ int main(int argc, char **argv) {
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
       kVideoWidth, kVideoHeight);
 
+  /* The framebuffer is ARGB8888 but the PPU never writes an alpha byte, so
+   * every pixel carries A=0. Under SDL2 that was harmless: a texture defaults
+   * to SDL_BLENDMODE_NONE and alpha is ignored. SDL3 defaults the same texture
+   * to blending, so A=0 renders it fully transparent -- a black window, with a
+   * frame loop, blit and present that all report success. Pin the mode. */
+  SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
+
   /* Queued (pushed) audio, not a pull callback: this host owns the DSP drain
    * loop and hands over finished samples. SDL3 removed SDL_QueueAudio and
    * folded the same behaviour into SDL_AudioStream, so the backend difference
@@ -2858,7 +2872,16 @@ int main(int argc, char **argv) {
        * drift after a one-off slow frame. */
       next_frame_deadline = now;
     }
-    SDL_RenderPresent(renderer);
+    { bool _pok = SDL_RenderPresent(renderer) SC_SDL_OK;
+      static int pdiag = -1;
+      if (pdiag < 0) pdiag = getenv("SC_SDL_DIAG") ? 0 : 99;
+      if (pdiag < 99 && (s_frames % 60) == 0) {
+        int ow = 0, oh = 0;
+        SDL_GetRenderOutputSize(renderer, &ow, &oh);
+        fprintf(stderr, "[sdl] present=%d out=%dx%d same_renderer=%d err=%s\n",
+                (int)_pok, ow, oh,
+                (int)(SDL_GetRenderer(window) == renderer), SDL_GetError());
+      } }
 
     fps_window_frames++;
     double fps_window_elapsed = (double)(SDL_GetPerformanceCounter() - fps_window_start) /
