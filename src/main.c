@@ -1085,16 +1085,22 @@ static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
   if (w <= 0 || h <= 0) return false;
   uint32_t *buf = (uint32_t *)malloc((size_t)w * (size_t)h * 4);
   if (!buf) return false;
-#if SNESRECOMP_SDL3
-  /* SDL3 returns a freshly allocated surface rather than filling a caller
-   * buffer, so convert to the format this dumper expects and copy out. */
   bool ok = false;
+#if SNESRECOMP_SDL3
+  /* SDL3 allocates and returns a surface instead of filling a caller buffer,
+   * and its format follows the renderer rather than what this dumper wants,
+   * so convert before copying. Row by row: the pitch is not necessarily w*4.
+   *
+   * This must run BEFORE SDL_RenderPresent -- on SDL3 the backbuffer contents
+   * are undefined after present, so reading afterwards yields black. That is
+   * the trap this function fell into. */
   { SDL_Surface *shot = SDL_RenderReadPixels(renderer, NULL);
     if (shot) {
       SDL_Surface *conv = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_ARGB8888);
       if (conv) {
         for (int y = 0; y < h && y < conv->h; y++)
-          memcpy(buf + (size_t)y * w, (const uint8_t *)conv->pixels + (size_t)y * conv->pitch,
+          memcpy(buf + (size_t)y * w,
+                 (const uint8_t *)conv->pixels + (size_t)y * conv->pitch,
                  (size_t)w * 4);
         SDL_DestroySurface(conv);
         ok = true;
@@ -1102,31 +1108,16 @@ static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
       SDL_DestroySurface(shot);
     } }
 #else
-#if SNESRECOMP_SDL3
-  /* SDL3: returns an SDL_Surface* (NULL on failure), not an int status. */
-  SDL_Surface *_shot = SDL_RenderReadPixels(renderer, NULL);
-  bool ok = _shot != NULL;
-  if (ok) {
-    /* Copy row by row: the surface pitch is not necessarily w*4, and a flat
-     * memcpy of w*h*4 silently produces a skewed or blank image -- which is
-     * exactly what made this readback untrustworthy as a self-check. */
-    for (int _y = 0; _y < h; _y++) {
-      SDL_memcpy((uint8_t *)buf + (size_t)_y * w * 4,
-                 (const uint8_t *)_shot->pixels + (size_t)_y * _shot->pitch,
-                 (size_t)w * 4);
-    }
-    SDL_DestroySurface(_shot);
-  }
-#else
-  bool ok = SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, buf, w * 4) == 0;
-#endif
+  ok = SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888,
+                            buf, w * 4) == 0;
 #endif
   if (ok) {
     FILE *f = fopen(path, "wb");
     if (f) {
       fprintf(f, "P6\n%d %d\n255\n", w, h);
       for (int i = 0; i < w * h; i++) {
-        uint8_t rgb[3] = { (uint8_t)(buf[i] >> 16), (uint8_t)(buf[i] >> 8), (uint8_t)buf[i] };
+        uint8_t rgb[3] = { (uint8_t)(buf[i] >> 16), (uint8_t)(buf[i] >> 8),
+                           (uint8_t)buf[i] };
         if (fwrite(rgb, 1, 3, f) != 3) { ok = false; break; }
       }
       ok = fclose(f) == 0 && ok;

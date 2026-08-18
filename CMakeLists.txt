@@ -87,20 +87,18 @@ endif()
 # and copies the runtime DLL beside the exe on Windows. Rolling our own is
 # how this project stayed on SDL2 without noticing SDL3 had become the
 # default -- see docs/SDL_BACKENDS.md upstream.
-# DEFAULT TO SDL2 UNTIL SDL3 IS VERIFIED WITH A WINDOW OPEN.
+# SDL3 is the default (runner.cmake's own default). It was pinned to SDL2 for
+# a while after two defects reached a "verified" build through a headless gate
+# that could not fail on them: SDL_Init's inverted return convention, and a
+# black window from SDL3 defaulting textures to blending while this
+# framebuffer carries no alpha. Both fixed, and the window checked by eye.
 #
-# runner.cmake defaults to SDL3, and the SDL3 build passes --qualify, the
-# save-state differentials and every test suite -- all of which are HEADLESS
-# and never initialise video. Two separate SDL3 defects got through that gate:
-# SDL_Init returning true-on-success read as failure (no window at all), and a
-# blank picture with working audio. Both are only visible by launching.
+# Build the fallback with -DSNESRECOMP_SDL_BACKEND=SDL2.
 #
-# So the headless bar cannot clear this migration, and until the SDL3 path is
-# checked by actually looking at it, the default must be the backend known to
-# draw. Build SDL3 explicitly with -DSNESRECOMP_SDL_BACKEND=SDL3.
-if(NOT DEFINED SNESRECOMP_SDL_BACKEND)
-    set(SNESRECOMP_SDL_BACKEND SDL2 CACHE STRING "SDL backend (SDL2|SDL3)" FORCE)
-endif()
+# Known SDL3 gap: SDL_RenderReadPixels returns black on this backend, so
+# write_renderer_ppm() and SC_MENU_PREVIEW do not capture. The framebuffer
+# dump (SC_DUMP_AT / write_ppm) is unaffected and is the reliable check --
+# it is byte-identical between the two backends.
 snesrecomp_target_sdl(SimCitySNESRecomp)
 
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────

@@ -257,3 +257,28 @@ The rule that would have saved all of it: for a change to what is drawn,
 **look at it first**, and only then reach for instrumentation — and treat a
 verification path you had to modify for the same migration as a suspect, not
 as evidence.
+
+### SDL3 is the default again, with one gap
+
+Both defects are fixed and the window has been checked by eye. Re-verified on
+SDL3, this time with a real display check in the bar:
+
+| check | result |
+|---|---|
+| window renders | **confirmed visually** |
+| `--qualify 600` | PASS, counters identical to SDL2 |
+| five save states, interpreter vs AOT | byte-identical 128 KB WRAM |
+| framebuffer dump, SDL2 vs SDL3 | **byte-identical**, 88.5% non-black |
+
+That last row is the one worth keeping as the standing check. It compares the
+*framebuffer* through `SC_DUMP_AT` / `write_ppm`, which touches no SDL
+rendering API, so it verifies the emulation and the picture content
+independently of the backend. It is what should have been in the bar from the
+start instead of only headless counters.
+
+**Known gap:** `SDL_RenderReadPixels` returns black on this SDL3 backend, so
+`write_renderer_ppm()` and `SC_MENU_PREVIEW` do not capture. A cleaned-up
+implementation (convert the returned surface, copy row-by-row with its own
+pitch, read before present) did not change it, so the cause is the backend
+rather than the call. Overlay capture is therefore SDL2-only for now; the
+framebuffer dump covers everything else.
