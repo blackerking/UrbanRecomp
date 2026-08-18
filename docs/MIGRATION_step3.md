@@ -1030,3 +1030,46 @@ Next probe should print *after* the write returns as well as before. If the
 post-print for `$4300` never appears, the write itself blocks and the search
 narrows to `snes_write`'s `$43xx` handling under a resumed bridge. That is one
 line of diagnostic and would settle it.
+
+## 17. Found it: the `$4300` write itself never returns
+
+The register trace was indeed lying by omission -- it printed only *before*
+issuing each write. Printing after as well:
+
+```
+[regwrite] -> $4200 = 81
+[regwrite]    $4200 done
+[regwrite] -> $2102 = 00
+[regwrite]    $2102 done
+[regwrite] -> $2103 = 00
+[regwrite]    $2103 done
+[regwrite] -> $4300 = 00
+   <no "done", ever>
+```
+
+Every write completes except `$4300`. So the block is inside
+`cpu_write8(cpu, $00, $4300, $00)` -- the AOT bus write path for a DMA
+parameter register -- not in the guest, not in the interpreter loop, not in the
+unwind, and not in DMA execution (nothing has triggered `$420B` yet; this is
+only channel 0's DMAP byte).
+
+That is the end of the search that started in §8. The chain of wrong turns
+along the way, each killed by one measurement: a fiber deadlock, a bridge
+deadlock, a 1000x slowdown, a stuck-on-`CLC`, an emitter cycle-accounting bug,
+a mid-flight stack. All wrong. The actual defect is a single byte write to a
+hardware register that does not return.
+
+### Why frame 1's `$43xx` writes were fine
+
+Frame 1 wrote `$43F8`-`$43FF` and they all completed. Those are the tail of
+channel 7's register block and are written during the boot clear loop, before
+any DMA state exists. Frame 2's `$4300` is the first write to a *live* channel
+register after the bridge has been re-entered. Whatever `cpu_write8` does for
+`$43xx` is evidently sensitive to state that differs between those two moments.
+
+### Next step
+
+Step into `cpu_write8` for `$4300` under a resumed bridge -- `cpu_state.c` /
+`common_cpu_infra.c` route hardware-register writes, and one of those paths
+loops. A print or breakpoint inside the `$43xx` case answers it directly. The
+question is now small enough that guessing is finally unnecessary.
