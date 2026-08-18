@@ -145,3 +145,35 @@ completed migration; build it explicitly with `-DSNESRECOMP_SDL_BACKEND=SDL3`.
 The lesson generalises past SDL: **a verification bar that cannot fail on the
 thing being changed is not verification.** Every number quoted for this
 migration was real and none of them touched the renderer.
+
+### Narrowed: it is not the renderer, it is the loop
+
+`SC_SDL_DIAG=1` on the SDL3 build reports the blit as healthy:
+
+```
+[sdl] lock=1 pitch=1024 expect=1024 copy=1
+```
+
+`SDL_LockTexture` succeeds, the pitch matches `kVideoPitch` exactly, the
+`memcpy` runs and `SDL_RenderCopy` succeeds. (`err=Device not found` is a stale
+sticky `SDL_GetError()`, not a failure of these calls.) So the texture is
+updated and copied correctly and **the rendering path is not the bug.**
+
+The decisive symptom came from watching the window: **the FPS counter in the
+title stops advancing.** The main loop is stalling, not mis-drawing. Sound
+continues because queued audio drains independently of the loop.
+
+That reframes it entirely, and points at the one item this plan already
+predicted would be the hard part:
+
+> **audio** — SDL3 replaced the pull callback with an `SDL_AudioStream` the app
+> pushes into. This host owns its DSP drain loop, so this is the real one.
+
+A push into an `SDL_AudioStream` that blocks or waits would stall the frame
+loop exactly like this, while previously-queued samples keep playing. That is
+the first thing to check: instrument `sc_audio_open` / the per-frame push in
+`sc_sdl_compat.h` and see whether the loop is parked inside it.
+
+Worth noting the diagnostic nearly misled: it prints only three times by
+design, so "three lines then nothing" looked like a stalled loop and was
+actually just the cap. The title bar, not the log, is what identified this.
