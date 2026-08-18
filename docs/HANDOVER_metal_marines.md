@@ -224,3 +224,67 @@ and compare it byte-for-byte between backends. It touches no SDL rendering API,
 so it validates emulation and picture content independently of the backend, and
 it would have caught the black screen immediately. Everything else needs a
 human looking at the window -- which is how all three were actually found.
+
+---
+
+## 9. If you write a frame-model host, the beam will have two owners
+
+This is the one to read before starting, because all four defects below are
+invisible: the host runs, the game boots, and the numbers are merely *wrong*.
+
+A host that advances devices itself and also runs the guest through
+`interp_bridge_run_loop` has **two** things moving `snes->hPos`/`vPos`:
+
+| who | where |
+|---|---|
+| your host | your beam loop |
+| the runner | `snes_sync_master_clock()`, called after **every** interpreted opcode |
+
+Each frame ends up split between them in a ratio that changes frame to frame.
+Measured here: a guest-heavy frame needed ~300 host beam steps instead of the
+full 178,684, because the bridge had already moved the beam most of the way.
+Anything you derive from *your* share of the beam is then wrong in proportion.
+
+**1. The APU starves.** Pace the SPC off your own beam steps and it gets only
+your share of each frame. Here that was ~540 samples on host-heavy frames and
+**0** on guest-heavy ones, ~30% of frames, averaging 418/frame against a 534
+target -- while logic and video both looked healthy. The bridge does not cover
+it: `bridge_apu_flush()` takes an absolute-timeline early-out that clears its
+pending count *without* advancing the SPC, because it expects an `RtlRunFrame`
+host to sync. Fix: pace off **total** elapsed master time, host plus guest.
+
+**2. Vblank entry goes missing.** Sampling code (`if (vPos == 225 && hPos == 0)`)
+only fires if *your* loop is the one that crosses the line. `snes_advance_beam()`
+just assigns `inVblank = v >= 225` as it sweeps, so a guest-crossed frame gets no
+vblank processing at all: no `ppu_handleVblank`, no NMI, no auto-joypad arm. Cost
+here: 425 NMIs where there should have been 600, and with them a 28% pacing lag
+that showed up as WRAM divergence. `inVblank && !inNmi` detects it, since the
+runner never touches `inNmi`.
+
+**3. `snes_catchupApu()` clamps at 10000 SPC cycles.** A runaway guard the
+per-opcode path never trips (it catches up every opcode, ~2 cycles) and a
+frame-at-a-time host always does -- one frame is ~17,046, so 41% of every
+frame's audio is discarded at the clamp. Catch up on an opcode-sized cadence.
+
+**4. Publish the AOT bus globals.** If your host builds its `Snes` with
+`snes_init()` and never calls `SnesInit()`, then `g_dma`/`g_rom`/`g_snes_cpu`
+stay NULL. Harmless while everything goes through the interpreter, fatal the
+first time the bridge routes a hardware write through `WriteReg`: `$4300` lands
+in `dma_write(NULL, ...)` and never returns. That cost six wrong hypotheses here
+-- fiber deadlock, bridge deadlock, "1000x slow", a stuck `CLC`, an emitter
+cycle-accounting bug, a mid-flight stack -- every one of them killed by
+measurement, before anyone checked whether the pointer was null.
+
+### Two method notes from the same hunt
+
+- **`interp_bridge_run_interrupt()` requires you to have already materialized**
+  **the interrupt frame.** Its header says so. Calling it without one stalls the
+  guest completely and looks exactly like a broken API. You usually do not need
+  it at all: push the frame with `cpu_push_interrupt_frame_at()` and point your
+  resume PC at the vector, and the handler becomes the next thing your ordinary
+  `run_loop` executes -- no nested entry.
+- **Do not expect byte-equal WRAM between two hosts.** SimCity increments `$c7`
+  at the top of its vblank spin, so it counts *how many times the guest went
+  round waiting* -- two hosts with different pacing cannot agree on it by
+  construction, and it seeds the PRNG. Check whether your game has a counter
+  like that before designing a differential oracle around raw byte equality.
