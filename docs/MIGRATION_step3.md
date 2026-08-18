@@ -774,3 +774,61 @@ is the right place to resume from, so the information is already there.
 The pragmatic interim for this repo is to arm the deadline generously enough
 to cover boot (~8 frames) and only tighten it once the guest is running --
 but that is a workaround for a missing return path, not a fix.
+
+## 12. The unwind fixed, and the second blocker behind it
+
+Fixed upstream in `interp_bridge.c` (`a6a037f`). A yield primitive and a
+master-deadline expiry both reach the bounce site through the same
+`interp_bridge_lle_yield_unwind()` sentinel, and both were handled identically:
+consume the request and resume interpreting at the primitive entry.
+
+Right for a yield primitive, wrong for a deadline. The deadline exists because
+the *host* asked for a bound, so the host has to regain control; resuming
+inside the bridge leaves the bound still expired, the next bounce unwinds
+again, and the host never re-arms. The cause is now recorded in the deadline
+predicate, and a scheduler-mode deadline unwind syncs, flushes the APU,
+publishes the resume PC and returns 1 -- exactly as the vblank yield does.
+
+Measured:
+
+```
+before:  [frame 1] bridge at 008000            ... never returns
+after:   [frame 1] c: bridge returned ok=1
+         [frame 2] latch drained, bridge at 008D65
+```
+
+The host regains control and resumes where it stopped. That is the mechanism
+working end to end for the first time.
+
+### What is still in the way
+
+Frame 2 does not complete, in 180s. With the deadline now carrying ~357k
+cycles of headroom from a `master_cycles` of ~2.87M, the guest gets far enough
+to enter a compiled body that spins without advancing `master_cycles` -- so the
+deadline can never fire inside it and there is no step cap, because bounced
+bodies do not count interpreted steps.
+
+That is the second, independent blocker, and the `00:9280` `$4212` wait is the
+obvious candidate: as interpreted code the host's beam advance releases it, but
+as a compiled body inside a bounce nothing advances the beam and nothing counts
+its cycles.
+
+Two shapes of fix, and they are not exclusive:
+
+- **Make the bound real inside compiled bodies.** If a generated block can spin
+  without advancing `master_cycles`, no time-based bound can ever interrupt it.
+  Worth checking whether the emitter accounts cycles for a branch-only loop; if
+  not, that is an emitter bug with consequences well beyond this host.
+- **HLE the hardware waits**, as `00:930d` already is. `00:927c` is the one
+  known site, and §9's `sc_advance_until_input_ready()` already removes the
+  need for it on the *interpreted* path -- it is only a problem once the wait
+  is compiled.
+
+### Status
+
+The frame-model path now: drains the input latch, drives the guest through the
+bridge with a real time bound, regains control on expiry, and resumes at the
+right PC on the next frame. It does not yet reach the first vblank. The default
+per-opcode path is untouched and remains the correctness baseline --
+`--qualify 600` identical, save states byte-identical between tiers, 81
+framework tests passing.
