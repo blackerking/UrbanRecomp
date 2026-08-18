@@ -928,3 +928,61 @@ do it directly.
 
 **Do not assume it is the DMA.** Three hypotheses in this document have already
 died that way, and the drain loop reads as terminating.
+
+## 15. The register trace, and a flaw in §12's own fix
+
+`SNESRECOMP_REGWRITE_DIAG=1` announces each hardware-register write before it
+is issued. Frame 1 writes `$43F8`-`$43FF` and `$4200 = 81` without trouble;
+frame 2 gets three writes in and stops:
+
+```
+[frame 2] latch drained, bridge at 008D65
+[regwrite] -> $2102 = 00
+[regwrite] -> $2103 = 00
+[regwrite] -> $4300 = 00
+   <nothing further>
+```
+
+So `$43xx` writes are not inherently broken -- frame 1 did eight of them. The
+difference is the *state* frame 2 resumes in.
+
+### The likely cause is the resume PC, and it is mine
+
+§12's fix returns to the host on a deadline unwind and publishes
+`s_lle_unwind_pc24` as the resume point. For a **yield primitive** that address
+is the primitive's ROM entry, and re-entering it from the top is exactly right
+-- that is what the historic path does.
+
+For a **deadline** it is wrong. The trace shows the resume PC is `$008D65`, the
+*callee's entry*, so frame 2 re-runs `00:8D65` from its first instruction while
+the stack and registers are whatever they were when the bound expired
+mid-routine. That is not a resume, it is a restart with a mid-flight stack --
+and re-running the OAM DMA setup against inconsistent `X`/`DB`/`D` is a
+plausible way to wedge on the third write.
+
+A deadline unwind should resume where the guest actually was, not at a routine
+entry. The information may not be recoverable from `s_lle_unwind_pc24` at all,
+since the generated prologue passes its own function entry as the resume
+address:
+
+```c
+if (interp_bridge_lle_master_deadline_reached(cpu)) {
+  RecompStackPop();
+  return interp_bridge_lle_yield_unwind(cpu, 0x008D65u);   /* function entry */
+}
+```
+
+Because the check sits at the *block head*, the guest has not executed anything
+of that block yet -- so re-entering at the block head is arguably correct, and
+the real problem is `RecompStackPop()` plus whatever the unwind does to the
+host/guest stack before the host resumes. That distinction is the next thing to
+establish, and it decides whether the fix belongs in the driver or the bridge.
+
+### Cross-check against ar-recomp
+
+Worth recording because it rules out a whole class: ar-recomp drives its guest
+through a coroutine, uses the *same* synchronous `$420B` drain in `snes.c`, and
+does not special-case DMA anywhere. So neither the DMA drain nor OAM upload is
+inherently hostile to running the guest outside a per-opcode loop. The
+difference is entirely in how control leaves and re-enters the guest, which is
+where the remaining defect is.
