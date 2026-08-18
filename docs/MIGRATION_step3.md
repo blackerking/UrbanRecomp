@@ -1268,24 +1268,76 @@ never trips it because it catches up after every opcode (~2 SPC cycles). A host
 that advances a whole frame and then catches up once does: one frame is ~17,046
 SPC cycles, so 41% of every frame's audio was silently discarded at the clamp.
 
-## 22. Status
+## 22. The vblank entry has the same two-owner bug
+
+Section 21 found the beam being advanced from two places. The NMI raise has the
+identical problem, and it was costing far more.
+
+`handle_pos_stuff()` detects vblank entry by **sampling** the beam at `hPos==0`
+on the overscan line. `snes_advance_beam()` (snes.c) does not sample anything --
+it just assigns `inVblank = v >= 225` as it sweeps. So whenever the guest's own
+execution carried the beam across line 225, the host's sample for that frame
+never happened at all: no `ppu_handleVblank`, no NMI, no auto-joypad arm.
+
+`snes->inNmi` is the discriminator -- `handle_pos_stuff()` sets it on a processed
+entry and `snes_advance_beam()` never touches it -- so `inVblank && !inNmi` means
+exactly "the beam is in vblank and nobody processed getting there".
+
+| 600 frames | before | after |
+|---|---|---|
+| `nmi_requests` | 425 | **600** |
+| `nmi_serviced` | 425 | **599** |
+| `logic_changes` | 425 | **598** |
+| `logic_stall_max` | 1 | **0** |
+| `video_changes` | 186 | **213** |
+
+One NMI per host frame, which is what the hardware does.
+
+## 23. Status, and what the differential actually says
 
 | | interp (per-opcode) | fiber (frame model) |
 |---|---|---|
 | `--qualify 600` | PASS | **PASS** |
-| `logic_changes` | 592 | 425 |
+| `logic_changes` | 592 | 598 |
+| `logic_stall_max` | 6 | **0** |
 | `audio_samples` | 320,348 | 328,058 |
-| `video_changes` | 174 | 186 |
-| `nmi_serviced` | 592 | 425 |
+| `video_changes` | 174 | 213 |
+| `nmi_serviced` | 592 | 599 |
 | M/X + PC bitmap | recorded | **not recorded** |
 
-**This is not equivalence.** `--qualify` is an activity bar, not a differential
-oracle, and the two hosts disagree on their counters. Some of that follows from
-the frame host advancing the guest in coarser units; none of it has been shown
-harmless. The per-opcode path stays the correctness baseline, and it is also the
-only one that records coverage, so every tool in `tools/` still needs it.
+A WRAM + framebuffer differential at matched frames (`SC_DUMP_AT` +
+`SC_WRAM_DUMP_PATH`, frames 299 and 599):
 
-The open question is no longer "can the frame host run the game" -- it can. It
-is "where do the two hosts diverge, and does it matter": a WRAM/framebuffer
-differential at matched frames, which is exactly the kind of oracle
-`HANDOVER_metal_marines.md` #2 recommends keeping the per-opcode loop for.
+```
+frame 299: WRAM 128/131072 differ (0.098%)
+frame 599: WRAM 163/131072 differ (0.124%)
+```
+
+**99.9% agreement**, and the disagreement has a recognisable shape rather than
+looking like corruption:
+
+- `$b9` (the vblank flag) and `$c7` -- and `$c7` is not a frame counter. It is
+  `INC $c7` at the **top of 00:930d's spin loop**, so it counts how many times
+  the guest went round waiting, which two hosts with different pacing cannot
+  agree on by construction. (It is also the PRNG seed source, per
+  `bank_00_823e` -- but the PRNG state at $59/$5b/$5d is still all-zero at both
+  of these frames, so nothing has been seeded from it yet and the divergence is
+  direct timing, not random state.)
+- `$012b-$0132`, the cursor step-delay counters.
+- 105 bytes above $2000, in 19 small scattered clusters between $2001 and
+  $3D92 -- the shape of per-object animation state at a different phase.
+
+### What this does and does not license
+
+It does **not** prove equivalence, and 0.1% is not 0. What it does is move the
+question: there is no sign of structural corruption, and every diff identified
+so far is a phase or timing counter. Byte-equality is also not achievable in
+principle here, because `$c7` counts spin iterations -- so a useful differential
+for this game has to compare structure, or pin the pacing, rather than compare
+raw WRAM.
+
+The per-opcode path therefore stays the correctness baseline, and it remains the
+only host that records coverage bitmaps, so every tool in `tools/` still needs
+it. But the frame host is no longer a prototype: it boots, services NMI through
+the real 00:80B2, paces audio, presents video, and now beats the per-opcode host
+on `logic_stall_max` (0 against 6).

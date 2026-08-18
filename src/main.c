@@ -931,6 +931,30 @@ void sc_advance_until_input_ready(void) {
   snes_catchupApu(g_snes);
 }
 
+/* Catch a vblank entry that happened inside the bridge rather than in this
+ * host's beam loop.
+ *
+ * Both sides move snes->hPos/vPos (see MIGRATION_step3 21), and only one of
+ * them raises NMI. handle_pos_stuff() detects the entry by SAMPLING the beam at
+ * hPos==0 on the overscan line; snes_advance_beam() (snes.c) just assigns
+ * `inVblank = v >= 225` as it goes. So whenever the guest's own execution
+ * carried the beam across line 225, the host's sample for that frame never
+ * occurred: no ppu_handleVblank, no NMI, no auto-joypad arm. Measured cost --
+ * 425 NMIs against the per-opcode host's 592 over 600 frames, a 28% shortfall,
+ * which is the whole of the two hosts' phase divergence.
+ *
+ * inNmi is the discriminator: handle_pos_stuff() sets it on a processed entry
+ * and snes_advance_beam() never touches it, so `inVblank && !inNmi` means
+ * exactly "the beam is in vblank and nobody processed getting there". */
+static void sc_catch_missed_vblank(void) {
+  Snes *snes = g_snes;
+  if (!snes->inVblank) { snes->inNmi = false; return; }
+  if (snes->inNmi) return;
+  ppu_handleVblank(g_ppu);
+  snes->inNmi = true;
+  if (snes->nmiEnabled) { g_cpu->nmiWanted = true; s_nmi_requests++; }
+  if (snes->autoJoyRead) snes->autoJoyTimer = 4224;
+}
 static bool run_one_frame_fiber(void) {
   uint64_t before = s_frames;
 
@@ -949,6 +973,7 @@ static bool run_one_frame_fiber(void) {
    *
    * That released 00:930d's wait and skipped the rest of 00:80B2, i.e. the
    * per-frame PPU work. The driver now delivers a real interrupt. */
+  sc_catch_missed_vblank();
   bool nmi_pending = false;
   if (g_cpu->nmiWanted) { g_cpu->nmiWanted = false; nmi_pending = true; }
 
@@ -995,6 +1020,7 @@ static bool run_one_frame_fiber(void) {
       }
     }
     last_guest_master = now;
+    sc_catch_missed_vblank();
     return ok;
   }
 }
