@@ -1073,3 +1073,63 @@ Step into `cpu_write8` for `$4300` under a resumed bridge -- `cpu_state.c` /
 `common_cpu_infra.c` route hardware-register writes, and one of those paths
 loops. A print or breakpoint inside the `$43xx` case answers it directly. The
 question is now small enough that guessing is finally unnecessary.
+
+## 18. It runs: the wedge was three uninitialised runtime globals
+
+`$4300` blocked because `g_dma` was **NULL**.
+
+`common_cpu_infra.c`'s `SnesInit()` publishes four globals the AOT bus path
+depends on:
+
+```c
+g_snes_cpu = g_snes->cpu;
+g_dma      = g_snes->dma;
+g_ppu      = g_snes->ppu;
+g_rom      = g_snes->cart->rom;
+```
+
+`src/main.c` builds its own `Snes` with `snes_init()` and never calls
+`SnesInit()`. It happens to set `g_ppu` and nothing else, so `g_dma`,
+`g_snes_cpu` and `g_rom` stayed NULL. Harmless for the entire history of this
+project, because every access went through the interpreter -- and fatal the
+moment the bridge routes a hardware write through `WriteReg`, where `$4300`
+lands in `dma_write(g_dma, ...)`.
+
+`src/simcity_fiberdrive.c` now publishes them. One subtlety cost a cycle:
+they have to be published on the **first frame**, not in `Init()`, because
+`Init()` runs during env parsing and `g_snes` does not exist yet.
+
+### Result
+
+```
+[frame 1] bridge at 008000   c: ok=1
+[frame 2] bridge at 008D65   c: ok=1
+[frame 3] bridge at 009150   c: ok=1
+[frame 4] bridge at 0090DD   c: ok=1      <- LC_LZ5 decompressor
+[frame 5] bridge at 0090DD   c: ok=1
+...200 frames, no hang
+```
+
+The guest executes inside the bridge, frame after frame, with the resume PC
+advancing through real boot code. **`SimCity_WaitForVblank` fires**, so the
+guest reaches its frame boundary in compiled code -- the thing this whole
+migration exists to make happen.
+
+### What is not done
+
+`--qualify` on the fiber path fails: `master=0`, `video_changes=0`,
+`nmi_serviced=0`, and the HLE warns that no yield target is installed. All
+expected, none mysterious:
+
+- `g_simcity_yield_to_host` is NULL. It was the fiber's hook, and the
+  `run_loop` driver replaced the fiber -- but *compiled* `00:930d` still calls
+  the HLE directly, so it returns immediately instead of pacing. Either point
+  it at a run_loop-aware yield, or drop the `hle_func` and let the bridge's
+  `yield_pc` detection handle the wait in interpreted code.
+- The qualify counters read `g_master_cycles`, which only the per-opcode loop
+  increments.
+- Video is frozen because the frame path advances the beam but nothing drives
+  the presentation the interpreter path normally does.
+
+These are wiring, not architecture. The hard part -- getting the guest to
+execute and yield under the bridge -- is done.

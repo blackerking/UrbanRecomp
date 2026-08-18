@@ -69,6 +69,7 @@
 
 #include "cpu_state.h"
 #include "common_rtl.h"
+#include "snes/snes.h"
 #include "snes/interp_bridge.h"
 #include "simcity_fiberdrive.h"
 
@@ -103,6 +104,25 @@ static bool     s_started;
 static uint32   s_resume_pc24;
 static unsigned s_bail_streak;
 
+/* Runtime globals the AOT bus path needs. src/main.c builds its own Snes via
+ * snes_init() and never calls SnesInit(), which is where common_cpu_infra.c
+ * normally publishes these. It happens to set g_ppu and nothing else, so
+ * g_dma / g_snes_cpu / g_rom stay NULL -- harmless while every access goes
+ * through the interpreter, fatal the moment the bridge routes a hardware
+ * write through WriteReg: $4300 lands in dma_write(g_dma, ...) with g_dma
+ * NULL and never returns. That was the frame-2 wedge.
+ *
+ * Publishing them here rather than in main.c keeps the ordinary interpreter
+ * build byte-for-byte unchanged. */
+extern Snes *g_snes;
+
+static void publish_runtime_globals(void) {
+    if (!g_snes) return;
+    g_dma  = g_snes->dma;
+    g_ppu  = g_snes->ppu;
+    if (g_snes->cart) g_rom = g_snes->cart->rom;
+}
+
 bool SimCityFiberDrive_Init(void) {
     if (s_started) return true;
     cpu_state_init(&s_cpu, g_ram);
@@ -122,6 +142,11 @@ bool SimCityFiberDrive_Init(void) {
 bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
     /* Do not hand over a frame whose input latch is still busy -- see the long
      * note on sc_advance_until_input_ready() in src/main.c. */
+    /* First frame: g_snes does not exist yet when Init() runs (that happens
+     * during env parsing, before snes_init), so publish here instead. */
+    { static int published = 0;
+      if (!published) { published = 1; publish_runtime_globals(); } }
+
     const int trace = getenv("SC_FRAME_TRACE") != NULL;
     if (trace) fprintf(stderr, "[frame %llu] a: draining input latch\n",
                        (unsigned long long)frame);
