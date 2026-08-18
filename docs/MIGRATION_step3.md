@@ -986,3 +986,47 @@ does not special-case DMA anywhere. So neither the DMA drain nor OAM upload is
 inherently hostile to running the guest outside a per-opcode loop. The
 difference is entirely in how control leaves and re-enters the guest, which is
 where the remaining defect is.
+
+## 16. The state at the unwind is consistent, so §15's suspicion is wrong
+
+`SNESRECOMP_DEADLINE_DIAG` extended to dump the architectural state at the
+moment the bound expires:
+
+```
+[deadline_diag] FIRED master=2867964 deadline=357368
+                S=1FFD X=6000 Y=0000 DB=00 D=0000 PB=00 m=1 x=0
+```
+
+Cross-referenced with the bounce trace, which reported
+`[ibr] ENTER pc=$008D65 s_exit=$1FFD cpu->S=$1FFD` for frame 2: **`S` is
+`1FFD` on both sides of the unwind.** The stack pointer the host resumes with
+is exactly the one the bounce was entered on.
+
+So §15's suspicion -- "a restart with a mid-flight stack" -- does not hold. The
+deadline check sits at the block head, before the block does anything, so
+nothing has been half-executed, and `S` confirms the frame is intact.
+
+The re-entry is also architecturally sound on inspection: frame 2 interprets
+`00:8D65` from the top, `SEP #$20` then `SEP #$30` (x -> 1), `LDA #$00`,
+four `ASL A`, `TAX` giving `X = 0`, so `STA $4300,X` targets `$4300` exactly
+as it should -- and the register trace confirms `$2102`, `$2103`, `$4300` are
+all written correctly before it stops.
+
+### What is left, honestly
+
+Everything checked so far is correct: the resume PC, the stack, the widths, the
+index register, and the three register writes that do complete. The wedge is
+after a correct `$4300` write and before the `$4301` write, with only
+`LDA #$04` in between -- an immediate load that cannot block.
+
+That combination is not explicable by anything measured yet, which means one of
+the measurements is misleading rather than the code being mysterious. The most
+likely candidate is the register trace itself: it prints *before* issuing the
+write, so "`$4300` printed, nothing after" is equally consistent with the
+`$4300` write never returning. Frame 1 wrote `$43F8`-`$43FF` successfully, but
+those went through a different path (no active DMA channel state).
+
+Next probe should print *after* the write returns as well as before. If the
+post-print for `$4300` never appears, the write itself blocks and the search
+narrows to `snes_write`'s `$43xx` handling under a resumed bridge. That is one
+line of diagnostic and would settle it.
