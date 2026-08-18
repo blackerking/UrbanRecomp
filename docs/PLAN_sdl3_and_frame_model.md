@@ -118,3 +118,30 @@ Tokens are tight. Part 1 is self-contained and worth doing even if part 2 does
 not start: it lands SDL3, proves the `runner.cmake` seam, and changes nothing
 about execution. Part 2 without part 1 is possible but wastes the cheap
 validation.
+
+---
+
+## Correction: part 1 was NOT done
+
+Tasks 8-10 were reported complete on the strength of `--qualify`, the
+eleven-save-state differential and the test suites. **Every one of those is
+headless and never initialises video**, so the gate that cleared the SDL3
+migration was structurally incapable of testing it. Two defects got straight
+through:
+
+1. `SDL_Init` returns **true** on success in SDL3 where SDL2 returned `0`, so
+   `!= 0` read a successful init as failure -- and `SDL_GetError()` was empty,
+   because nothing had gone wrong. The window never opened.
+2. With that fixed, the window opens and audio plays but **the picture stays
+   blank**.
+
+The first is fixed, along with `SDL_RenderReadPixels`, which returns an
+`SDL_Surface *` in SDL3 rather than a status. The second is unresolved.
+
+**The default backend is pinned back to SDL2** in `CMakeLists.txt` until the
+SDL3 path is verified with a window open. SDL3 is an in-progress branch, not a
+completed migration; build it explicitly with `-DSNESRECOMP_SDL_BACKEND=SDL3`.
+
+The lesson generalises past SDL: **a verification bar that cannot fail on the
+thing being changed is not verification.** Every number quoted for this
+migration was real and none of them touched the renderer.

@@ -29,6 +29,12 @@
  * explicitly at their call sites -- see runner/src/desktop/mmx23_host_main.inc
  * for how upstream does each one. */
 #include "sc_sdl_compat.h"
+/* SDL3 returns true on success where SDL2 returned 0. */
+#if SNESRECOMP_SDL3
+#define SC_SDL_OK
+#else
+#define SC_SDL_OK == 0
+#endif
 
 #include "snes/snes.h"
 #include "snes/apu.h"
@@ -1096,7 +1102,17 @@ static bool write_renderer_ppm(SDL_Renderer *renderer, const char *path) {
       SDL_DestroySurface(shot);
     } }
 #else
+#if SNESRECOMP_SDL3
+  /* SDL3: returns an SDL_Surface* (NULL on failure), not an int status. */
+  SDL_Surface *_shot = SDL_RenderReadPixels(renderer, NULL);
+  bool ok = _shot != NULL;
+  if (ok) {
+    SDL_memcpy(buf, _shot->pixels, (size_t)w * h * 4);
+    SDL_DestroySurface(_shot);
+  }
+#else
   bool ok = SDL_RenderReadPixels(renderer, NULL, SDL_PIXELFORMAT_ARGB8888, buf, w * 4) == 0;
+#endif
 #endif
   if (ok) {
     FILE *f = fopen(path, "wb");
@@ -2361,7 +2377,16 @@ int main(int argc, char **argv) {
     return run_qualification(qualify_frames);
   }
 
+  /* SDL3 returns true on success where SDL2 returned 0, so a bare `!= 0`
+   * reads a successful init as a failure -- with an empty SDL_GetError(),
+   * because nothing actually went wrong. Caught only by launching the window:
+   * --qualify never initialises video, so the headless verification that
+   * cleared the SDL3 migration could not have found this. */
+#if SNESRECOMP_SDL3
+  if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+#else
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+#endif
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
@@ -2798,12 +2823,17 @@ int main(int argc, char **argv) {
       }
     }
 
-    void *pixels; int pitch;
-    SDL_LockTexture(texture, NULL, &pixels, &pitch);
-    memcpy(pixels, s_video_pixels, sizeof(s_video_pixels));
+    void *pixels = NULL; int pitch = 0;
+    bool _lok = SDL_LockTexture(texture, NULL, &pixels, &pitch) SC_SDL_OK;
+    if (_lok && pixels) memcpy(pixels, s_video_pixels, sizeof(s_video_pixels));
     SDL_UnlockTexture(texture);
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, texture, NULL, NULL);
+    bool _cok = SDL_RenderCopy(renderer, texture, NULL, NULL) SC_SDL_OK;
+    { static int diag = -1;
+      if (diag < 0) diag = getenv("SC_SDL_DIAG") ? 0 : 99;
+      if (diag < 3) { diag++;
+        fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
+                (int)_lok, pitch, (int)kVideoPitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
 
     if (s_menu_preview && --s_menu_preview_countdown <= 0) {
