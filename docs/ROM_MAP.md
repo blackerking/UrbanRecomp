@@ -1644,3 +1644,48 @@ validated against known answers before being trusted on the unknown ones.
 
 Bit 2's mere 4 addresses are the `$0a8d` guard bailing out: `savestate_9` has
 no airport, so the plane crash has nothing to crash.
+
+## The `$0197` ladder, fully attributed
+
+Confirmed by observation: each bit was triggered from the F10 menu on a live
+city and the resulting disaster identified on screen.
+
+| bit | handler | disaster |
+|---|---|---|
+| 0 | `03:bbb9` | **fire** |
+| 1 | `03:bc0b` | **flood** |
+| 2 | `03:b9cd` | **plane crash** |
+| 3 | `03:b9db` | **tornado** |
+| 4 | `03:baf5` | **earthquake** |
+| 5 | `03:ba47` | **monster** |
+
+Bits 2-5 were fired and watched in one session (frames 72130, 72353, 73004,
+73818); bits 3 and 5 reproduced the tornado and monster already attributed from
+hand-played single-disaster runs, which is the check that the method is sound.
+Bits 0 and 1 carry the same names on the reporter's knowledge of the game
+rather than from that particular session.
+
+This closes the attribution that "roughly 60% of the six handlers' code has
+never executed" was blocking. It also retires the recurring temptation to look
+for the meltdown here: the six are fire, flood, plane crash, tornado,
+earthquake and monster, and **the meltdown is not among them** — it is
+scenario-scoped, as is the UFO.
+
+### Reconciling "the flood is not in the ladder"
+
+The section above concluded, from a flood that started, spread and receded
+while lighting no exclusive arm and executing zero first-time addresses, that
+the flood is not dispatched through `$0197`. Bit 1 being the flood does not
+overturn that; the two fit together:
+
+- **Bit 1 starts a flood.** The arm at `03:bc0b` is the *initiator* — it seeds
+  the event once and the ladder clears the bit.
+- **The flood's behaviour is cellular.** Spread and recession happen on the
+  per-tick map scan, not through the ladder, which is why a *naturally
+  occurring* flood needs no arm and lights none.
+
+So the earlier session watched a flood that was already running, and correctly
+observed that its ongoing behaviour is not ladder-driven. The initiator and the
+process are separate, and only the initiator is a `$0197` bit. Worth keeping
+both readings: "not in the ladder" is right about the spread and wrong only if
+read as "no bit starts it".
