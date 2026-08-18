@@ -832,3 +832,42 @@ right PC on the next frame. It does not yet reach the first vblank. The default
 per-opcode path is untouched and remains the correctness baseline --
 `--qualify 600` identical, save states byte-identical between tiers, 81
 framework tests passing.
+
+## 13. The emitter is not the problem: branch-only loops do account cycles
+
+§12 offered two candidate fixes and flagged the first as the consequential one
+-- "check whether the emitter accounts cycles for a branch-only loop; if not,
+that is an emitter bug with consequences well beyond this host". Checked, and
+it is not a bug. The `00:9280` `$4212` wait compiles to:
+
+```c
+L_9280_M1X0:
+    cpu_trace_block(cpu, 0x009280);
+    WatchdogCheck();
+    if (interp_bridge_lle_master_deadline_reached(cpu)) {
+      RecompStackPop();
+      return interp_bridge_lle_yield_unwind(cpu, 0x009280u);
+    }
+    cpu->cycles += 8;  cpu->master_cycles += 64;      /* block entry */
+    ... LDA $4212 ; AND #$01 ...
+    if (cpu->_flag_Z == 0) { cpu->cycles += 1; cpu->master_cycles += 8;
+                             goto L_9280_M1X0; }      /* taken branch */
+```
+
+Every iteration advances `master_cycles` by 72 and re-tests the deadline at the
+block head. A one-frame bound of 357,368 cycles fires after ~4,963 iterations.
+So a compiled hardware-wait spin **is** interruptible, and the emitter accounts
+a branch-only loop correctly.
+
+That kills the §12 explanation for the frame-2 stall. Since the compiled spin
+would be bounded and unwound, whatever holds frame 2 is something else --
+interpreted code that the step cap should catch, or a bounce whose body is not
+reached through a block head. The next probe is the same one that worked
+before: `SNESRECOMP_IBRWATCH` on frame 2 specifically
+(`SNESRECOMP_IBRWATCH_FRAME` restricts it to one host frame, which is exactly
+what this needs).
+
+Worth recording as a pattern: this is the third §-level hypothesis in this
+document to be killed by direct measurement, after the "deadlock" and the
+"1000x slow" readings. The measurements have been cheap and the hypotheses
+expensive; the ordering should have been the other way round.
