@@ -1179,53 +1179,113 @@ is already declared as a func. Note it is `lle_only`, blocked through
 interpret it, but it does mean the handler will not be compiled until that
 variant is resolved.
 
-## 20. Two ways to service NMI, both tried, both blocked
+## 20. NMI servicing: solved, by materializing the frame
 
-Neither works yet, and both failures are informative.
+Superseded the earlier "both routes blocked" reading. Both routes *were*
+blocked; a third one was not, and it is the simplest of the three.
 
-**ar-recomp's pattern does not exist here.** Its host does
-`g_snes->forceNmi = true; g_snes->nmiAvail = true;` around the coroutine
-switch. Neither field is in this runner's `Snes` -- they are additions in
-ar-recomp's own fork of snesrecomp. So the reference implementation cannot be
-copied directly, which is worth knowing before anyone else plans around it.
+### What was wrong
 
-**`interp_bridge_run_interrupt()` runs, but stalls the guest.** This runtime
-does have a documented entry for the job, and `00:80B2` is the NMI vector.
-Calling it per frame:
+The host raises NMI on `g_cpu`, the `Interp816`. In fiber mode that CPU never
+executes a single opcode -- the guest runs on `s_cpu`, a `CpuState`, inside the
+bridge. So the request was being set on a CPU that does not run, `nmi_serviced`
+read 0 forever, and the driver papered over it by writing `$b9` directly. That
+released 00:930d's wait but skipped the rest of 00:80B2, which on this game is
+the whole per-frame PPU job. Hence the shape that looked so puzzling: a guest
+that computed (`logic_changes` moving) and a screen that never changed.
 
-| | before | with run_interrupt |
+### Why `interp_bridge_run_interrupt()` stalled
+
+Its own header says it, and it went unread:
+
+> Execute an architectural interrupt handler through its terminal RTI. **The
+> caller has already materialized the hardware interrupt frame.**
+
+It had not. With no frame on the stack the handler's RTI popped whatever
+happened to be under `S`, which is why the guest went to 897M master cycles and
+stopped making progress. Not a runtime bug, and not evidence against the API.
+
+### What works
+
+Materialize the frame in the driver and point the resume PC at the vector:
+
+```c
+uint32 ret = s_resume_pc24;
+cpu_push_interrupt_frame_at(&s_cpu, ret);   /* PB, PCH, PCL, P */
+s_cpu.P |= 0x04;  s_cpu.P &= ~0x08;          /* I set, D cleared */
+cpu_p_to_mirrors(&s_cpu);
+s_cpu.PB = 0x00;
+s_resume_pc24 = cpu_read16(&s_cpu, 0x00, 0xFFEA);   /* -> 00:80B2 */
+```
+
+No nested bridge entry is needed. The handler simply becomes the next thing the
+ordinary `run_loop` executes: it runs 00:80B2, does its own `INC $b9` at
+00:80bc, and RTIs back to the interrupted PC -- the vblank spin, now released.
+One bridge entry per frame, exactly as before, and no faked WRAM write.
+
+`forceNmi`/`nmiAvail` (route 2) turned out not to be needed, so this runner does
+not have to grow ar-recomp's fork fields after all.
+
+## 21. The beam has two owners, and it cost the audio bar
+
+Worth its own section, because it is a property of the runner rather than of
+this game, and any frame-model host will meet it.
+
+`snes->hPos`/`vPos` are advanced from **two** places at once:
+
+| who | where | when |
 |---|---|---|
-| `logic_changes` | 298 | **0** |
-| `logic_stall_max` | 0 | **298** |
-| `master` | 173M | **897M** |
-| `nmi_serviced` | 0 | 0 |
+| this host | `sc_beam_step()` -> `handle_pos_stuff()` | its own beam loop |
+| the runner | `snes_sync_master_clock()` (`interp_bridge.c:1208`) | after **every** interpreted opcode |
 
-So the handler consumes a great deal of guest time and the main `run_loop`
-then cannot make progress at all -- strictly worse than not calling it, and
-`nmi_serviced` still reads 0, so the host's own NMI accounting never sees it
-either. Reverted; the driver keeps writing `$b9` directly, with both attempts
-recorded in the comment there.
+So each frame is divided between them in a ratio that varies frame to frame.
+Measured with `SC_APU_DIAG=1`: a guest-heavy frame needs only ~300 host beam
+steps to reach the next boundary instead of the full 178,684, because the bridge
+has already moved the beam most of the way.
 
-### Why this is not "stuck"
+That is survivable on its own. What was not survivable is that the SPC was paced
+off host beam steps only, so it was starved in exact proportion to how much of
+the frame the guest had consumed:
 
-The current failure is a simulation running with its output stage missing:
-`logic_changes=298` over 300 frames means the guest is computing, and
-`video_changes=0` means nothing presents it. That is one missing mechanism,
-not an unknown.
+```
+[apu f=154] produced=540    [beam f=154] steps=178607
+[apu f=155] produced=0      [beam f=155] steps=303
+```
 
-Three routes remain, none exhausted:
+About 30% of frames produced nothing, dragging the average to 418 samples/frame
+against `--qualify`'s >=500 bar, while logic and video were both fine. The
+bridge does not close this itself: `bridge_apu_flush()` takes its
+absolute-timeline early-out, which clears the pending master count *without*
+advancing the SPC, because it expects an `RtlRunFrame` host to do the sync. This
+host does not call `RtlRunFrame`, so the guest's share of every frame reached
+the APU from nowhere at all.
 
-1. **Understand the `run_interrupt` stall.** It is the runtime's own API for
-   this and it does execute; the question is why re-entering the bridge for the
-   handler starves the outer `run_loop`. `SNESRECOMP_IBRWATCH` during the
-   interrupt would show what it bounces into.
-2. **Port `forceNmi`/`nmiAvail`.** They are a small, well-understood pair in
-   ar-recomp's fork, and adding them to this runner is a contained change --
-   plausibly upstreamable, since every fiber/frame host needs this.
-3. **Drive presentation host-side.** The per-opcode path already renders
-   correctly; the frame path could call the same presentation directly and
-   leave NMI purely for guest state. Weaker, but it would produce a picture and
-   make the remaining gap visible instead of invisible.
+Fix: pace the APU off **total** elapsed master time -- host beam plus guest
+cycles -- chunked to stay under `snes_catchupApu()`'s 10000-SPC-cycle clamp.
 
-Route 2 is the most likely to work and the most useful to others; route 1 is
-the cheapest to investigate and would inform route 2.
+That clamp is the second, independent trap in the same area. The interpreter
+never trips it because it catches up after every opcode (~2 SPC cycles). A host
+that advances a whole frame and then catches up once does: one frame is ~17,046
+SPC cycles, so 41% of every frame's audio was silently discarded at the clamp.
+
+## 22. Status
+
+| | interp (per-opcode) | fiber (frame model) |
+|---|---|---|
+| `--qualify 600` | PASS | **PASS** |
+| `logic_changes` | 592 | 425 |
+| `audio_samples` | 320,348 | 328,058 |
+| `video_changes` | 174 | 186 |
+| `nmi_serviced` | 592 | 425 |
+| M/X + PC bitmap | recorded | **not recorded** |
+
+**This is not equivalence.** `--qualify` is an activity bar, not a differential
+oracle, and the two hosts disagree on their counters. Some of that follows from
+the frame host advancing the guest in coarser units; none of it has been shown
+harmless. The per-opcode path stays the correctness baseline, and it is also the
+only one that records coverage, so every tool in `tools/` still needs it.
+
+The open question is no longer "can the frame host run the game" -- it can. It
+is "where do the two hosts diverge, and does it matter": a WRAM/framebuffer
+differential at matched frames, which is exactly the kind of oracle
+`HANDOVER_metal_marines.md` #2 recommends keeping the per-opcode loop for.
