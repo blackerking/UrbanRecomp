@@ -17,7 +17,14 @@ bool SimCityFiberDrive_Init(void);
  * Returns false if the guest stopped making progress -- the reset handler
  * returned, or too many frames passed with no yield. `frame` is only used
  * for diagnostics. */
-bool SimCityFiberDrive_RunGuestFrame(uint64_t frame);
+/* `nmi_pending` is the host's per-frame NMI request, consumed from the
+ * interpreter CPU by the caller. When set, the driver materializes the
+ * 65816 interrupt frame and resumes at the NMI vector, so the guest runs
+ * 00:80B2 itself instead of the driver faking its INC $b9. */
+bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending);
+
+/* NMIs actually delivered to the guest (for the --qualify nmi_serviced). */
+uint64_t SimCityFiberDrive_NmiDelivered(void);
 
 uint64_t SimCityFiberDrive_MasterCycles(void);
 

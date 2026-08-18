@@ -30,35 +30,41 @@
  * vblank-shaped and HLE'd. SimCity has a hardware-status spin *before* the
  * first vblank wait, so no amount of AOT coverage makes that design boot.
  *
- * Running under the bridge does NOT fix it, and that is the current state of
- * this file. Measured: `interp_bridge_run_loop` never returns from its first
- * call. The bridge advances the APU (`snes_catchupApu`) and accumulates
- * `cpu->master_cycles`, but it never advances the PPU beam -- upstream, the
- * host does that around `RtlRunFrame`, per frame. **This host advances the
- * beam per opcode, from `handle_pos_stuff()` in src/main.c, and nothing
- * outside that loop drives it.** So `$4212` is frozen inside the bridge too,
- * and 00:9280 spins there exactly as it did in the fiber.
+ * Running under the bridge DOES fix it, and this host now works. Three things
+ * had to be true at once, and each was found by measurement:
  *
- * There is no host hook to fix it with: `interp816_opcode_hook` is declared
- * in interp816.h and defined as a no-op in interp_bridge.c, but is never
- * called anywhere in the runner -- a dead extension point.
+ *   1. `g_dma` and friends must be published. src/main.c builds its Snes with
+ *      snes_init() and never calls SnesInit(), so the AOT bus globals stayed
+ *      NULL; the first hardware write the bridge routed through WriteReg
+ *      ($4300) called dma_write(NULL, ...) and never returned. That was the
+ *      frame-2 wedge, and it is not a coverage problem at all.
  *
- * The bridge is still the right destination, for a reason independent of the
- * beam: it restores the execution bound. `interp_bridge_lle_master_deadline_-
- * reached`, which every generated block already polls, requires
- * `s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0` -- both set only
- * by the bridge's scheduler mode. A bare `I_RESET_M1X1()` call has no bound at
- * all, which is why the fiber hang was unbreakable from the host rather than
- * merely slow.
+ *   2. NMI must be DELIVERED, not simulated. See the long note in
+ *      RunGuestFrame() below.
  *
- * WHAT WOULD ACTUALLY FINISH THIS
+ *   3. The APU must be paced off total elapsed master time. See the note in
+ *      run_one_frame_fiber() in src/main.c -- the beam is advanced from two
+ *      places at once, and pacing the SPC off only one of them starved it.
  *
- * The two device models have to meet. Either the bridge gains a per-opcode
- * host callback (upstream change; the dead `interp816_opcode_hook` is the
- * natural place), or this host adopts the runner's per-frame model and gives
- * up the per-opcode beam advance -- MIGRATION_step3 §1 option 3, which is the
- * larger change and the one the project's accuracy story rests on. Neither is
- * a coverage problem, which is why more AOT work will not move it.
+ * The $4212 spin is no longer a deadlock either: sc_advance_until_input_ready()
+ * simply declines to hand over a frame whose input latch is still busy, which
+ * costs ~4224 master cycles at the top of the frame and needs no HLE.
+ *
+ * WHAT IS AND IS NOT ESTABLISHED
+ *
+ * Established: this host boots, services NMI through the real 00:80B2, paces
+ * audio, presents video, and passes --qualify at 600 frames.
+ *
+ * NOT established: that it is EQUIVALENT to the per-opcode host. --qualify is
+ * an activity bar, not an equivalence bar, and the two hosts do not agree on
+ * their counters (logic_changes 425 vs 592 at 600 frames). Some of that is
+ * expected -- the frame host advances the guest in coarser units -- but none
+ * of it has been shown harmless. Treat the per-opcode path as the correctness
+ * baseline until a differential run says otherwise.
+ *
+ * Also note: the M/X and PC bitmaps are recorded in the per-opcode loop only,
+ * so a fiber run records no coverage (banks_seen=0). Every coverage tool in
+ * tools/ therefore still needs the interpreter host.
  *
  * Separate translation unit on purpose: this needs cpu_state.h, and that
  * header declares a global `CpuState g_cpu` which collides with src/main.c's
@@ -94,6 +100,7 @@ extern unsigned long g_simcity_vblank_hle_calls;
 #define SC_YIELD_PC24   0x009311u
 #define SC_VBLANK_FLAG  0x00b9u
 #define SC_VBLANK_WAITING 0x00u
+#define SC_NMI_VECTOR  0xFFEAu   /* 65816 native NMI vector; this ROM: 00:80B2 */
 
 /* Beam advance lives in src/main.c, which owns the device model. */
 void sc_advance_beam_one_frame(void);
@@ -103,6 +110,8 @@ static CpuState s_cpu;
 static bool     s_started;
 static uint32   s_resume_pc24;
 static unsigned s_bail_streak;
+static bool     s_ran_once;
+static uint64_t s_nmi_delivered;
 
 /* Runtime globals the AOT bus path needs. src/main.c builds its own Snes via
  * snes_init() and never calls SnesInit(), which is where common_cpu_infra.c
@@ -139,7 +148,7 @@ bool SimCityFiberDrive_Init(void) {
     return true;
 }
 
-bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
+bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending) {
     /* Do not hand over a frame whose input latch is still busy -- see the long
      * note on sc_advance_until_input_ready() in src/main.c. */
     /* First frame: g_snes does not exist yet when Init() runs (that happens
@@ -154,28 +163,47 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
     if (trace) fprintf(stderr, "[frame %llu] b: latch drained, bridge at %06X\n",
                        (unsigned long long)frame, (unsigned)s_resume_pc24);
 
-    /* Arm NMI for this frame and let the guest SERVICE it, rather than faking
-     * its effect. Writing $b9 directly releases 00:930d's wait but skips the
-     * rest of 00:80B2 -- which on this game is the per-frame PPU work, so the
-     * guest computed frames that were never presented (video_changes=0,
-     * nmi_serviced=0). ar-recomp does exactly this around its coroutine
-     * switch: forceNmi + a fresh RDNMI token before, cleared after. */
-    /* Release the wait the way 00:80bc's INC $b9 does.
+    /* ── Deliver NMI the way the hardware does ────────────────────────────
      *
-     * This is a stand-in for servicing NMI, and it is why video stays frozen:
-     * it skips the rest of 00:80B2, which on this game does the per-frame PPU
-     * work. Two ways to do it properly were tried and neither works yet:
+     * The host raised this NMI during the beam advance above, but it raised
+     * it on `g_cpu`, the Interp816 -- which does not run at all in fiber
+     * mode. So the request was being set on a CPU that never executes,
+     * `nmi_serviced` read 0 forever, and the driver faked the handler's
+     * effect with a direct `g_ram[$b9] = 1`. That released 00:930d's wait but
+     * skipped the whole of 00:80B2, which on this game is the per-frame PPU
+     * work -- hence a guest that computed (`logic_changes` moving) and a
+     * screen that never changed (`video_changes=0`).
      *
-     *   - ar-recomp arms g_snes->forceNmi / nmiAvail around its coroutine
-     *     switch. Neither field exists in this runner; they are additions in
-     *     ar-recomp's own fork.
-     *   - interp_bridge_run_interrupt(&s_cpu, 0x0080B2) runs, but the guest
-     *     then stalls: logic_changes 298 -> 0 with logic_stall_max 298, and
-     *     master jumps 173M -> 897M. Measured, not guessed. Something about
-     *     re-entering the bridge for the handler leaves the main run_loop
-     *     unable to make progress; that is the next thing to understand.
-     */
-    g_ram[SC_VBLANK_FLAG] = 1;
+     * interp_bridge_run_interrupt() is the runtime's entry for this, and the
+     * earlier attempt to use it stalled the guest completely (logic_changes
+     * 298 -> 0, master 173M -> 897M). The header says why: "the caller has
+     * already materialized the hardware interrupt frame." It had not. The
+     * handler's terminal RTI therefore popped whatever happened to be under
+     * S, and the run never came back to anywhere useful.
+     *
+     * That nested entry is not needed here anyway. Materializing the frame
+     * ourselves and pointing the resume PC at the vector makes the handler
+     * simply the next thing the ordinary run_loop executes: it runs 00:80B2,
+     * does its own INC $b9 at 00:80bc, and RTIs back to the interrupted PC --
+     * the vblank spin, now released. One bridge entry per frame, exactly as
+     * before, and no faked WRAM write.
+     *
+     * Not on the first frame: s_resume_pc24 is still the RESET vector there,
+     * and pushing a return frame for code that has never run would have the
+     * handler RTI straight into it. */
+    if (nmi_pending && s_ran_once) {
+        uint32 ret = s_resume_pc24;
+        cpu_push_interrupt_frame_at(&s_cpu, ret);
+        s_cpu.P |= 0x04;              /* I: interrupts off inside the handler */
+        s_cpu.P &= (uint8)~0x08;      /* D: hardware clears decimal on entry  */
+        cpu_p_to_mirrors(&s_cpu);
+        s_cpu.PB = 0x00;
+        s_resume_pc24 = cpu_read16(&s_cpu, 0x00, SC_NMI_VECTOR);
+        s_nmi_delivered++;
+        if (trace) fprintf(stderr, "[frame %llu] nmi -> %06X (ret %06X)\n",
+                           (unsigned long long)frame,
+                           (unsigned)s_resume_pc24, (unsigned)ret);
+    }
 
     /* ARM THE EXECUTION BOUND. The bridge's step cap counts *interpreted*
      * steps only; once it bounces into a compiled body, nothing counts. Every
@@ -194,6 +222,7 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
                                     SC_VBLANK_WAITING);
     if (trace) fprintf(stderr, "[frame %llu] c: bridge returned ok=%d\n",
                        (unsigned long long)frame, ok);
+    s_ran_once = true;
     uint32 resume = interp_bridge_lle_resume_pc();
     if (resume) s_resume_pc24 = resume;
 
@@ -219,3 +248,6 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame) {
  * guest clock so the frame path can advance it by the same amount the guest
  * actually consumed. */
 uint64_t SimCityFiberDrive_MasterCycles(void) { return s_cpu.master_cycles; }
+
+/* NMIs actually delivered to the guest, for the qualify bar's nmi_serviced. */
+uint64_t SimCityFiberDrive_NmiDelivered(void) { return s_nmi_delivered; }

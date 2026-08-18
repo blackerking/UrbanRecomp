@@ -878,12 +878,34 @@ static bool s_fiber_mode;
 /* Beam advance, exposed to the frame driver (src/simcity_fiberdrive.c).
  * handle_pos_stuff() is static and deeply tied to this file, so the driver
  * calls in rather than duplicating the device model. */
+/* One beam step, catching the APU up on the same cadence the per-opcode path
+ * uses.
+ *
+ * snes_catchupApu() clamps apuCatchupCycles to 10000 SPC cycles as a runaway
+ * guard (snes.c). The interpreter never trips it, because it catches up after
+ * every opcode -- ~48 master cycles, about 2 SPC cycles. A beam advance that
+ * runs a whole frame and then catches up once does trip it, hard: one frame is
+ * 357368 master, i.e. ~17046 SPC cycles, so the clamp silently discarded 41%
+ * of every frame's audio. That was the entire fiber-host audio shortfall --
+ * 220 samples/frame measured against the real 534, failing --qualify's
+ * >=500/frame bar while logic and video were both fine.
+ *
+ * Catching up every 24 steps (48 master) reproduces an average opcode's
+ * cadence, which keeps the accumulator three orders of magnitude below the
+ * clamp. */
+unsigned long g_beam_steps;
+static void sc_beam_step(void) {
+  static unsigned steps;
+  g_beam_steps++;
+  handle_pos_stuff();
+  g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+  if (++steps >= 24) { steps = 0; snes_catchupApu(g_snes); }
+}
 void sc_advance_beam_one_frame(void) {
   uint64_t before = s_frames;
   unsigned guard = 0;
   while (s_frames == before && guard++ < 400000) {
-    handle_pos_stuff();
-    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+    sc_beam_step();
   }
   snes_catchupApu(g_snes);
 }
@@ -904,8 +926,7 @@ void sc_advance_beam_one_frame(void) {
 void sc_advance_until_input_ready(void) {
   unsigned guard = 0;
   while (g_snes->autoJoyTimer && guard++ < 40000) {
-    handle_pos_stuff();
-    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+    sc_beam_step();
   }
   snes_catchupApu(g_snes);
 }
@@ -915,22 +936,64 @@ static bool run_one_frame_fiber(void) {
 
   unsigned guard = 0;
   while (s_frames == before && guard++ < 400000) {
-    handle_pos_stuff();
-    g_snes->apuCatchupCycles += 2.0 * kApuCyclesPerMaster;
+    sc_beam_step();
   }
   snes_catchupApu(g_snes);
 
-  /* Release the wait: the real NMI handler's INC $b9 at 00:80bc. */
-  g_ram[0xb9] = 1;
+  /* Hand the host's NMI request to the guest instead of faking its effect.
+   * handle_pos_stuff() raises NMI on g_cpu, the Interp816 -- which never
+   * executes in fiber mode, so the request used to sit there unconsumed
+   * while this line forged the handler's INC $b9:
+   *
+   *     g_ram[0xb9] = 1;
+   *
+   * That released 00:930d's wait and skipped the rest of 00:80B2, i.e. the
+   * per-frame PPU work. The driver now delivers a real interrupt. */
+  bool nmi_pending = false;
+  if (g_cpu->nmiWanted) { g_cpu->nmiWanted = false; nmi_pending = true; }
 
   {
     static uint64_t last_guest_master;
-    bool ok = SimCityFiberDrive_RunGuestFrame(s_frames);
+    bool ok = SimCityFiberDrive_RunGuestFrame(s_frames, nmi_pending);
+    s_nmi_serviced = SimCityFiberDrive_NmiDelivered();
     /* Mirror the guest clock into the host counter the qualify bar and the
      * APU pacing read. Without this the frame path reports master=0 and every
      * cycle-derived check reads as dead. */
     uint64_t now = SimCityFiberDrive_MasterCycles();
-    if (now > last_guest_master) g_master_cycles += now - last_guest_master;
+    if (now > last_guest_master) {
+      uint64_t delta = now - last_guest_master;
+      g_master_cycles += delta;
+      /* Pace the APU off GUEST time as well as host beam time.
+       *
+       * The beam is advanced by both sides: this host's sc_beam_step(), and
+       * the bridge's per-opcode snes_sync_master_clock() (interp_bridge.c),
+       * which moves the same snes->hPos/vPos by the guest's master delta. So
+       * a frame is split between them in a ratio that varies per frame, and
+       * whichever side moves the beam, the elapsed wall time is the same.
+       *
+       * Pacing the SPC off host beam steps alone therefore starved it exactly
+       * in proportion to how much of the frame the guest had consumed. It was
+       * not a small effect: measured per-frame DSP production was ~540 on
+       * host-heavy frames and *0* on guest-heavy ones, about 30% of frames,
+       * dragging the average to 418/frame against --qualify's >=500 bar.
+       * (SC_APU_DIAG=1 prints that ledger.)
+       *
+       * The bridge does not cover this itself: bridge_apu_flush() takes the
+       * absolute-timeline early-out, which clears its pending master count
+       * without advancing the SPC because it expects an RtlRunFrame host to
+       * do the sync. This host does not call RtlRunFrame, so the guest's
+       * share of the frame reached the APU from nowhere at all.
+       *
+       * Chunked because snes_catchupApu() clamps the accumulator at 10000 SPC
+       * cycles as a runaway guard, and a whole frame is ~17046 -- the same
+       * clamp sc_beam_step() has to stay under. 4096 master is ~195 SPC. */
+      while (delta) {
+        uint32_t chunk = delta > 4096u ? 4096u : (uint32_t)delta;
+        g_snes->apuCatchupCycles += (double)chunk * kApuCyclesPerMaster;
+        snes_catchupApu(g_snes);
+        delta -= chunk;
+      }
+    }
     last_guest_master = now;
     return ok;
   }
@@ -2065,6 +2128,28 @@ static int run_qualification(uint64_t frames) {
      * past sampleWrite; the unsigned wraparound then reads as "ring
      * completely full" to the DSP's own backpressure check in dsp_cycle and
      * freezes sample production forever. Gate on the real fixed quantum. */
+    /* SC_APU_DIAG=1: per-frame audio ledger -- what the DSP produced, what
+     * was queued, and what the drain took. Cheap and env-gated. */
+    { static int diag = -1;
+      if (diag < 0) diag = getenv("SC_APU_DIAG") ? 1 : 0;
+      if (diag) fprintf(stderr, "[apu f=%llu] write=%u avail=%u produced=%d\n",
+                        (unsigned long long)f, dsp->sampleWrite, available,
+                        (int)(dsp->sampleWrite - last_sample_write));
+#ifdef SIMCITY_AOT_TIER
+      /* Beam-step ledger: only the fiber host has a host-side beam loop.
+       * This is what showed the beam being advanced from two places at
+       * once -- guest-heavy frames need only ~300 host steps instead of
+       * 178684, because the bridge already moved hPos/vPos itself. */
+      if (diag) { extern unsigned long g_beam_steps;
+                  static unsigned long prev_steps;
+                  fprintf(stderr, "[beam f=%llu] steps=%lu vPos=%d hPos=%d sf=%llu joy=%d\n",
+                          (unsigned long long)f, g_beam_steps - prev_steps,
+                          (int)g_snes->vPos, (int)g_snes->hPos,
+                          (unsigned long long)s_frames,
+                          (int)g_snes->autoJoyTimer);
+                  prev_steps = g_beam_steps; }
+#endif
+    }
     if (available >= 534) dsp_getSamples(dsp, audio_buf, 534);
     last_sample_write = dsp->sampleWrite;
   }
