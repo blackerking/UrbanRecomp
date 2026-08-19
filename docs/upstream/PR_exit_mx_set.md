@@ -1,5 +1,8 @@
 # PR draft — cfg: `exit_mx_set` for callees that exit in several widths
 
+**Status: not opened.** Branch is ready locally; when it goes up it goes
+via a fork under `blackerking`, not straight to `mstan/snesrecomp`.
+
 Branch: `pr-exit-mx-set` (1 commit, off `origin/main`)
 Files: `recompiler-rs/src/cfg.rs`, `recompiler-rs/src/bin/analyze.rs`,
 `recompiler/v2/cfg_loader.py`, `tools/v2_regen.py` — +213 / -2

@@ -1,4 +1,6 @@
-# Issue draft — Writing a frame-model host: four traps, all silent
+# Writing a frame-model host: four traps, all silent
+
+**FILED: https://github.com/mstan/snesrecomp/issues/22**
 
 Not a bug report against one function so much as a report from having just built
 such a host and hit every one of these. Each lets the host run, the game boot,

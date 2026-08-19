@@ -1,5 +1,8 @@
 # PR draft — `interp_bridge`: hand a deadline unwind back to the host
 
+**Status: not opened.** Branch is ready locally; when it goes up it goes
+via a fork under `blackerking`, not straight to `mstan/snesrecomp`.
+
 Branch: `pr-deadline-unwind` (1 commit, off `origin/main`)
 Files: `runner/src/snes/interp_bridge.c` only, +32 / -3
 
