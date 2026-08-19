@@ -1123,6 +1123,7 @@ static uint64_t s_disaster_frame;
 
 static void scenario_event_tick(void);            /* defined with the menu */
 static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what);
+static void service_disaster_menu8(void);
 
 /* SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>: the headless twin of the F10
  * MELTDOWN / UFO rows, so the trigger can be verified without a human at the
@@ -1154,6 +1155,7 @@ static bool run_one_frame(void) {
   sc_maybe_trigger_disaster();
   sc_maybe_trigger_scenario_event();
   scenario_event_tick();
+  service_disaster_menu8();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -2011,6 +2013,45 @@ static void scenario_event_tick(void) {
           (unsigned)s_scenario_event.saved_40, (unsigned long long)s_frames);
 }
 
+/* SC_DISASTER_MENU8=1: put the meltdown and the UFO on the GAME'S OWN
+ * disaster page, not just the F10 menu.
+ *
+ * The page (01:aa39, screen mode $01df == 2) walks $0197 as a checkbox list:
+ *
+ *   01:aa3e  ASL A ; ASL A     ; 2 shifts, so only bits 5..0 reach the walker
+ *   01:aa45  LDY #$0005        ; 6 rows
+ *   01:aa77  LDA $01a95c,X     ; bit-mask table
+ *
+ * Two things make this cheap. The mask table at 01:a95c already runs to
+ * $0200, so bits 6 and 7 have masks sitting there unused; and the input path
+ * does SBC #$0008 with only a negative check, so row indices 0-7 are already
+ * accepted. Only the render side is capped at six.
+ *
+ * Dropping the two shifts lets all eight bits reach the walker, and bumping
+ * the count to 8 draws two more checkboxes.
+ *
+ * The new bits are serviced HERE rather than by extending 03:b8ae. That
+ * ladder is a fixed chain ending in PLD/RTS at 03:b914 with no room for two
+ * more arms, and the meltdown and UFO are not ladder disasters anyway -- they
+ * are the $0c0d scenario events, which already have a verified trigger above.
+ * So the ROM patch only has to make the bits SETTABLE; the host reads them.
+ *
+ * OPT-IN because two things about it are unverified: whether rows 6 and 7 land
+ * inside the menu box or on top of whatever is below it, and that they will
+ * have no LABELS -- the row text comes from the page-setup dispatch
+ * (01:aabf JSR ($9d1a,X)), not from the checkbox renderer, so the two new rows
+ * draw a checkbox with nothing beside it until that is extended too. */
+static bool s_disaster_menu8;
+
+static void service_disaster_menu8(void) {
+  if (!s_disaster_menu8) return;
+  uint8_t v = g_ram[0x0197];
+  if (v & 0x40) { g_ram[0x0197] = (uint8_t)(v & ~0x40u);
+                  arm_scenario_event(4, 1,  "nuclear meltdown (in-game menu)"); }
+  else if (v & 0x80) { g_ram[0x0197] = (uint8_t)(v & ~0x80u);
+                       arm_scenario_event(6, 16, "UFO (in-game menu)"); }
+}
+
 static void menu_trigger_meltdown(void) { arm_scenario_event(4, 1,  "nuclear meltdown"); }
 /* The UFO additionally passes a population gate at 03:b9b3 -- a 32-bit
  * compare of ($0ba7:$0ba5) against $0001_4c08 -- so it will not appear in a
@@ -2622,10 +2663,12 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_DISASTER");
     if (e && *e) {
       unsigned bit = 0; unsigned long long at = 0;
-      if (sscanf(e, "%u@%llu", &bit, &at) == 2 && bit < 6) {
+      /* 0-5 are the ROM ladder arms; 6 and 7 are the meltdown and UFO rows
+       * added by SC_DISASTER_MENU8, serviced host-side. */
+      if (sscanf(e, "%u@%llu", &bit, &at) == 2 && bit < 8) {
         s_disaster_bit = (int)bit; s_disaster_frame = at;
       } else {
-        fprintf(stderr, "SC_DISASTER: want <bit 0-5>@<frame>\n");
+        fprintf(stderr, "SC_DISASTER: want <bit 0-7>@<frame>\n");
       }
     } }
   { const char *e = getenv("SC_MAP_WRITE_TRACE"); if (e && *e) s_map_write_trace = true; }
@@ -2807,6 +2850,22 @@ int main(int argc, char **argv) {
    * this patch: a 90s-timeout retest completed in 40s with byte-identical
    * baseline output. Re-verify with a generous timeout if this is ever
    * in doubt again.) */
+  /* SC_DISASTER_MENU8=1 -- see service_disaster_menu8(). Two byte patches:
+   * drop the pair of ASLs so all eight $0197 bits reach the row walker, and
+   * raise the row count from 6 to 8. Byte-checked, and applied here because
+   * cart_init() copies the ROM -- a patch after that lands in a buffer nobody
+   * reads. */
+  if (getenv("SC_DISASTER_MENU8")) {
+    if (0xaa47 < rom_size && rom_data[0xaa3e] == 0x0a && rom_data[0xaa3f] == 0x0a &&
+        rom_data[0xaa45] == 0xa0 && rom_data[0xaa46] == 0x05) {
+      rom_data[0xaa3e] = rom_data[0xaa3f] = 0xea;   /* ASL A ; ASL A -> NOP NOP */
+      rom_data[0xaa46] = 0x07;                      /* LDY #$0005 -> LDY #$0007 */
+      s_disaster_menu8 = true;
+      fprintf(stderr, "disaster menu: 8 rows (bits 6=meltdown, 7=UFO)\n");
+    } else {
+      fprintf(stderr, "SC_DISASTER_MENU8: 01:aa3e/aa45 bytes unexpected, not patching\n");
+    }
+  }
   {
     uint32_t off = 0x40fb; /* 00:c0fb's STA $7e21b5 (long), file offset = addr-0x8000 (bank 0) */
     if (off + 3 < rom_size && rom_data[off] == 0x8f && rom_data[off+1] == 0xb5 &&

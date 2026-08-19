@@ -1851,6 +1851,49 @@ validated against known answers before being trusted on the unknown ones.
 Bit 2's mere 4 addresses are the `$0a8d` guard bailing out: `savestate_9` has
 no airport, so the plane crash has nothing to crash.
 
+## Putting the meltdown and UFO on the game's own disaster page
+
+`SC_DISASTER_MENU8=1`. The page is `01:aa39` (screen mode `$01df == 2`), which
+walks `$0197` as a checkbox list:
+
+```
+01:aa3e  ASL A ; ASL A     ; 2 shifts -> only bits 5..0 reach the walker
+01:aa45  LDY #$0005        ; 6 rows
+01:aa77  LDA $01a95c,X     ; bit-mask table
+```
+
+Two things make this cheap, and both were surprises:
+
+- **The mask table already runs to `$0200`.** Bits 6 and 7 have masks sitting
+  at `01:a968`/`01:a96a`, unused.
+- **The input path already accepts eight rows.** `01:aa6b CMP #$0008` then
+  `SBC #$0008` with only a `BMI` bail, so indices 0-7 pass. Only the *render*
+  side is capped at six.
+
+So two byte patches do it: `ASL A ; ASL A` -> `NOP NOP` so all eight bits reach
+the walker, and `LDY #$0005` -> `LDY #$0007`.
+
+The new bits are serviced **host-side**, not by extending `03:b8ae`. That
+ladder is a fixed chain ending in `PLD`/`RTS` at `03:b914` with no room for two
+more arms — and the meltdown and UFO are not ladder disasters anyway, they are
+the `$0c0d` scenario events. So the ROM patch only has to make the bits
+*settable*; the host reads them and arms the existing verified trigger.
+
+Verified: `SC_DISASTER=6@<frame>` arms the meltdown and `7` the UFO, each
+through the full chain and each restoring afterwards. `--qualify` is
+byte-identical with and without the patch, so it is inert until a bit is set.
+
+### Two things about it are unverified
+
+**The new rows have no labels.** Row text comes from the page-setup dispatch
+(`01:aabf JSR ($9d1a,X)`), not from the checkbox renderer at `01:a918`/`a93a`,
+which only writes the box tile to `$7e2063 + row*16`. Rows 6 and 7 will draw a
+checkbox with nothing beside it until that table is found and extended.
+
+**Where rows 6 and 7 land is unknown.** They write 16 and 32 bytes past the
+last existing row; whether that is inside the menu box or on top of whatever is
+below it has not been checked. This is why the patch is opt-in.
+
 ## The `$0197` ladder, fully attributed
 
 Confirmed by observation: each bit was triggered from the F10 menu on a live
