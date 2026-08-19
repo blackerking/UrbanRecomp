@@ -1139,6 +1139,19 @@ static void sc_maybe_trigger_scenario_event(void) {
   s_scen_event_idx = -1;
 }
 
+/* Zero the cursor step-delay countdown every frame.
+ *
+ * 01:c0dd gates the cursor step on $01f3: `LDA $01f3 ; BEQ +4 ; DEC $01f3 ;
+ * RTS` -- while it is nonzero the step is skipped, which is what makes holding
+ * a button act once per few frames instead of continuously (bulldozing "only
+ * step by step").
+ *
+ * The US build fixes this by patching the two `STA $01f3` immediates from 3 to
+ * 0 in ROM. $01f3 is WRAM, so zeroing it here does the same thing without a
+ * byte patch -- and therefore works on EVERY region, including the ones whose
+ * ROM sites we have never located. 16-bit, so both halves. */
+static bool s_fast_ticks = true;
+
 /* Fire the scripted SC_DISASTER trigger once, at its frame. */
 static void sc_maybe_trigger_disaster(void) {
   if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
@@ -1152,6 +1165,7 @@ static bool run_one_frame(void) {
 #ifdef SIMCITY_AOT_TIER
   if (s_fiber_mode) return run_one_frame_fiber();
 #endif
+  if (s_fast_ticks) { g_ram[0x01f3] = 0; g_ram[0x01f4] = 0; }
   sc_maybe_trigger_disaster();
   sc_maybe_trigger_scenario_event();
   scenario_event_tick();
@@ -1766,9 +1780,12 @@ static int s_mouse_sensitivity = 100;
  * held so the ROM runs its own cursor/drag path instead of only seeing a
  * teleported cursor. */
 /* Map tiles the right-drag pan may advance per frame, per axis. */
+
 static int s_pan_max_tiles = 1;
 static const int kPanMaxTiles[] = { 1, 2, 3, 4, 6, 8 };
 
+static uint16_t s_pan_dir;
+static int      s_pan_dir_frames;
 static uint16_t s_mouse_dir;
 static int      s_mouse_dir_frames;
 static const int kMouseSensitivities[] = { 50, 75, 100, 150, 200 };
@@ -2119,6 +2136,7 @@ static SettingDesc s_settings[] = {
    * value still fits the menu box at the current font size -- see
    * render_settings_menu()'s width math. */
   { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
+  { "FAST TICKS",            kSettingBool, &s_fast_ticks,          0,    NULL, NULL, 0 },
   { "PAN SPEED",             kSettingCycle, &s_pan_max_tiles,       0,    NULL,
     kPanMaxTiles, (int)(sizeof(kPanMaxTiles) / sizeof(kPanMaxTiles[0])) },
   { "MOUSE SPEED",           kSettingCycle, &s_mouse_sensitivity,   0,    NULL,
@@ -3312,54 +3330,34 @@ int main(int argc, char **argv) {
          * assumed. Scroll is in map tiles, so the SNES-pixel delta is divided
          * down; SC_PAN_DIV tunes it. */
         if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_RIGHT)) {
+          /* Pan by driving the ROM's OWN scroll, not by poking $01bd/$01bf.
+           *
+           * Writing the scroll pair directly tore the map even at one tile per
+           * frame, because the ROM updates its tilemap in step with that value
+           * during its own frame work -- a host write lands at an arbitrary
+           * point and the map redraws half-updated.
+           *
+           * Holding A is exactly the game's own "deactivate cursor, move the
+           * map" mode (01:8d8a -> 01:afbe). Synthesising A plus a direction
+           * makes the ROM scroll itself, so the update is coordinated and
+           * tear-free by construction, at whatever rate the game supports. */
+          static double pacc_x, pacc_y;
           static int pan_div = -1;
           if (pan_div < 0) {
             const char *e = getenv("SC_PAN_DIV");
             pan_div = (e && *e) ? atoi(e) : 8;
-            { const char *m = getenv("SC_PAN_MAX");
-              if (m && *m) { int v = atoi(m); if (v >= 1 && v <= 32) s_pan_max_tiles = v; } }
             if (pan_div < 1) pan_div = 1;
           }
-          static double pacc_x, pacc_y;
           pacc_x += (double)step_x / pan_div;
           pacc_y += (double)step_y / pan_div;
           int px = (int)pacc_x, py = (int)pacc_y;
           pacc_x -= px; pacc_y -= py;
-          /* Tiles per frame, per axis. 01:afbe -- the ROM's own scroll --
-           * moves exactly one, and matching that was what stopped the pan
-           * looking like the map was redrawing slowly.
-           *
-           * But one is the GAME's step, not a measured limit of the renderer.
-           * 01:a640, the ROM's camera-jump routine, also only writes
-           * $01bd/$01bf with no extra redraw call, so nothing here has to be
-           * replicated -- the ceiling is simply how many tile columns the
-           * per-frame map renderer can fill before it visibly lags.
-           *
-           * That ceiling is easier to find by looking than by reasoning, so it
-           * is tunable: SC_PAN_MAX, or the PAN SPEED row in F10. Raise it until
-           * the map starts tearing, then back off one.
-           */
-          const int cap = s_pan_max_tiles;
-          if (px >  cap) { pacc_x += px - cap; px =  cap; }
-          if (px < -cap) { pacc_x += px + cap; px = -cap; }
-          if (py >  cap) { pacc_y += py - cap; py =  cap; }
-          if (py < -cap) { pacc_y += py + cap; py = -cap; }
-          if (px || py) {
-            /* 8-bit signed, NOT 16-bit words. docs/ROM_MAP.md is explicit that
-             * "no code anywhere in the ROM touches $01be" and that the real
-             * pair is two bytes 2 apart. Writing $01be/$01c0 as high bytes
-             * would poke addresses the ROM never uses -- and $01c0 may well
-             * belong to something else entirely. */
-            int sxp = (int8_t)g_ram[0x01bd];
-            int syp = (int8_t)g_ram[0x01bf];
-            int xmax = (int8_t)g_ram[0x01c5], xmin = (int8_t)g_ram[0x01c7];
-            int ymax = (int8_t)g_ram[0x01c9], ymin = (int8_t)g_ram[0x01cb];
-            sxp += px; syp += py;
-            if (xmax > xmin) { if (sxp > xmax) sxp = xmax; if (sxp < xmin) sxp = xmin; }
-            if (ymax > ymin) { if (syp > ymax) syp = ymax; if (syp < ymin) syp = ymin; }
-            g_ram[0x01bd] = (uint8_t)sxp;
-            g_ram[0x01bf] = (uint8_t)syp;
-          }
+          s_pan_dir = 0;
+          if (px < 0) s_pan_dir |= kPad_Left;
+          if (px > 0) s_pan_dir |= kPad_Right;
+          if (py < 0) s_pan_dir |= kPad_Up;
+          if (py > 0) s_pan_dir |= kPad_Down;
+          if (s_pan_dir) s_pan_dir_frames = 2;
         } else if (step_x || step_y) {
           apply_mouse_delta(step_x, step_y);
           /* Remember the direction of travel. While a button is held the ROM
@@ -3455,7 +3453,10 @@ int main(int argc, char **argv) {
       /* Right button drives the map pan directly (see the pan block in the
        * mouse handler) rather than feeding A, so it does not also trigger the
        * ROM's own hold-A scroll and double up. */
-      if (!s_mouse_enabled && (mb & SDL_BUTTON(SDL_BUTTON_RIGHT))) input |= kPad_A; }
+      if (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) {
+        input |= kPad_A;                      /* the game's own pan modifier */
+        if (s_pan_dir_frames > 0) { input |= s_pan_dir; s_pan_dir_frames--; }
+      } }
     /* Don't feed the keyboard to the game while the settings menu is open:
      * the menu navigates with Up/Down/Left/Right/Enter, which are also the
      * SNES D-pad and Start bindings. The game is frozen so nothing acts on
