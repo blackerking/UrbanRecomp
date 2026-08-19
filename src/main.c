@@ -1124,6 +1124,7 @@ static uint64_t s_disaster_frame;
 static void scenario_event_tick(void);            /* defined with the menu */
 static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what);
 static void service_disaster_menu8(void);
+static void position_disaster_menu8_rows(void);
 
 /* SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>: the headless twin of the F10
  * MELTDOWN / UFO rows, so the trigger can be verified without a human at the
@@ -1156,6 +1157,7 @@ static bool run_one_frame(void) {
   sc_maybe_trigger_scenario_event();
   scenario_event_tick();
   service_disaster_menu8();
+  position_disaster_menu8_rows();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -2042,6 +2044,49 @@ static void scenario_event_tick(void) {
  * (01:aabf JSR ($9d1a,X)), not from the checkbox renderer, so the two new rows
  * draw a checkbox with nothing beside it until that is extended too. */
 static bool s_disaster_menu8;
+
+/* Position the two new disaster rows.
+ *
+ * 01:a918/a93a write only the TILE byte of each row's four OAM-style entries
+ * at $7e2063 + row*16 (+0,+4,+8,+12). Positions come from page-setup code that
+ * lays out exactly six rows, so rows 6 and 7 sit at the parked value $e0 and
+ * never appear -- the checkbox is drawn onto a sprite nobody placed.
+ *
+ * Rather than reverse-engineer the layout byte format from six samples (the
+ * progression is irregular: bytes go 6c, a0, a4, a8, ac, e0 across two bands
+ * at $40/$50 and $58/$68), place them empirically: clone a row that is known to
+ * render, then move it. SC_MENU8_POS=<b0_row6>,<b0_row7> overrides the band
+ * byte in hex so the position can be tuned without a rebuild.
+ *
+ * Rewritten every frame while the page is up, because the ROM redraws the tile
+ * byte on every toggle and we must not fight it -- only bytes 0 and 1 are
+ * touched, never the tile. */
+#define SC_MENU_OAM 0x2061u   /* $7e2061: row stride 16, four 4-byte entries */
+
+static void position_disaster_menu8_rows(void) {
+  if (!s_disaster_menu8) return;
+  if (g_ram[0x01df] != 2) return;            /* only on the disaster page */
+  static int y6 = -1, y7 = -1;
+  if (y6 < 0) {
+    const char *e = getenv("SC_MENU8_POS");
+    unsigned a6 = 0x70, a7 = 0x88;
+    if (e && *e) sscanf(e, "%x,%x", &a6, &a7);
+    y6 = (int)a6; y7 = (int)a7;
+    fprintf(stderr, "disaster menu: placing rows 6/7 at band $%02x/$%02x\n", y6, y7);
+  }
+  /* Clone rows 2 and 5 -- one from each existing band -- keeping their X/attr
+   * and replacing only the band byte. */
+  for (int k = 0; k < 4; k++) {
+    uint32_t src2 = SC_MENU_OAM + 2 * 16 + (uint32_t)k * 4;
+    uint32_t src5 = SC_MENU_OAM + 5 * 16 + (uint32_t)k * 4;
+    uint32_t d6   = SC_MENU_OAM + 6 * 16 + (uint32_t)k * 4;
+    uint32_t d7   = SC_MENU_OAM + 7 * 16 + (uint32_t)k * 4;
+    g_ram[d6 + 0] = (uint8_t)y6;  g_ram[d6 + 1] = g_ram[src2 + 1];
+    g_ram[d6 + 3] = g_ram[src2 + 3];
+    g_ram[d7 + 0] = (uint8_t)y7;  g_ram[d7 + 1] = g_ram[src5 + 1];
+    g_ram[d7 + 3] = g_ram[src5 + 3];
+  }
+}
 
 static void service_disaster_menu8(void) {
   if (!s_disaster_menu8) return;
