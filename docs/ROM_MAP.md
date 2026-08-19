@@ -1593,6 +1593,108 @@ Measured across this repo's save states: `$01e7 = 0x0002` in savestates 3-6
 (scenarios, View unlocked), `0x0000` in 0/1/2/7/8 (practice/free play),
 `0x0001` in 9.
 
+## FOUND: `$0c0d` is the per-scenario event countdown
+
+The mechanism behind both scenario-scoped events, and it is one routine.
+
+`03:ce8b` seeds `$0c0d` per scenario from the table at `03:cec9` (verified from
+the code, not inferred):
+
+| idx | scenario | year | `$0c0d` seed |
+|---|---|---|---|
+| 0 | San Francisco | 1906 | 10 |
+| 1 | Bern | 1965 | 20 |
+| 2 | Tokyo | 1961 | 5 |
+| 3 | Detroit | 1972 | 3 |
+| 4 | **Boston** | 2010 | **1** |
+| 5 | Rio | 2047 | 258 |
+| 6 | **Las Vegas** | 2096 | **384** |
+| 7 | free play | 1991 | 10 |
+
+The year column is the existing `03:ced9` table, and it pins the index mapping
+independently.
+
+### `03:b96f` dispatches on it, in two modes
+
+**Mode 1 -- the countdown reaches 1: fire the scenario's signature disaster.**
+
+```
+03:b96f  LDA $0c0d ; CMP #$0001 ; BNE $b997
+03:b977  LDY $0040
+03:b97a  BNE  +           ; idx 0 San Francisco -> JSR $baf5  EARTHQUAKE
+03:b981  CPY #$0002       ; idx 2 Tokyo         -> JSR $ba47  MONSTER
+03:b98b  CPY #$0004       ; idx 4 Boston        -> JSR $bac1  <-- NOT a ladder arm
+```
+
+**Mode 2 -- otherwise, every 16th tick: the recurring events.**
+
+```
+03:b997  LDA $0c0d ; BEQ done
+03:b99c  AND #$000f ; BNE +      ; only when the low nibble is 0
+03:b9a1  LDY $0040
+03:b9a4  CPY #$0005       ; idx 5 Rio        -> JSR $bc0b  FLOOD
+03:b9ae  CPY #$0006       ; idx 6 Las Vegas  -> population gate -> JSR $bcb8  UFO
+03:b9c4  LDY $0c0d ; BEQ done ; DEC $0c0d    ; tick
+```
+
+So **`03:bac1` and `03:bcb8` are a seventh and eighth handler**, outside the
+six-arm `$0197` ladder entirely. That is why neither could ever be found in it.
+
+### The meltdown: `03:bac1`
+
+Boston seeds `$0c0d = 1`, so mode 1 fires on the **first tick** -- which is
+exactly the reported behaviour, "triggered when you open up the scenario".
+
+The handler is a full 120x100 map scan (`CMP #$0078` / `CMP #$0064`) for tile
+value **`$027c`**, and on the first match it passes the cell coordinate through
+`$0b85` and jumps to `03:bd61`.
+
+`$027c` is one of the two self-powered tiles from `03:b0f8` -- the two power
+plant types, where "which of the pair is coal and which is nuclear" was open.
+A routine that hunts down `$027c` specifically and detonates it settles it:
+**`$027c` is the nuclear plant, `$028c` the coal plant.**
+
+### The UFO: `03:bcb8`
+
+Las Vegas seeds `$0c0d = 384`, so mode 2 fires every 16 ticks for 24 events,
+gated on population (`$0ba5`/`$0ba7` vs `$1_4c08`). The handler walks a 9-entry
+waypoint path from `03:bd3b`/`03:bd4f`, terminated by `$00ff`, and sets
+`$0af1 = $8000` -- the "controls disabled" flag already documented below.
+
+### Confirmed by execution
+
+Save states 3-6 are Las Vegas (`$0040 = 6`, year 2097) sitting at
+`$0c0d = 304` -- counted down 80 from 384, and **divisible by 16**, i.e. exactly
+on the firing condition. Running `savestate_3` for 4,000 frames and checking the
+coverage bitmap:
+
+| site | | |
+|---|---|---|
+| `03:b96f` | countdown read | EXECUTED |
+| `03:b99c` | `AND #$000f` every-16 gate | EXECUTED |
+| `03:b9ae` | `CPY #$0006` Las Vegas arm | EXECUTED |
+| `03:b9b3` | population gate | EXECUTED |
+| `03:b9c1` | `JSR $bcb8` | EXECUTED |
+| `03:bcb8` | UFO handler | EXECUTED |
+| `03:b9c9` | `DEC $0c0d` | EXECUTED |
+| `03:b990` | `JSR $bac1` meltdown call | **not executed** |
+| `03:bac1` | meltdown handler | **not executed** |
+
+The negative half is the control: from a Las Vegas state the mechanism fires the
+Las Vegas arm and not the Boston one.
+
+### What is still only derived
+
+**The meltdown has not been executed.** None of the ten save states is Boston
+(`$0040 = 4`), so `03:bac1` has never been observed running. The case for it is
+static -- index 4 is Boston by the year table, its seed of 1 fires on the first
+tick, and the handler detonates a power plant -- and it matches the reported
+behaviour exactly, but it is not measured. **A save state taken inside the
+Boston scenario would settle it in one run**, and would also confirm `$027c`.
+
+Poking `$0040 = 4` into a Las Vegas state would test the dispatch but not the
+meltdown, since the scan would run over the wrong map.
+
 ## Meltdown and UFO are scenario-driven, not `$0197` bits
 
 Reported from play, and it fits everything measured:

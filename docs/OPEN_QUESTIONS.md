@@ -299,7 +299,22 @@ none is identified. Placing each gift in play and watching `$0c71` and `$0ddd`
 would name them in one session — the casino is known to be one of the six
 100/year tiles.
 
-### C5. Disasters — the `$0199` model was WRONG, and the mechanism is unfound
+### C5. Disasters — **MECHANISM FOUND: `$0c0d`, the per-scenario countdown**
+
+> The six `$0197` ladder arms were attributed earlier. The two that were never
+> in the ladder — the nuclear meltdown and the UFO — are dispatched from
+> `03:b96f` on a per-scenario countdown `$0c0d`, seeded at `03:ce95`. Boston
+> seeds it to **1**, so the meltdown fires on the first tick, matching the
+> report "triggered when you open up the scenario". Las Vegas seeds **384**
+> and the UFO fires every 16 ticks. Handlers are `03:bac1` (meltdown) and
+> `03:bcb8` (UFO), a seventh and eighth handler outside the ladder.
+>
+> The UFO chain is confirmed end to end by execution from `savestate_3`. The
+> meltdown is **derived, not measured** — no save state is Boston. See
+> docs/ROM_MAP.md, "`$0c0d` is the per-scenario event countdown".
+
+#### Original section (the `$0199` disconfirmation), kept for the reasoning
+
 
 An earlier revision of this section claimed `03:b84b` / `$0199` was the
 disaster machinery: a pending-disaster bitfield with handlers at `03:b9db`
