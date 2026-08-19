@@ -3253,8 +3253,24 @@ int main(int argc, char **argv) {
        * resized or fullscreened window stays correct. The remainder is carried
        * rather than truncated, or slow movement below one SNES pixel per frame
        * would be silently dropped and the cursor would feel sticky. */
+      /* SDL3 changed this to float* -- SDL_GetRelativeMouseState(float*,float*).
+       * Passing int* is not an error in MSVC C, only warning C4133, so it built
+       * clean under a grep that matched "error C" and the SDL3 build spent the
+       * whole time reinterpreting float bits as ints. The deltas were garbage,
+       * clamped to +/-127, which is why the cursor was "way too fast in every
+       * setting" -- no sensitivity could scale a nonsense number.
+       *
+       * Third time this family of change has bitten: SDL_Init returning bool,
+       * SDL_Rect becoming SDL_FRect, and now this. SDL_ENABLE_OLD_NAMES keeps
+       * the NAME working, which is exactly what makes it dangerous. */
       int mdx = 0, mdy = 0;
+#if SNESRECOMP_SDL3
+      { float fx = 0.0f, fy = 0.0f;
+        SDL_GetRelativeMouseState(&fx, &fy);
+        mdx = (int)fx; mdy = (int)fy; }
+#else
       SDL_GetRelativeMouseState(&mdx, &mdy);
+#endif
       if (mdx || mdy) {
         int ow = 0, oh = 0;
 #if SNESRECOMP_SDL3
@@ -3272,7 +3288,49 @@ int main(int argc, char **argv) {
         acc_y += (double)mdy * sens / sy;
         int step_x = (int)acc_x, step_y = (int)acc_y;
         acc_x -= step_x; acc_y -= step_y;
-        if (step_x || step_y) apply_mouse_delta(step_x, step_y);
+        /* Right button held = pan the map, not move the cursor.
+         *
+         * That mirrors what the ROM itself does: holding A deactivates the
+         * cursor and turns the D-pad into a map scroll (01:afbe's ladder over
+         * $01bd/$01bf). Driving $01eb/$01ed while the game is trying to scroll
+         * fought that routine -- the direction arrows appeared but only the
+         * cursor moved.
+         *
+         * $01bd/$01bf are the confirmed scroll pair, clamped by 01:a0c4
+         * against bounds in $01c5-$01cb, which are read here rather than
+         * assumed. Scroll is in map tiles, so the SNES-pixel delta is divided
+         * down; SC_PAN_DIV tunes it. */
+        if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_RIGHT)) {
+          static int pan_div = -1;
+          if (pan_div < 0) {
+            const char *e = getenv("SC_PAN_DIV");
+            pan_div = (e && *e) ? atoi(e) : 8;
+            if (pan_div < 1) pan_div = 1;
+          }
+          static double pacc_x, pacc_y;
+          pacc_x += (double)step_x / pan_div;
+          pacc_y += (double)step_y / pan_div;
+          int px = (int)pacc_x, py = (int)pacc_y;
+          pacc_x -= px; pacc_y -= py;
+          if (px || py) {
+            /* 8-bit signed, NOT 16-bit words. docs/ROM_MAP.md is explicit that
+             * "no code anywhere in the ROM touches $01be" and that the real
+             * pair is two bytes 2 apart. Writing $01be/$01c0 as high bytes
+             * would poke addresses the ROM never uses -- and $01c0 may well
+             * belong to something else entirely. */
+            int sxp = (int8_t)g_ram[0x01bd];
+            int syp = (int8_t)g_ram[0x01bf];
+            int xmax = (int8_t)g_ram[0x01c5], xmin = (int8_t)g_ram[0x01c7];
+            int ymax = (int8_t)g_ram[0x01c9], ymin = (int8_t)g_ram[0x01cb];
+            sxp += px; syp += py;
+            if (xmax > xmin) { if (sxp > xmax) sxp = xmax; if (sxp < xmin) sxp = xmin; }
+            if (ymax > ymin) { if (syp > ymax) syp = ymax; if (syp < ymin) syp = ymin; }
+            g_ram[0x01bd] = (uint8_t)sxp;
+            g_ram[0x01bf] = (uint8_t)syp;
+          }
+        } else if (step_x || step_y) {
+          apply_mouse_delta(step_x, step_y);
+        }
       }
     }
     if (s_fast_cursor_enabled) {
@@ -3343,7 +3401,10 @@ int main(int argc, char **argv) {
      * docs/HANDOVER_metal_marines.md #1. */
     { const uint32_t mb = SDL_GetMouseState(NULL, NULL);
       if (mb & SDL_BUTTON(SDL_BUTTON_LEFT))  input |= kPad_B;
-      if (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) input |= kPad_A; }
+      /* Right button drives the map pan directly (see the pan block in the
+       * mouse handler) rather than feeding A, so it does not also trigger the
+       * ROM's own hold-A scroll and double up. */
+      if (!s_mouse_enabled && (mb & SDL_BUTTON(SDL_BUTTON_RIGHT))) input |= kPad_A; }
     /* Don't feed the keyboard to the game while the settings menu is open:
      * the menu navigates with Up/Down/Left/Right/Enter, which are also the
      * SNES D-pad and Start bindings. The game is frozen so nothing acts on
