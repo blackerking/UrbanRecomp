@@ -102,3 +102,25 @@ aot_eligible (94.8%), **73364/75333 instructions** (97.4%).
 4. A separate `src/gen-<region>` tree and a build target that links it, plus
    widening the fingerprint guard from one US constant to a per-tree identity.
 
+## Play-tested: Germany
+
+Reported from play on the German image:
+
+- **The F10 MELTDOWN trigger works as intended.** That is the interesting one:
+  the trigger pokes `$003e`, `$0040` and `$0c0d`, which are **WRAM**, not ROM.
+  It working implies the WRAM layout is shared across regions even though the
+  code is not -- which would make much of `docs/ROM_MAP.md` portable. Treat this
+  as a strong hint from play rather than a measured fact: an attempt to confirm
+  it by dumping those fields at frame 400 was uninformative, because the game is
+  still on the attract screen and every field reads 0 in all regions.
+- **The View screen works**, without the US `00:c0fb` NOP patch that the US
+  build needs. So that bug may be US-specific.
+- **Controls are not sluggish**, without the US cursor-cadence patch. So that
+  patch is not needed here either.
+- **The UFO fires only at higher population**, i.e. the `03:b9b3` gate is
+  active -- expected, since the gate-lift is a US ROM byte-patch and is
+  correctly declined on this image.
+
+Both US byte-patches decline cleanly (`0/2` and "byte mismatch"), and neither
+omission caused a problem.
+

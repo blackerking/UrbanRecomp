@@ -1759,6 +1759,11 @@ static bool s_fast_cursor_enabled;
  * px/frame (~4s to cross the screen). That is authentic behaviour, not a
  * recomp defect, and is presumably why the cartridge shipped with SNES
  * Mouse support. This host-side nudge is the practical remedy. */
+/* Mouse sensitivity, as a percentage applied after the window-scale divide.
+ * 100 = one SNES pixel per SNES pixel of pointer travel. */
+static int s_mouse_sensitivity = 100;
+static const int kMouseSensitivities[] = { 50, 75, 100, 150, 200 };
+
 static int s_fast_cursor_step = 4;
 static const int kFastCursorSteps[] = { 2, 4, 8, 16 };
 
@@ -2105,6 +2110,8 @@ static SettingDesc s_settings[] = {
    * value still fits the menu box at the current font size -- see
    * render_settings_menu()'s width math. */
   { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
+  { "MOUSE SPEED",           kSettingCycle, &s_mouse_sensitivity,   0,    NULL,
+    kMouseSensitivities, (int)(sizeof(kMouseSensitivities) / sizeof(kMouseSensitivities[0])) },
   { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
@@ -3236,9 +3243,37 @@ int main(int argc, char **argv) {
     }
     const uint8_t *keys = SDL_GetKeyboardState(NULL);
     if (s_mouse_enabled) {
+      /* SDL reports the pointer delta in HOST SCREEN pixels; the cursor lives
+       * in SNES pixels. Feeding one straight into the other made the cursor
+       * move `scale` times too fast -- 3x at the default window size. Reported
+       * from play as "the mouse input seems way too fast", on every region,
+       * not just the one it was noticed on.
+       *
+       * Divide by the live window scale rather than the `scale` variable, so a
+       * resized or fullscreened window stays correct. The remainder is carried
+       * rather than truncated, or slow movement below one SNES pixel per frame
+       * would be silently dropped and the cursor would feel sticky. */
       int mdx = 0, mdy = 0;
       SDL_GetRelativeMouseState(&mdx, &mdy);
-      if (mdx || mdy) apply_mouse_delta(mdx, mdy);
+      if (mdx || mdy) {
+        int ow = 0, oh = 0;
+#if SNESRECOMP_SDL3
+        SDL_GetRenderOutputSize(renderer, &ow, &oh);
+#else
+        SDL_GetRendererOutputSize(renderer, &ow, &oh);
+#endif
+        double sx = ow > 0 ? (double)ow / (double)kVideoWidth  : (double)scale;
+        double sy = oh > 0 ? (double)oh / (double)kVideoHeight : (double)scale;
+        if (sx < 1.0) sx = 1.0;
+        if (sy < 1.0) sy = 1.0;
+        const double sens = (double)s_mouse_sensitivity / 100.0;
+        static double acc_x, acc_y;
+        acc_x += (double)mdx * sens / sx;
+        acc_y += (double)mdy * sens / sy;
+        int step_x = (int)acc_x, step_y = (int)acc_y;
+        acc_x -= step_x; acc_y -= step_y;
+        if (step_x || step_y) apply_mouse_delta(step_x, step_y);
+      }
     }
     if (s_fast_cursor_enabled) {
       /* Host-driven, independent of the ROM's own cadence -- see
@@ -3293,13 +3328,22 @@ int main(int argc, char **argv) {
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
     if (keys[sc_select]) input |= kPad_Select;
-    /* Left mouse button = SNES X -- lets host-mouse cursor control (F3)
-     * actually select/interact with things, not just move the cursor.
-     * Not gated on s_mouse_enabled: useful as a plain extra binding
-     * regardless (one hand on the mouse for pointing, click to act,
-     * without reaching for the keyboard). Was bound to B originally; the
-     * user asked for X after playing with it. */
-    if (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)) input |= kPad_X;
+    /* Mouse buttons: LEFT = SNES B, RIGHT = SNES A.
+     *
+     * Lets host-mouse cursor control (F3) actually select and interact, not
+     * just move the cursor. Not gated on s_mouse_enabled: useful as a plain
+     * extra binding regardless -- one hand on the mouse for pointing, click to
+     * act, without reaching for the keyboard.
+     *
+     * Binding history, since it has moved twice on request: B originally, then
+     * X after play-testing, now B for left with A added on right.
+     *
+     * Note these are the SERIAL-order pad bits (kPad_B = $0001, kPad_A =
+     * $0100), not the $4218/$4219 hardware layout -- see
+     * docs/HANDOVER_metal_marines.md #1. */
+    { const uint32_t mb = SDL_GetMouseState(NULL, NULL);
+      if (mb & SDL_BUTTON(SDL_BUTTON_LEFT))  input |= kPad_B;
+      if (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) input |= kPad_A; }
     /* Don't feed the keyboard to the game while the settings menu is open:
      * the menu navigates with Up/Down/Left/Right/Enter, which are also the
      * SNES D-pad and Start bindings. The game is frozen so nothing acts on
