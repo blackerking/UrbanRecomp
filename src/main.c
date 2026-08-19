@@ -1152,6 +1152,11 @@ static void sc_maybe_trigger_scenario_event(void) {
  * ROM sites we have never located. 16-bit, so both halves. */
 static bool s_fast_ticks = true;
 
+/* Guest frames per host frame while a mouse button is held -- see DRAG TURBO
+ * in the main loop. 1 = off. */
+static int s_drag_turbo = 1;
+static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
+
 /* Fire the scripted SC_DISASTER trigger once, at its frame. */
 static void sc_maybe_trigger_disaster(void) {
   if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
@@ -2137,6 +2142,8 @@ static SettingDesc s_settings[] = {
    * render_settings_menu()'s width math. */
   { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
   { "FAST TICKS",            kSettingBool, &s_fast_ticks,          0,    NULL, NULL, 0 },
+  { "DRAG TURBO",            kSettingCycle, &s_drag_turbo,          0,    NULL,
+    kDragTurbos, (int)(sizeof(kDragTurbos) / sizeof(kDragTurbos[0])) },
   { "PAN SPEED",             kSettingCycle, &s_pan_max_tiles,       0,    NULL,
     kPanMaxTiles, (int)(sizeof(kPanMaxTiles) / sizeof(kPanMaxTiles[0])) },
   { "MOUSE SPEED",           kSettingCycle, &s_mouse_sensitivity,   0,    NULL,
@@ -3475,8 +3482,29 @@ int main(int argc, char **argv) {
      * game-time per real second, not just a faster/choppier render. Also
      * applied automatically (no key needed) while the map/scenario
      * generation loop is active -- see s_gen_loop_active_frames above. */
+    /* DRAG TURBO: run extra guest frames while a mouse button is held.
+     *
+     * The cursor and the map scroll are not slow because their routines are
+     * slow -- they are STARVED. Traced live: bank $03, the city simulation,
+     * holds the CPU for ~4 consecutive frames at a time, and the bank-1 cursor
+     * dispatcher does not run at all during those, so input steps only on the
+     * bank-1 frames. A 4-on/4-off duty cycle. That is authentic behaviour, not
+     * a recomp defect, and it is why the cartridge shipped with SNES Mouse
+     * support.
+     *
+     * Nothing host-side can make the dispatcher run during a frame the ROM
+     * spends elsewhere. What the host CAN do is give it more frames: running
+     * N guest frames per host frame while dragging multiplies the number of
+     * turns it gets, so bulldozing and panning proceed N times faster.
+     *
+     * The honest cost: the SIMULATION also advances N times faster while the
+     * button is held. For a drag lasting a second or two that is a fraction of
+     * a game-month, but it is not free, so it is off by default. */
+    const bool dragging = s_drag_turbo > 1 &&
+      (SDL_GetMouseState(NULL, NULL) &
+       (SDL_BUTTON(SDL_BUTTON_LEFT) | SDL_BUTTON(SDL_BUTTON_RIGHT))) != 0;
     bool fast_forward = keys[SDL_SCANCODE_TAB] || s_gen_loop_active_frames > 0;
-    int frames_this_iter = fast_forward ? 6 : 1;
+    int frames_this_iter = fast_forward ? 6 : (dragging ? s_drag_turbo : 1);
 
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
      * time for any run_one_frame() call slower than the threshold -- there's
