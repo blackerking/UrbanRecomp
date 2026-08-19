@@ -1883,16 +1883,36 @@ Verified: `SC_DISASTER=6@<frame>` arms the meltdown and `7` the UFO, each
 through the full chain and each restoring afterwards. `--qualify` is
 byte-identical with and without the patch, so it is inert until a bit is set.
 
-### Two things about it are unverified
+### Why the two new rows are invisible: they are SPRITES, parked
 
-**The new rows have no labels.** Row text comes from the page-setup dispatch
-(`01:aabf JSR ($9d1a,X)`), not from the checkbox renderer at `01:a918`/`a93a`,
-which only writes the box tile to `$7e2063 + row*16`. Rows 6 and 7 will draw a
-checkbox with nothing beside it until that table is found and extended.
+The patch works — rows 6 and 7 get the unchecked-checkbox tile written, exactly
+like rows 0-5. They still do not appear, and the reason is in the addressing.
 
-**Where rows 6 and 7 land is unknown.** They write 16 and 32 bytes past the
-last existing row; whether that is inside the menu box or on top of whatever is
-below it has not been checked. This is why the patch is opt-in.
+`01:a918`/`a93a` write at `$7e2063 + row*16`, then `+4`, `+8`, `+12`. A 4-byte
+stride inside a 16-byte row is **OAM**: four sprites per row, `X, Y, tile,
+attr`. Those routines set only the **tile** byte. Sprite *positions* come from
+the page-setup code, which lays out six rows and no more:
+
+```
+row 0 @$2061: 40 6c 32 3c | 40 6e 32 2c | 50 8c 32 3c | 50 8e 32 44
+row 3 @$2091: 58 a8 32 3c | 58 aa 32 2c | 68 c8 32 3c | 68 ca 32 44
+row 6 @$20c1: e0 00 32 80 | e0 00 32 80 | e0 00 32 80 | e0 00 32 80   <- parked
+row 7 @$20d1: e0 00 32 80 | e0 20 32 80 | e0 20 32 80 | e0 20 32 80   <- parked
+```
+
+`X = $e0` is the off-screen parking position. So the ROM patch correctly draws
+two more checkboxes onto sprites nobody ever positioned.
+
+The X values also give away the layout: rows 0-2 at `$40`/`$50`, rows 3-5 at
+`$58`/`$68`. It is a **2-column by 3-row grid**, built for exactly six
+disasters. Adding two more needs positions assigned for those eight sprites,
+plus room in the menu box graphic behind them — this is a layout job, not
+another byte patch.
+
+The earlier guess that the rows would be missing *labels* was wrong in detail:
+there are no separate label tiles to find. Each row is four sprites, and what
+distinguishes one disaster from another is the tile/attr the setup code assigns
+— so positioning the new rows means choosing their artwork too.
 
 ## The `$0197` ladder, fully attributed
 
