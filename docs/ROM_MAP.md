@@ -1725,6 +1725,43 @@ Boston seeding `$0c0d = 1` means the same path runs there on the first tick.
 UFO needs a population of at least **84,488**. Measured: on a small free-play
 city the Las Vegas arm is reached and the gate rejects it before `JSR $bcb8`.
 
+### On a non-Las-Vegas map: damage, but no UFO
+
+Reported from play: triggering the UFO on a practice or ordinary map does
+damage but shows no UFO. Measured, and it is **not** a code-path difference.
+
+| | real Las Vegas | forced on free play |
+|---|---|---|
+| approach loop `03:bcc5` | YES | YES |
+| waypoints exhausted `03:bcd5` | YES | YES |
+| arrival `03:bd2b` | YES | YES |
+| event post `03:bd2e` | YES | YES |
+| `LDA #$0014 ; JSR $c42a` | YES | YES |
+| renderer `00:c402`-`c752`, 15 sites | YES | **YES, all 15** |
+
+The whole sequence runs, including every site in the bank-00 code that reads
+`$0aef`/`$0af1`/`$0af9`. So the logic and the drawing code both execute; what
+differs is the data they draw with. The leading explanation is that the UFO
+sprite tiles are not in VRAM outside its own scenario — **not established.**
+
+Ruled out: a scenario-keyed graphics load. The only read of `$0040` outside
+bank 03 is `08:a62d`, and bank 08 is compressed data — the surrounding
+disassembly is `MVN`/`COP`/`WAI` nonsense, so that is a byte coincidence, not
+an instruction.
+
+> **Correction: `03:c42a` is not an entity spawner.** It writes the value
+> passed in `A` to `$0ced,X`, then `$0b53` (year) and `$0b55` (month) to
+> `$0cef,X`/`$0cf1,X` — a **dated message log**, ten six-byte slots, shifted
+> down when full. So `LDA #$0014 ; JSR $c42a` posts a dated "UFO" news entry;
+> it does not create a sprite. Earlier notes here read it as "spawn entity
+> $14" / "allocate entity type $0B", and the moving-object table is a
+> different range entirely (`$02cb`-`$0376`). The UFO's visible form comes
+> from the approach state (`$0aef`/`$0af5`/`$0af7`/`$0af9`), not from `$c42a`.
+
+**Next step that would settle it:** compare VRAM/OAM during the approach
+between the two runs. If OAM carries the sprite but its tiles are absent, the
+graphics reading is confirmed.
+
 ### Skipping the UFO population gate
 
 The `UFO` menu row lifts the gate for the duration of the event by NOPping the
