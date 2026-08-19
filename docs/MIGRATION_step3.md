@@ -1471,8 +1471,65 @@ executed" is not, and that is precisely the shape of reasoning the coverage
 tools do when proposing directives. Unioning a fiber bitmap into a per-opcode
 set is safe -- it can only add real observations.
 
-One incidental finding: the fiber bitmap is not a strict subset of the
-per-opcode one. Seven addresses in bank `05` (around `$9417-$94FC`) appear only
-in the fiber run. Both hosts cover that bank heavily (386 vs 563 addresses), and
-the hosts sit at different animation phases, so this is a marginally different
-path through well-covered code rather than a defect.
+### 24.1 The seven bank-05 addresses: earlier, not different
+
+The fiber bitmap is not a strict subset of the per-opcode one. Seven addresses
+in bank `05` appeared only in the fiber run, which looked at first like the
+frame host taking a different path. It does not. Traced in full:
+
+**`05:9417` is a data-dependent branch.**
+
+```
+05:940e * LDA $20
+05:9410 * AND #$01ff
+05:9413 * STA $20
+05:9415 * BNE $9419
+05:9417   INC $30      <- fiber only
+05:9419 * RTS
+```
+
+The fall-through fires only when `($20 & 0x01ff) == 0`. `$0020` is one of the
+direct-page addresses section 23.1 independently measured as diverging between
+the two hosts, so the two runs simply evaluate this branch differently.
+
+**`$30` is a state index, not a counter.** Twenty bytes earlier:
+
+```
+05:93b7   LDA $30
+05:93bb   ASL A
+05:93bc   TAX
+05:93bd   JSR ($93c1,X)      <- 5-entry jump table at $93c1
+```
+
+| index | handler |
+|---|---|
+| 0 | `$93cb` |
+| 1 | `$93d4` |
+| 2 | **`$941a`** |
+| 3 | `$93cb` |
+| 4 | **`$942e`** |
+
+So `INC $30` advances an attract-sequence state machine, and index 2 is exactly
+the region the other six addresses live in. Note the dispatch is `JSR (abs,X)`,
+the JSR-indirect form `indirect_dispatch` cannot reach (recomp/bank00.cfg).
+
+**The other six are compiled/interpreted seams.** `05:941a` and `05:94db` are
+`aot_eligible` nodes; `05:9426` and `05:94fa` are not nodes at all, just
+interior addresses. So the handler bodies ran compiled and went unrecorded,
+while the fragments after a call returns were interpreted and were recorded --
+precisely the "accurate but incomplete" property above, showing its seams.
+
+**And it is purely timing.** Running the per-opcode host longer:
+
+| address | fiber 600 | interp 600 | interp 1200 | interp 2400 |
+|---|---|---|---|---|
+| all seven | X | . | **X** | **X** |
+
+Every one of them executes in the per-opcode host too, between frames 600 and
+1200. The set is identical; only the arrival time differs. The frame host
+reaches this state-machine step sooner, which is what a phase lead *means*.
+
+Two things worth keeping from this. It is not a defect, and it is not even a
+different path. But it does show the phase divergence of section 23 is not
+purely cosmetic -- it reaches a dispatch decision, so "the hosts differ only in
+animation state" would have been too weak a claim.
