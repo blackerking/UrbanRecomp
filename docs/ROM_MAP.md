@@ -1683,17 +1683,62 @@ coverage bitmap:
 The negative half is the control: from a Las Vegas state the mechanism fires the
 Las Vegas arm and not the Boston one.
 
-### What is still only derived
+### The gate: `$003e == 3`
 
-**The meltdown has not been executed.** None of the ten save states is Boston
-(`$0040 = 4`), so `03:bac1` has never been observed running. The case for it is
-static -- index 4 is Boston by the year table, its seed of 1 fires on the first
-tick, and the handler detonates a power plant -- and it matches the reported
-behaviour exactly, but it is not measured. **A save state taken inside the
-Boston scenario would settle it in one run**, and would also confirm `$027c`.
+`03:b96f` is not fallen into — `03:b969` is the RNG threshold **table**
+(`12c0`/`0960`/`04b0` = 4800/2400/1200, indexed by difficulty `$0b57`). The
+dispatcher is a separate routine with exactly one caller:
 
-Poking `$0040 = 4` into a Las Vegas state would test the dispatch but not the
-meltdown, since the scan would run over the wrong map.
+```
+03:b858  LDA $0425 ; AND #$0001 ; BEQ +     ; No-Disasters cheat -> skip all
+03:b863  LDA $003e ; CMP #$0003 ; BNE +
+03:b86b  JSR $b96f                          ; <- only when $003e == 3
+```
+
+`$003e == 3` is scenario mode (the win-mark setter at `03:e2ee` is gated on the
+same thing). This is why save states 0/1/2/7/8/9 never reach the dispatcher at
+all: they are free-play cities (years 1900-1904, `$0c0d = 0`), not scenarios.
+
+### The meltdown, confirmed by execution
+
+From `savestate_3` (Las Vegas, so `$003e == 3` already holds), setting
+`$0040 = 4` and `$0c0d = 1` runs the whole chain:
+
+| site | | |
+|---|---|---|
+| `03:b86b` | `JSR $b96f` past the `$3e` gate | EXECUTED |
+| `03:b98b` | `CPY #$0004` Boston arm | EXECUTED |
+| `03:b990` | `JSR $bac1` | EXECUTED |
+| `03:bac1` | meltdown handler | EXECUTED |
+| `03:bad1` | `CMP #$027c` nuclear tile | EXECUTED |
+| `03:badd` | `JMP $bd61` **detonate** | EXECUTED |
+
+Reaching `03:badd` means the scan **found** a `$027c` tile and detonated it.
+
+This confirms the dispatch and the handler. It does not confirm that the Boston
+*map* is what gets destroyed, since the scan ran over the Las Vegas map — but
+Boston seeding `$0c0d = 1` means the same path runs there on the first tick.
+
+### The UFO population gate
+
+`03:b9b3` is a 32-bit compare of `($0ba7:$0ba5)` against `$0001_4c08`, so the
+UFO needs a population of at least **84,488**. Measured: on a small free-play
+city the Las Vegas arm is reached and the gate rejects it before `JSR $bcb8`.
+
+### Triggering both from the F10 menu
+
+`MELTDOWN` and `UFO` rows, and the headless twin
+`SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>`.
+
+Both set three words together — `$003e = 3`, `$0040` = 4 or 6, and `$0c0d` = 1
+or 16 — then **restore `$003e`/`$0040` on the ROM's own first `DEC $0c0d`**.
+Two of those words identify the city, so leaving them changed would tell the
+game it is in a different scenario and corrupt the win check and the next save.
+Restoring on the ROM's decrement is self-timing: simulation ticks are ~160
+frames apart and vary with game speed, so a fixed frame delay would be guesswork.
+
+Not a freeze — the values are set once and the ROM consumes them, so execution
+stays on paths the game really takes.
 
 ## Meltdown and UFO are scenario-driven, not `$0197` bits
 

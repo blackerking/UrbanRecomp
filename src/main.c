@@ -1121,6 +1121,23 @@ static bool sc_fiber_active(void) { return false; }
 static int      s_disaster_bit = -1;
 static uint64_t s_disaster_frame;
 
+static void scenario_event_tick(void);            /* defined with the menu */
+static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what);
+
+/* SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>: the headless twin of the F10
+ * MELTDOWN / UFO rows, so the trigger can be verified without a human at the
+ * window. */
+static int      s_scen_event_idx = -1;
+static uint16_t s_scen_event_cd;
+static uint64_t s_scen_event_frame;
+static const char *s_scen_event_name;
+
+static void sc_maybe_trigger_scenario_event(void) {
+  if (s_scen_event_idx < 0 || s_frames < s_scen_event_frame) return;
+  arm_scenario_event((unsigned)s_scen_event_idx, s_scen_event_cd, s_scen_event_name);
+  s_scen_event_idx = -1;
+}
+
 /* Fire the scripted SC_DISASTER trigger once, at its frame. */
 static void sc_maybe_trigger_disaster(void) {
   if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
@@ -1135,6 +1152,8 @@ static bool run_one_frame(void) {
   if (s_fiber_mode) return run_one_frame_fiber();
 #endif
   sc_maybe_trigger_disaster();
+  sc_maybe_trigger_scenario_event();
+  scenario_event_tick();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -1862,6 +1881,80 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
   fprintf(stderr, "[menu] set $0197 bit %u (%s) -> $0197=%02x, frame %llu\n",
           bit, what, g_ram[0x0197], (unsigned long long)s_frames);
 }
+/* Scenario events: MELTDOWN and UFO are NOT $0197 bits.
+ *
+ * They are dispatched from 03:b96f on the per-scenario countdown $0c0d,
+ * gated on $003e == 3 (scenario mode) and keyed on $0040 (scenario index):
+ *
+ *   $0040 == 4 (Boston)     and $0c0d == 1          -> JSR $bac1  meltdown
+ *   $0040 == 6 (Las Vegas)  and ($0c0d & 15) == 0   -> JSR $bcb8  UFO
+ *
+ * So a trigger has to set three words together, and two of them identify the
+ * city -- leaving $003e/$0040 changed would tell the game it is playing a
+ * different scenario, which would corrupt the win check and the next save.
+ * Arm them, then restore as soon as the ROM has taken the countdown to zero
+ * with its own DEC $0c0d at 03:b9c9. That is the ROM reporting the event has
+ * fired, so the restore is self-timing rather than a guessed frame delay --
+ * simulation ticks are many frames apart and vary with game speed.
+ *
+ * Deliberately NOT a freeze: the values are set once and the ROM is left to
+ * consume them, so execution stays on paths the game really takes. */
+static struct {
+  bool        armed;
+  uint16_t    saved_3e, saved_40;
+  uint16_t    armed_cd;
+  const char *what;
+} s_scenario_event;
+
+static uint16_t ram_w(uint32_t a) { return (uint16_t)(g_ram[a] | (g_ram[a+1] << 8)); }
+static void ram_set_w(uint32_t a, uint16_t v) {
+  g_ram[a] = (uint8_t)(v & 0xff); g_ram[a+1] = (uint8_t)(v >> 8);
+}
+
+static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what) {
+  if (s_scenario_event.armed) {
+    fprintf(stderr, "[menu] %s: a scenario event is already armed\n", what);
+    return;
+  }
+  s_scenario_event.saved_3e = ram_w(0x3e);
+  s_scenario_event.saved_40 = ram_w(0x40);
+  s_scenario_event.what     = what;
+  s_scenario_event.armed    = true;
+  ram_set_w(0x3e, 3);
+  ram_set_w(0x40, (uint16_t)idx);
+  ram_set_w(0x0c0d, countdown);
+  s_scenario_event.armed_cd = countdown;
+  fprintf(stderr, "[menu] armed %s: $3e=3 $0040=%u $0c0d=%u (saved $3e=%u $0040=%u), frame %llu\n",
+          what, idx, (unsigned)countdown,
+          (unsigned)s_scenario_event.saved_3e, (unsigned)s_scenario_event.saved_40,
+          (unsigned long long)s_frames);
+}
+
+/* Restore once the ROM has counted the event out. Called once per frame. */
+static void scenario_event_tick(void) {
+  if (!s_scenario_event.armed) return;
+  /* Restore on the ROM's first DEC $0c0d, not on the countdown reaching
+   * zero. Both arms decrement on the tick they fire, so this is one tick
+   * either way for the meltdown (1 -> 0) but sixteen for the UFO
+   * (16 -> 0), and leaving $0040 forced for sixteen ticks would have the
+   * game think it is in the wrong scenario for most of a minute. */
+  if (ram_w(0x0c0d) == s_scenario_event.armed_cd) return;
+  ram_set_w(0x3e, s_scenario_event.saved_3e);
+  ram_set_w(0x40, s_scenario_event.saved_40);
+  s_scenario_event.armed = false;
+  fprintf(stderr, "[menu] %s fired; restored $3e=%u $0040=%u at frame %llu\n",
+          s_scenario_event.what, (unsigned)s_scenario_event.saved_3e,
+          (unsigned)s_scenario_event.saved_40, (unsigned long long)s_frames);
+}
+
+static void menu_trigger_meltdown(void) { arm_scenario_event(4, 1,  "nuclear meltdown"); }
+/* The UFO additionally passes a population gate at 03:b9b3 -- a 32-bit
+ * compare of ($0ba7:$0ba5) against $0001_4c08 -- so it will not appear in a
+ * city under 84,488 people. Measured: on a small free-play city the arm is
+ * reached and the gate rejects it, so the menu row is not broken, the city is
+ * just too small. */
+static void menu_trigger_ufo(void)      { arm_scenario_event(6, 16, "UFO"); }
+
 static void menu_trigger_fire(void)  { trigger_disaster_bit(0, "fire"); }
 static void menu_trigger_flood(void) { trigger_disaster_bit(1, "flood"); }
 static void menu_trigger_plane(void) { trigger_disaster_bit(2, "plane crash"); }
@@ -1906,6 +1999,8 @@ static SettingDesc s_settings[] = {
   { "TORNADO",               kSettingAction, NULL, 0, menu_trigger_tornado,  NULL, 0 },
   { "EARTHQUAKE",            kSettingAction, NULL, 0, menu_trigger_quake,    NULL, 0 },
   { "MONSTER",               kSettingAction, NULL, 0, menu_trigger_monster,  NULL, 0 },
+  { "MELTDOWN",              kSettingAction, NULL, 0, menu_trigger_meltdown, NULL, 0 },
+  { "UFO",                   kSettingAction, NULL, 0, menu_trigger_ufo,      NULL, 0 },
   { "STATE",                 kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "SAVE STATE 1",          kSettingAction, NULL, 0, menu_action_save_slot1, NULL, 0 },
   { "LOAD STATE 1",          kSettingAction, NULL, 0, menu_action_load_slot1, NULL, 0 },
@@ -2418,6 +2513,20 @@ int main(int argc, char **argv) {
                       "(entry I_RESET_M1X1)\n");
     } }
 #endif
+  { const char *e = getenv("SC_SCENARIO_EVENT");
+    if (e && *e) {
+      unsigned long long fr = 0; const char *at = strchr(e, 0x40);
+      if (at) fr = strtoull(at + 1, NULL, 0);
+      if (!strncmp(e, "meltdown", 8)) {
+        s_scen_event_idx = 4; s_scen_event_cd = 1;  s_scen_event_name = "nuclear meltdown";
+      } else if (!strncmp(e, "ufo", 3)) {
+        s_scen_event_idx = 6; s_scen_event_cd = 16; s_scen_event_name = "UFO";
+      } else {
+        fprintf(stderr, "SC_SCENARIO_EVENT: expected meltdown|ufo\n");
+      }
+      s_scen_event_frame = fr;
+    } }
+
   /* SC_DISASTER=<bit>@<frame>: set one $0197 disaster bit at a given frame,
    * headlessly. Exactly what the F10 menu does interactively -- the game's own
    * disaster-selection page sets these bits and 03:b8ae services them -- but
