@@ -1899,16 +1899,75 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
  *
  * Deliberately NOT a freeze: the values are set once and the ROM is left to
  * consume them, so execution stays on paths the game really takes. */
+/* The loaded ROM image, so the UFO population gate can be lifted for the
+ * duration of a triggered event. Set in main() once the ROM is read. */
+static uint8_t *s_rom_data;
+static uint32_t s_rom_size;
+
 static struct {
   bool        armed;
   uint16_t    saved_3e, saved_40;
   uint16_t    armed_cd;
+  bool        gate_lifted;
   const char *what;
 } s_scenario_event;
 
 static uint16_t ram_w(uint32_t a) { return (uint16_t)(g_ram[a] | (g_ram[a+1] << 8)); }
 static void ram_set_w(uint32_t a, uint16_t v) {
   g_ram[a] = (uint8_t)(v & 0xff); g_ram[a+1] = (uint8_t)(v >> 8);
+}
+
+/* The UFO checks the city population before it will appear:
+ *
+ *   03:b9b3  LDA $0ba5 ; CMP #$4c08 ; LDA $0ba7 ; SBC #$0001
+ *   03:b9bf  BCC $b9c4          ; under 84,488 -> skip the UFO
+ *   03:b9c1  JSR $bcb8
+ *
+ * NOP the branch (90 03 -> EA EA) so the call is reached regardless. Patching
+ * the CODE rather than writing a fake population is the conservative choice:
+ * $0ba5/$0ba7 are live simulation state that taxes, milestones and the win
+ * check all read, so faking them even for one tick would change the game in
+ * ways nothing here could bound. Two bytes of branch, by contrast, affect
+ * exactly this decision.
+ *
+ * Scoped to the armed window and reverted with the rest of the trigger, so a
+ * real Las Vegas game still has its gate. Byte-checked before writing, the
+ * same as the boot-time patches.
+ *
+ * Interpreter-tier only: a compiled body for 03:b96f would already have the
+ * branch baked in, so this has no effect in the AOT build. The windowed build
+ * this menu lives in is the interpreter, so that is not a limitation here. */
+#define SC_UFO_GATE_OFF 0x1b9bfu    /* 03:b9bf, headerless LoROM file offset */
+
+/* cart_init() does `cart->rom = malloc(); memcpy(...)`, so the cart holds its
+ * OWN copy and the buffer read_file() returned is not what executes. The
+ * boot-time patches above work only because they run before the cart is
+ * built. Anything patched later has to go to cart->rom, or it silently does
+ * nothing -- which is exactly what the first version of this did. */
+static uint8_t *sc_live_rom(void) {
+  if (g_snes && g_snes->cart && g_snes->cart->rom) return g_snes->cart->rom;
+  return s_rom_data;
+}
+
+static bool lift_ufo_population_gate(void) {
+  uint8_t *rom = sc_live_rom();
+  if (!rom || SC_UFO_GATE_OFF + 1 >= s_rom_size) return false;
+  uint8_t *p = rom + SC_UFO_GATE_OFF;
+  if (p[0] != 0x90 || p[1] != 0x03) {
+    fprintf(stderr, "[menu] UFO gate: unexpected bytes %02x %02x at 03:b9bf, not patching\n", p[0], p[1]);
+    return false;
+  }
+  p[0] = 0xea; p[1] = 0xea;
+  fprintf(stderr, "[menu] UFO gate lifted (03:b9bf BCC -> NOP NOP)\n");
+  return true;
+}
+
+static void restore_ufo_population_gate(void) {
+  uint8_t *rom = sc_live_rom();
+  if (!rom || SC_UFO_GATE_OFF + 1 >= s_rom_size) return;
+  uint8_t *p = rom + SC_UFO_GATE_OFF;
+  p[0] = 0x90; p[1] = 0x03;
+  fprintf(stderr, "[menu] UFO gate restored\n");
 }
 
 static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what) {
@@ -1924,6 +1983,7 @@ static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *wha
   ram_set_w(0x40, (uint16_t)idx);
   ram_set_w(0x0c0d, countdown);
   s_scenario_event.armed_cd = countdown;
+  s_scenario_event.gate_lifted = (idx == 6) ? lift_ufo_population_gate() : false;
   fprintf(stderr, "[menu] armed %s: $3e=3 $0040=%u $0c0d=%u (saved $3e=%u $0040=%u), frame %llu\n",
           what, idx, (unsigned)countdown,
           (unsigned)s_scenario_event.saved_3e, (unsigned)s_scenario_event.saved_40,
@@ -1941,6 +2001,10 @@ static void scenario_event_tick(void) {
   if (ram_w(0x0c0d) == s_scenario_event.armed_cd) return;
   ram_set_w(0x3e, s_scenario_event.saved_3e);
   ram_set_w(0x40, s_scenario_event.saved_40);
+  if (s_scenario_event.gate_lifted) {
+    restore_ufo_population_gate();
+    s_scenario_event.gate_lifted = false;
+  }
   s_scenario_event.armed = false;
   fprintf(stderr, "[menu] %s fired; restored $3e=%u $0040=%u at frame %llu\n",
           s_scenario_event.what, (unsigned)s_scenario_event.saved_3e,
@@ -2589,6 +2653,7 @@ int main(int argc, char **argv) {
 
   uint32_t rom_size = 0;
   uint8_t *rom_data = read_file(rom_path, &rom_size);
+  s_rom_data = rom_data; s_rom_size = rom_size;
   if (!rom_data) {
     fprintf(stderr, "cannot read ROM '%s'\n", rom_path);
     return 1;

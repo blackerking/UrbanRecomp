@@ -1725,6 +1725,28 @@ Boston seeding `$0c0d = 1` means the same path runs there on the first tick.
 UFO needs a population of at least **84,488**. Measured: on a small free-play
 city the Las Vegas arm is reached and the gate rejects it before `JSR $bcb8`.
 
+### Skipping the UFO population gate
+
+The `UFO` menu row lifts the gate for the duration of the event by NOPping the
+branch itself (`03:b9bf`, `90 03` -> `EA EA`), then putting it back.
+
+Patching the **code** rather than writing a fake population is the conservative
+choice: `$0ba5`/`$0ba7` are live simulation state that taxes, milestones and the
+win check all read, so faking them even briefly would change the game in ways
+nothing here could bound. Two bytes of branch affect exactly this decision.
+
+> **`cart_init()` copies the ROM.** `cart->rom = malloc(); memcpy(...)`, so the
+> buffer `read_file()` returned is *not* what executes. The boot-time patches
+> work only because they run before the cart is built. A patch applied later
+> must go to `cart->rom` or it silently does nothing — which is exactly what the
+> first version of this did: the gate reported "lifted" and the UFO still did
+> not appear.
+
+Note the forced state lasts as long as the event does. The UFO handler spins at
+`03:bcc5` for the whole approach, so `DEC $0c0d` — and with it the restore —
+comes ~2,800 frames later. Measured end to end: armed at 65873, restored at
+68647, with `$3e`, `$0040` and the gate all put back.
+
 ### Triggering both from the F10 menu
 
 `MELTDOWN` and `UFO` rows, and the headless twin
