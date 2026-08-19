@@ -1765,6 +1765,10 @@ static int s_mouse_sensitivity = 100;
 /* Direction the host mouse last moved, fed to the pad while a mouse button is
  * held so the ROM runs its own cursor/drag path instead of only seeing a
  * teleported cursor. */
+/* Map tiles the right-drag pan may advance per frame, per axis. */
+static int s_pan_max_tiles = 1;
+static const int kPanMaxTiles[] = { 1, 2, 3, 4, 6, 8 };
+
 static uint16_t s_mouse_dir;
 static int      s_mouse_dir_frames;
 static const int kMouseSensitivities[] = { 50, 75, 100, 150, 200 };
@@ -2115,6 +2119,8 @@ static SettingDesc s_settings[] = {
    * value still fits the menu box at the current font size -- see
    * render_settings_menu()'s width math. */
   { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
+  { "PAN SPEED",             kSettingCycle, &s_pan_max_tiles,       0,    NULL,
+    kPanMaxTiles, (int)(sizeof(kPanMaxTiles) / sizeof(kPanMaxTiles[0])) },
   { "MOUSE SPEED",           kSettingCycle, &s_mouse_sensitivity,   0,    NULL,
     kMouseSensitivities, (int)(sizeof(kMouseSensitivities) / sizeof(kMouseSensitivities[0])) },
   { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
@@ -3310,6 +3316,8 @@ int main(int argc, char **argv) {
           if (pan_div < 0) {
             const char *e = getenv("SC_PAN_DIV");
             pan_div = (e && *e) ? atoi(e) : 8;
+            { const char *m = getenv("SC_PAN_MAX");
+              if (m && *m) { int v = atoi(m); if (v >= 1 && v <= 32) s_pan_max_tiles = v; } }
             if (pan_div < 1) pan_div = 1;
           }
           static double pacc_x, pacc_y;
@@ -3317,17 +3325,25 @@ int main(int argc, char **argv) {
           pacc_y += (double)step_y / pan_div;
           int px = (int)pacc_x, py = (int)pacc_y;
           pacc_x -= px; pacc_y -= py;
-          /* One tile per frame, max, per axis -- the same step 01:afbe takes
-           * (a single INC/DEC of $01bd/$01bf per call). Jumping several tiles
-           * in one frame outruns the map renderer, which scrolls the tilemap
-           * incrementally; that is what made panning look like the map was
-           * redrawing slowly. The remainder stays in the accumulator, so fast
-           * pointer movement still pans continuously, just at the rate the
-           * game itself scrolls. */
-          if (px >  1) { pacc_x += px - 1; px =  1; }
-          if (px < -1) { pacc_x += px + 1; px = -1; }
-          if (py >  1) { pacc_y += py - 1; py =  1; }
-          if (py < -1) { pacc_y += py + 1; py = -1; }
+          /* Tiles per frame, per axis. 01:afbe -- the ROM's own scroll --
+           * moves exactly one, and matching that was what stopped the pan
+           * looking like the map was redrawing slowly.
+           *
+           * But one is the GAME's step, not a measured limit of the renderer.
+           * 01:a640, the ROM's camera-jump routine, also only writes
+           * $01bd/$01bf with no extra redraw call, so nothing here has to be
+           * replicated -- the ceiling is simply how many tile columns the
+           * per-frame map renderer can fill before it visibly lags.
+           *
+           * That ceiling is easier to find by looking than by reasoning, so it
+           * is tunable: SC_PAN_MAX, or the PAN SPEED row in F10. Raise it until
+           * the map starts tearing, then back off one.
+           */
+          const int cap = s_pan_max_tiles;
+          if (px >  cap) { pacc_x += px - cap; px =  cap; }
+          if (px < -cap) { pacc_x += px + cap; px = -cap; }
+          if (py >  cap) { pacc_y += py - cap; py =  cap; }
+          if (py < -cap) { pacc_y += py + cap; py = -cap; }
           if (px || py) {
             /* 8-bit signed, NOT 16-bit words. docs/ROM_MAP.md is explicit that
              * "no code anywhere in the ROM touches $01be" and that the real
