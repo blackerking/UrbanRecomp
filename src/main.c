@@ -2950,6 +2950,19 @@ int main(int argc, char **argv) {
         rom_data[0xaa45] == 0xa0 && rom_data[0xaa46] == 0x05) {
       rom_data[0xaa3e] = rom_data[0xaa3f] = 0xea;   /* ASL A ; ASL A -> NOP NOP */
       rom_data[0xaa46] = 0x07;                      /* LDY #$0005 -> LDY #$0007 */
+      /* SC_MENU8_LAYOUT=1: draw the disaster page with the EIGHT-item menu's
+       * layout instead of its own.
+       *
+       * Page setup for $01df==2 (01:d083) and ==3 (01:d0aa) are identical
+       * except for their final call: JSR $d94f vs JSR $d9ea. Both blit four
+       * 16-tile rows into the same slots ($0100/$0120/$0140/$0160 of the
+       * tilemap at $7e2440); only the ROM source tables differ. So pointing
+       * one at the other is the whole "clone", in two bytes. */
+      if (getenv("SC_MENU8_LAYOUT") && rom_data[0xd0a6] == 0x20 &&
+          rom_data[0xd0a7] == 0x4f && rom_data[0xd0a8] == 0xd9) {
+        rom_data[0xd0a7] = 0xea; rom_data[0xd0a8] = 0xd9;   /* $d94f -> $d9ea */
+        fprintf(stderr, "disaster page: using the 8-item menu layout\n");
+      }
       s_disaster_menu8 = true;
       fprintf(stderr, "disaster menu: 8 rows (bits 6=meltdown, 7=UFO)\n");
     } else {
