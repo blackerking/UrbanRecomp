@@ -2283,6 +2283,24 @@ static void write_aot_variants(void) {
             (unsigned long long)s_aot_variant_overflow);
 }
 
+/* SC_PPU_DUMP_DIR=<dir> [+ SC_PPU_DUMP_INTERVAL, SC_PPU_DUMP_START]: dump the
+ * PPU side of the machine -- VRAM, CGRAM and OAM -- so two runs can be
+ * compared on what is actually available to draw with, not just on which code
+ * executed. Written for the UFO question: the renderer runs identically on a
+ * practice map and on Las Vegas, so the difference has to be in this data. */
+static void write_ppu_dump(uint64_t frame) {
+  const char *dir = getenv("SC_PPU_DUMP_DIR");
+  if (!dir || !g_ppu) return;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/ppu_%010llu.bin", dir, (unsigned long long)frame);
+  FILE *f = fopen(path, "wb");
+  if (!f) { fprintf(stderr, "SC_PPU_DUMP_DIR: cannot write %s\n", path); return; }
+  fwrite(g_ppu->vram,  2, 0x8000, f);   /* 64KB VRAM  */
+  fwrite(g_ppu->cgram, 2, 0x100,  f);   /* 512B CGRAM */
+  fwrite(g_ppu->oam,   2, 0x100,  f);   /* 512B OAM   */
+  fclose(f);
+}
+
 static void write_pc_bitmap_dump(void) {
   write_mx_bitmap_dump();
   write_aot_variants();
@@ -2411,6 +2429,7 @@ static int run_qualification(uint64_t frames) {
             if (!write_wram_dump(path))
               fprintf(stderr, "failed to write WRAM dump to %s\n", path);
           }
+          write_ppu_dump(f);
         }
       }
     }
