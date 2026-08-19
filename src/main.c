@@ -156,6 +156,12 @@ static uint64_t s_nmi_serviced;
  *                           (screen-mode index), $0c0f (cursor-mover gate),
  *                           $020d (selected build tool) -- see
  *                           docs/INVESTIGATION_dpad.md.
+ * SC_WRAM_DUMP_PC=<pc24>   with SC_WRAM_DUMP_DIR, fire each periodic WRAM
+ *                           dump when the guest reaches that PC instead of at
+ *                           the host frame boundary. Two hosts park the guest
+ *                           in different places, so a host-frame-aligned dump
+ *                           compares different guest moments -- see
+ *                           docs/MIGRATION_step3.md 23.1.
  * SC_DUMP_AT=<frame> + SC_DUMP_PATH=<file.ppm>   write that frame's
  *                           rendered framebuffer as a P6 PPM.
  * SC_ADDR_TRACE=<bank:addr>[,<bank:addr>...][@<start-frame>]
@@ -272,6 +278,25 @@ static uint64_t s_banks_seen; /* bit N set if bank N ever held cpu->k (diagnosti
  * where never written), then 0x20000 little-endian uint16 write counts.
  * Cheap enough to leave on for a whole session: a few array stores per bus
  * access. */
+/* SC_WRAM_DUMP_PC=<pc24>: take the periodic WRAM dump at a GUEST-defined
+ * moment rather than a host-defined one.
+ *
+ * Comparing two hosts at "the same frame" is confounded, because they park the
+ * guest in different places. Measured at frame 600: the fiber host leaves the
+ * guest at 00:9311 with S=$1FF5 -- its yield point, by construction -- while
+ * the per-opcode host is at 00:8F1F with S=$1FEA. Eleven bytes of call depth
+ * apart and in unrelated code, so stack residue and direct-page scratch differ
+ * for reasons that have nothing to do with either host being wrong.
+ *
+ * Arming the dump on a PC makes both hosts sample the same guest moment. Fiber
+ * mode ignores it and dumps as usual: it is already parked at 00:9311 when the
+ * frame ends. */
+static bool write_wram_dump(const char *path);
+static uint32_t s_dump_pc24 = 0xffffffffu;
+static bool     s_dump_pc_armed;
+static uint64_t s_dump_pc_frame;
+static char     s_dump_pc_dir[400];
+
 static bool s_wram_map;
 static uint8_t *s_wram_flags;      /* [0x20000] bit0 = read, bit1 = written */
 static uint32_t *s_wram_last_pc;   /* [0x20000] last writer, (bank<<16)|pc */
@@ -1026,6 +1051,13 @@ static bool run_one_frame_fiber(void) {
 }
 #endif /* SIMCITY_AOT_TIER */
 
+/* s_fiber_mode only exists in the AOT build. */
+#ifdef SIMCITY_AOT_TIER
+static bool sc_fiber_active(void) { return s_fiber_mode; }
+#else
+static bool sc_fiber_active(void) { return false; }
+#endif
+
 static int      s_disaster_bit = -1;
 static uint64_t s_disaster_frame;
 
@@ -1147,6 +1179,15 @@ static bool run_one_frame(void) {
               cpu->k, cpu->pc, cpu->a, cpu->x, cpu->y,
               interp816_getFlags(cpu), cpu->mf ? " m8" : " m16", cpu->xf ? " x8" : " x16");
       s_pc_capture_after--;
+    }
+    if (s_dump_pc_armed &&
+        ((uint32_t)cpu->k << 16 | cpu->pc) == s_dump_pc24) {
+      char path[512];
+      snprintf(path, sizeof(path), "%s/wram_%010llu.bin", s_dump_pc_dir,
+               (unsigned long long)s_dump_pc_frame);
+      if (!write_wram_dump(path))
+        fprintf(stderr, "failed to write WRAM dump to %s\n", path);
+      s_dump_pc_armed = false;
     }
     int cyc = interp816_runOpcode(cpu);
     if (cyc <= 0) cyc = 1;
@@ -2129,10 +2170,16 @@ static int run_qualification(uint64_t frames) {
         const char *start_s = getenv("SC_WRAM_DUMP_START");
         uint64_t start = start_s ? strtoull(start_s, NULL, 0) : 0;
         if (interval > 0 && f >= start && (f - start) % interval == 0) {
-          char path[512];
-          snprintf(path, sizeof(path), "%s/wram_%010llu.bin", wram_dir, (unsigned long long)f);
-          if (!write_wram_dump(path))
-            fprintf(stderr, "failed to write WRAM dump to %s\n", path);
+          if (s_dump_pc24 != 0xffffffffu && !sc_fiber_active()) {
+            /* Defer: fire at the guest PC instead. See SC_WRAM_DUMP_PC. */
+            s_dump_pc_armed = true; s_dump_pc_frame = f;
+            snprintf(s_dump_pc_dir, sizeof(s_dump_pc_dir), "%s", wram_dir);
+          } else {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/wram_%010llu.bin", wram_dir, (unsigned long long)f);
+            if (!write_wram_dump(path))
+              fprintf(stderr, "failed to write WRAM dump to %s\n", path);
+          }
         }
       }
     }
@@ -2211,6 +2258,12 @@ static int run_qualification(uint64_t frames) {
     interp_tier2_stats(&sites, &clean, &bail);
     extern unsigned long long g_interp_bridge_bounces;
     extern unsigned long long g_interp_bridge_steps;
+    extern unsigned SimCityFiberDrive_GuestS(void);
+    extern unsigned SimCityFiberDrive_ResumePC(void);
+    if (s_fiber_mode) fprintf(stderr, "guest: S=%04X resume=%06X\n",
+                              SimCityFiberDrive_GuestS(), SimCityFiberDrive_ResumePC());
+    else fprintf(stderr, "guest: S=%04X pc=%02X:%04X\n",
+                         (unsigned)g_cpu->sp, (unsigned)g_cpu->k, (unsigned)g_cpu->pc);
     fprintf(stderr, "aot: bounces=%llu interp_steps=%llu tier_downs=%ld gap_sites=%d clean=%llu bail=%llu",
             g_interp_bridge_bounces, g_interp_bridge_steps,
             interp_tier_hit_count(), sites, clean, bail);
@@ -2262,6 +2315,12 @@ int main(int argc, char **argv) {
         memset(s_wram_last_pc, 0xff, 0x20000 * sizeof(uint32_t));
         s_wram_map = true;
       }
+    } }
+  { const char *e = getenv("SC_WRAM_DUMP_PC");
+    if (e && *e) {
+      s_dump_pc24 = (uint32_t)strtoul(e, NULL, 16);
+      fprintf(stderr, "SC_WRAM_DUMP_PC: dumps fire at guest %02X:%04X\n",
+              (unsigned)(s_dump_pc24 >> 16), (unsigned)(s_dump_pc24 & 0xffff));
     } }
 #ifdef SIMCITY_AOT_TIER
   /* SC_FIBER=1: drive the guest inside the fiber instead of interpreting it

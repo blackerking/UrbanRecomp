@@ -251,3 +251,10 @@ uint64_t SimCityFiberDrive_MasterCycles(void) { return s_cpu.master_cycles; }
 
 /* NMIs actually delivered to the guest, for the qualify bar's nmi_serviced. */
 uint64_t SimCityFiberDrive_NmiDelivered(void) { return s_nmi_delivered; }
+
+/* Guest stack pointer and resume PC, for host-vs-host comparisons: the two
+ * hosts sample WRAM at different points in the guest's frame, so knowing
+ * where the guest actually is decides whether a differing byte is live state
+ * or dead stack below S. */
+unsigned SimCityFiberDrive_GuestS(void)  { return (unsigned)s_cpu.S; }
+unsigned SimCityFiberDrive_ResumePC(void){ return (unsigned)s_resume_pc24; }

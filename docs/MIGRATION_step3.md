@@ -1327,15 +1327,92 @@ looking like corruption:
 - 105 bytes above $2000, in 19 small scattered clusters between $2001 and
   $3D92 -- the shape of per-object animation state at a different phase.
 
+### 23.1 What the 0.1% actually is — measured, not guessed
+
+Both hosts are **fully deterministic**: run either twice and the WRAM dumps are
+byte-identical at all 40 sampled frames. So the divergence is real and
+reproducible, not noise, and worth attributing.
+
+**First, the comparison method was confounded.** Comparing "the same frame"
+compares two guests parked in different places:
+
+| host | guest PC at dump | S |
+|---|---|---|
+| fiber | `00:9311` (its yield point, by construction) | `$1FF5` |
+| per-opcode | `00:8F1F` | `$1FEA` |
+
+Eleven bytes of call depth apart, in unrelated code -- so stack residue and
+direct-page scratch differed for reasons unrelated to either host being wrong.
+`SC_WRAM_DUMP_PC=<pc24>` now arms the periodic dump on a **guest PC** instead of
+a host frame boundary, which makes both hosts sample the same guest moment.
+Worth ~9 bytes (stack-region diffs 25 -> 18); the method was wrong but it was
+not the main term.
+
+**Second, and dominant: a 36-frame animation cycle.** The game state is
+periodic. Cross-correlating fiber against interpreter over a 120-frame window
+gives a clean minimum at a lag of **+16 mod 36, at every single sampled frame** --
+a stable offset, with no drift:
+
+```
+fiber   same-frame   best   lag mod 36
+ 560       161        96       +16
+ 570       155        96       +16
+ 580       155        96       +16
+ 590       153        96       +16
+```
+
+So phase accounts for 154 -> 96 bytes. The two hosts are running the same
+animation, 16 frames apart in its cycle.
+
+### 23.2 The surprise: the frame host is the MORE regular of the two
+
+The obvious next question is why ~96 bytes survive perfect phase alignment. The
+answer is that neither host is exactly periodic, and they are not equally
+imperfect. Autocorrelating each host against **itself** one full period later:
+
+| | `diff(host(N), host(N+36))` |
+|---|---|
+| fiber | **8 bytes** |
+| per-opcode | **42 bytes** |
+
+The fiber host reproduces the animation cycle almost exactly. The per-opcode
+host drifts five times as much. That is consistent with the other counters --
+fiber delivers 600 NMIs across 600 frames with `logic_stall_max` 0, the
+per-opcode host 592 with `logic_stall_max` 6 -- though the causal link between
+NMI regularity and this drift is a hypothesis here, not something measured.
+
+This matters for how the number is read. A 96-byte residual is **not** evidence
+of the frame host diverging from a correct baseline; a large part of it is the
+baseline itself being jittery.
+
+### 23.3 The bound
+
+| | bytes | % of WRAM |
+|---|---|---|
+| ever differs, same frame | 175 | 0.134% |
+| ever differs, guest-PC aligned | 165 | 0.126% |
+| after phase alignment (+16 mod 36) | ~96 | 0.073% |
+| floor from the interpreter's own non-periodicity | ~42 | 0.032% |
+| **unattributed** | **~54** | **~0.04%** |
+
+And the strongest single statement, by region:
+
+```
+$0300-$1EFF : 0 differing bytes, at every one of the 40 sampled frames
+```
+
+Seven kilobytes of the game's core low-RAM working set are byte-identical
+throughout. The divergence lives in high WRAM ($2000+, 109 addresses), the
+direct page (22), $0100-$02FF (16), and the stack area (18) -- exactly the
+regions that carry animation state, per-frame scratch, and call residue.
+
 ### What this does and does not license
 
-It does **not** prove equivalence, and 0.1% is not 0. What it does is move the
-question: there is no sign of structural corruption, and every diff identified
-so far is a phase or timing counter. Byte-equality is also not achievable in
-principle here, because `$c7` counts spin iterations -- so a useful differential
-for this game has to compare structure, or pin the pacing, rather than compare
-raw WRAM.
-
+It does **not** prove equivalence, and ~54 unattributed bytes is not zero. What
+it does is bound the divergence and name its dominant mechanism, which was the
+open question. Byte-equality also remains unreachable in principle: `$c7` counts
+iterations of the vblank spin, so two hosts with different pacing cannot agree
+on it by construction.
 The per-opcode path therefore stays the correctness baseline, and it remains the
 only host that records coverage bitmaps, so every tool in `tools/` still needs
 it. But the frame host is no longer a prototype: it boots, services NMI through
