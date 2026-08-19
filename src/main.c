@@ -1762,6 +1762,11 @@ static bool s_fast_cursor_enabled;
 /* Mouse sensitivity, as a percentage applied after the window-scale divide.
  * 100 = one SNES pixel per SNES pixel of pointer travel. */
 static int s_mouse_sensitivity = 100;
+/* Direction the host mouse last moved, fed to the pad while a mouse button is
+ * held so the ROM runs its own cursor/drag path instead of only seeing a
+ * teleported cursor. */
+static uint16_t s_mouse_dir;
+static int      s_mouse_dir_frames;
 static const int kMouseSensitivities[] = { 50, 75, 100, 150, 200 };
 
 static int s_fast_cursor_step = 4;
@@ -3312,6 +3317,17 @@ int main(int argc, char **argv) {
           pacc_y += (double)step_y / pan_div;
           int px = (int)pacc_x, py = (int)pacc_y;
           pacc_x -= px; pacc_y -= py;
+          /* One tile per frame, max, per axis -- the same step 01:afbe takes
+           * (a single INC/DEC of $01bd/$01bf per call). Jumping several tiles
+           * in one frame outruns the map renderer, which scrolls the tilemap
+           * incrementally; that is what made panning look like the map was
+           * redrawing slowly. The remainder stays in the accumulator, so fast
+           * pointer movement still pans continuously, just at the rate the
+           * game itself scrolls. */
+          if (px >  1) { pacc_x += px - 1; px =  1; }
+          if (px < -1) { pacc_x += px + 1; px = -1; }
+          if (py >  1) { pacc_y += py - 1; py =  1; }
+          if (py < -1) { pacc_y += py + 1; py = -1; }
           if (px || py) {
             /* 8-bit signed, NOT 16-bit words. docs/ROM_MAP.md is explicit that
              * "no code anywhere in the ROM touches $01be" and that the real
@@ -3330,6 +3346,18 @@ int main(int argc, char **argv) {
           }
         } else if (step_x || step_y) {
           apply_mouse_delta(step_x, step_y);
+          /* Remember the direction of travel. While a button is held the ROM
+           * needs to see the cursor MOVE through its own path -- poking
+           * $01eb/$01ed behind its back moves the sprite but never raises the
+           * "cursor moved" event its drag handling keys off, which is why
+           * holding the button only acted once instead of continuously. The
+           * synthesised d-pad below closes that gap. */
+          s_mouse_dir = 0;
+          if (step_x < 0) s_mouse_dir |= kPad_Left;
+          if (step_x > 0) s_mouse_dir |= kPad_Right;
+          if (step_y < 0) s_mouse_dir |= kPad_Up;
+          if (step_y > 0) s_mouse_dir |= kPad_Down;
+          s_mouse_dir_frames = 2;   /* survive a frame the pointer did not move */
         }
       }
     }
@@ -3400,6 +3428,13 @@ int main(int argc, char **argv) {
      * $0100), not the $4218/$4219 hardware layout -- see
      * docs/HANDOVER_metal_marines.md #1. */
     { const uint32_t mb = SDL_GetMouseState(NULL, NULL);
+      if (s_mouse_enabled && s_mouse_dir_frames > 0 &&
+          (mb & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+        input |= s_mouse_dir;
+        s_mouse_dir_frames--;
+      } else if (s_mouse_dir_frames > 0) {
+        s_mouse_dir_frames--;
+      }
       if (mb & SDL_BUTTON(SDL_BUTTON_LEFT))  input |= kPad_B;
       /* Right button drives the map pan directly (see the pan block in the
        * mouse handler) rather than feeding A, so it does not also trigger the
