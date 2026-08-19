@@ -58,3 +58,47 @@ rejected foreign ROMs on its own ("byte mismatch"). Gated too, for consistency.
 
 The lesson generalises: a byte-signature patch is only as specific as its
 signature, and one byte is not a signature.
+
+## Recompiling a non-US ROM: the pipeline works, the cfg is the work
+
+`v2_regen.py` takes `--rom`, so it points at any image. Run against Japan with a
+minimal seed cfg (`recomp-j/`, bank declarations plus `auto_vectors`):
+
+```
+v2_regen: 16/16 banks emitted        wall-clock 218.5s
+=== STUB LINT - 85 stub(s) ===       [BRK: software interrupt] x85
+```
+
+Stubs are a hard build error, so nothing is written. The obvious reading is that
+Japan is harder to recompile. **It is not** -- the control settles it. The same
+seed cfg against the **US** ROM:
+
+```
+v2_regen: 16/16 banks emitted        wall-clock 217.9s
+=== STUB LINT - 90 stub(s) ===       [BRK: software interrupt] x90
+```
+
+The US image produces *more* stubs from the same seed. The stubs measure cfg
+completeness, not the ROM. `src/gen` is stub-free only because `recomp/` carries
+~200 hand-declared `func` entries plus the exit-M/X directives -- the accumulated
+analysis -- which keep the decoder on real code instead of following data.
+
+So per-region recompilation needs per-region analysis, and Japan starts from a
+marginally *better* position than the US ROM did. The seed cfgs are kept in
+`recomp-j/` as that starting point.
+
+For reference, current US coverage with the full cfg: **1544/1628 variants**
+aot_eligible (94.8%), **73364/75333 instructions** (97.4%).
+
+### What a per-region port would need
+
+1. Executed-PC and M/X bitmaps from real play on that image (`SC_MX_BITMAP`) --
+   the host already records these for any ROM, since the interpreter is
+   region-agnostic.
+2. Call-site discovery to seed `func` declarations, the same method
+   `recomp/bank00.cfg` documents for the US image.
+3. The exit-M/X fixpoint via `tools/mx_exit_*.py`, all of which take the ROM
+   path as a constant that would need parameterising (`ROM = 'simcity.sfc'`).
+4. A separate `src/gen-<region>` tree and a build target that links it, plus
+   widening the fingerprint guard from one US constant to a per-tree identity.
+
