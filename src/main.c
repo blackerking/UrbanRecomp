@@ -156,6 +156,13 @@ static uint64_t s_nmi_serviced;
  *                           (screen-mode index), $0c0f (cursor-mover gate),
  *                           $020d (selected build tool) -- see
  *                           docs/INVESTIGATION_dpad.md.
+ * SC_AOT_VARIANTS=<file>   with SC_FIBER, list the compiled variants the run
+ *                           ENTERED, as `pc24:MmXn hits=N` -- the same key
+ *                           the program manifest uses, so the two join
+ *                           directly. An entry is NOT an extent: the body
+ *                           then runs an unknown number of opcodes without
+ *                           reporting them, so this must never be expanded
+ *                           into an executed-PC bitmap.
  * SC_WRAM_DUMP_PC=<pc24>   with SC_WRAM_DUMP_DIR, fire each periodic WRAM
  *                           dump when the guest reaches that PC instead of at
  *                           the host frame boundary. Two hosts park the guest
@@ -882,6 +889,59 @@ static void apply_power_fix(void) {
             (unsigned long long)s_frames);
 }
 
+/* Record one executed guest PC into the coverage bitmaps.
+ *
+ * Factored out of the per-opcode loop so the fiber host can feed the same
+ * bitmaps through the bridge PC hook. Takes the PC and widths as arguments
+ * rather than reading g_cpu, because in fiber mode g_cpu never executes. */
+static void sc_note_executed_pc(uint32_t pc24, int mf, int xf) {
+  const uint8_t bank = (uint8_t)((pc24 >> 16) & 0xff);
+  const uint16_t pc  = (uint16_t)(pc24 & 0xffff);
+  if (s_pc_bitmap_bank >= 0 && bank == s_pc_bitmap_bank && pc >= 0x8000 &&
+      s_frames >= s_pc_bitmap_start_frame) {
+    uint32_t idx = pc - 0x8000;
+    s_pc_bitmap[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+  }
+  if (s_pc_bitmap_bank == -2 && pc >= 0x8000 && bank < 64 &&
+      s_frames >= s_pc_bitmap_start_frame) {
+    uint32_t idx = pc - 0x8000;
+    s_pc_bitmap_all[bank][idx >> 3] |= (uint8_t)(1u << (idx & 7));
+  }
+  if (s_mx_bitmap && pc >= 0x8000 && bank < 64) {
+    uint32_t idx = pc - 0x8000;
+    int mx = ((mf ? 1 : 0) << 1) | (xf ? 1 : 0);
+    s_mx_bitmap[mx][bank][idx >> 3] |= (uint8_t)(1u << (idx & 7));
+  }
+  if (bank < 64) s_banks_seen |= (1ULL << bank);
+}
+
+/* Compiled bodies ENTERED, as manifest-style keys (pc24:MmXn).
+ *
+ * Deliberately not folded into the bitmaps. A bounce reports an entry, not an
+ * extent -- the body then runs an unknown number of opcodes silently. The
+ * manifest min_pc24/max_pc24 cannot fill that in either: those bounds swallow
+ * nested routines and stop short of a truncated return (docs/OPEN_QUESTIONS.md
+ * F5), so expanding them would manufacture coverage that never executed --
+ * the same class of error as contaminating a union with SC_FREEZE runs.
+ *
+ * Reported separately so a tool can JOIN on the key, which is exactly how the
+ * program manifest is indexed. */
+#define SC_AOT_VARIANTS_MAX 4096
+static uint32_t s_aot_variant[SC_AOT_VARIANTS_MAX];  /* (pc24<<2)|(m<<1)|x */
+static uint32_t s_aot_variant_hits[SC_AOT_VARIANTS_MAX];
+static int      s_aot_variant_count;
+static uint64_t s_aot_variant_overflow;
+
+static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
+  uint32_t key = (pc24 << 2) | ((mf ? 1u : 0u) << 1) | (xf ? 1u : 0u);
+  for (int i = 0; i < s_aot_variant_count; i++)
+    if (s_aot_variant[i] == key) { s_aot_variant_hits[i]++; return; }
+  if (s_aot_variant_count >= SC_AOT_VARIANTS_MAX) { s_aot_variant_overflow++; return; }
+  s_aot_variant[s_aot_variant_count] = key;
+  s_aot_variant_hits[s_aot_variant_count] = 1;
+  s_aot_variant_count++;
+}
+
 #ifdef SIMCITY_AOT_TIER
 /* ── SC_FIBER=1: run the guest inside the fiber (migration step 3d) ───────
  *
@@ -1158,22 +1218,8 @@ static bool run_one_frame(void) {
       s_pc_history_head = (s_pc_history_head + 1) % SC_PC_HISTORY_SIZE;
       if (s_pc_history_filled < SC_PC_HISTORY_SIZE) s_pc_history_filled++;
     }
-    if (s_pc_bitmap_bank >= 0 && cpu->k == s_pc_bitmap_bank && cpu->pc >= 0x8000 &&
-        s_frames >= s_pc_bitmap_start_frame) {
-      uint32_t idx = cpu->pc - 0x8000;
-      s_pc_bitmap[idx >> 3] |= (uint8_t)(1u << (idx & 7));
-    }
-    if (s_pc_bitmap_bank == -2 && cpu->pc >= 0x8000 && cpu->k < 64 &&
-        s_frames >= s_pc_bitmap_start_frame) {
-      uint32_t idx = cpu->pc - 0x8000;
-      s_pc_bitmap_all[cpu->k][idx >> 3] |= (uint8_t)(1u << (idx & 7));
-    }
-    if (s_mx_bitmap && cpu->pc >= 0x8000 && cpu->k < 64) {
-      uint32_t idx = cpu->pc - 0x8000;
-      int mx = ((cpu->mf ? 1 : 0) << 1) | (cpu->xf ? 1 : 0);
-      s_mx_bitmap[mx][cpu->k][idx >> 3] |= (uint8_t)(1u << (idx & 7));
-    }
-    if (cpu->k < 64) s_banks_seen |= (1ULL << cpu->k);
+    sc_note_executed_pc(((uint32_t)cpu->k << 16) | cpu->pc,
+                        cpu->mf ? 1 : 0, cpu->xf ? 1 : 0);
     if (s_pc_capture_after > 0) {
       fprintf(stderr, "[pctrace] pc=%02x:%04x a=%04x x=%04x y=%04x p=%02x%s%s\n",
               cpu->k, cpu->pc, cpu->a, cpu->x, cpu->y,
@@ -2053,8 +2099,34 @@ static void write_mx_bitmap_dump(void) {
           n[0], n[1], n[2], n[3], s_mx_bitmap_path);
 }
 
+/* SC_AOT_VARIANTS=<file>: compiled variants entered during the run, one per
+ * line as `pc24:MmXn hits=N` -- the same key the program manifest uses, so a
+ * tool can join the two directly. Empty for a per-opcode run, which enters no
+ * compiled bodies at all. */
+static void write_aot_variants(void) {
+  const char *path = getenv("SC_AOT_VARIANTS");
+  if (!path || !s_aot_variant_count) return;
+  FILE *f = fopen(path, "wb");
+  if (!f) { fprintf(stderr, "SC_AOT_VARIANTS: cannot write %s\n", path); return; }
+  fprintf(f, "# compiled bodies ENTERED. An entry is not an extent: the body\n");
+  fprintf(f, "# then runs an unknown number of opcodes without reporting them,\n");
+  fprintf(f, "# so this must NOT be expanded into an executed-PC bitmap.\n");
+  for (int i = 0; i < s_aot_variant_count; i++) {
+    uint32_t k = s_aot_variant[i];
+    fprintf(f, "%06x:M%dX%d hits=%u\n", (unsigned)(k >> 2),
+            (int)((k >> 1) & 1), (int)(k & 1), (unsigned)s_aot_variant_hits[i]);
+  }
+  fclose(f);
+  fprintf(stderr, "[aotvariants] %d distinct compiled variants entered\n",
+          s_aot_variant_count);
+  if (s_aot_variant_overflow)
+    fprintf(stderr, "[aotvariants] WARNING: %llu entries dropped (table full)\n",
+            (unsigned long long)s_aot_variant_overflow);
+}
+
 static void write_pc_bitmap_dump(void) {
   write_mx_bitmap_dump();
+  write_aot_variants();
   if (s_pc_bitmap_bank == -1) return;
   const char *path = getenv("SC_PC_BITMAP_PATH");
   if (!path) return;
@@ -2333,6 +2405,15 @@ int main(int argc, char **argv) {
         return 1;
       }
       s_fiber_mode = true;
+      /* Feed the coverage bitmaps from the bridge, or a fiber run records
+       * nothing at all and every tool in tools/ silently sees an empty
+       * bitmap. Interpreted opcodes go into the bitmaps exactly as the
+       * per-opcode host records them; compiled-body ENTRIES are collected
+       * separately, because a bounce is not an extent. */
+      { extern void (*g_interp_bridge_pc_hook)(uint32_t, int, int);
+        extern void (*g_interp_bridge_bounce_hook)(uint32_t, int, int);
+        g_interp_bridge_pc_hook = sc_note_executed_pc;
+        g_interp_bridge_bounce_hook = sc_note_aot_entry; }
       fprintf(stderr, "[fiber] driving the guest inside the fiber "
                       "(entry I_RESET_M1X1)\n");
     } }

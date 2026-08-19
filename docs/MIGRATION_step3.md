@@ -1418,3 +1418,61 @@ only host that records coverage bitmaps, so every tool in `tools/` still needs
 it. But the frame host is no longer a prototype: it boots, services NMI through
 the real 00:80B2, paces audio, presents video, and now beats the per-opcode host
 on `logic_stall_max` (0 against 6).
+
+## 24. Coverage in fiber mode: accurate, and deliberately incomplete
+
+A fiber run used to record nothing at all -- `banks_seen=0` -- because the M/X
+and PC bitmaps were written from the per-opcode loop, which does not run. Every
+tool in `tools/` therefore silently saw an empty bitmap.
+
+Two hooks now feed them, and they are **not interchangeable**:
+
+| hook | fires | meaning |
+|---|---|---|
+| `g_interp_bridge_pc_hook` | once per **interpreted** opcode | exact: PC + live widths, immediately before the opcode runs |
+| `g_interp_bridge_bounce_hook` | once per compiled body **entered** | an entry, not an extent |
+
+Only the first feeds the bitmaps. Compiled entries go to a separate list
+(`SC_AOT_VARIANTS=<file>`), keyed `pc24:MmXn` -- the same key the program
+manifest uses, so the two join directly.
+
+### Why compiled bodies are not expanded into the bitmap
+
+It is tempting: the manifest carries `min_pc24`/`max_pc24` per variant, so an
+entered variant could be painted into the bitmap wholesale. **That would
+manufacture coverage that never executed.** Those bounds both swallow nested
+routines and stop short of a truncated one's real return -- the exact bug that
+produced the retracted `02:A3E0` split (OPEN_QUESTIONS F5). Painting them in
+would be the same class of error as contaminating a union with `SC_FREEZE`
+runs, and it would be invisible, because the false bits look like every other
+bit.
+
+### What a fiber bitmap is and is not
+
+600 frames, same ROM, same input:
+
+| | fiber | per-opcode |
+|---|---|---|
+| addresses recorded | 789 | 1,220 |
+| `banks_seen` | `0x29` | `0x29` |
+| `mx_exit_check` | 9 checked, **9 agree, 0 mismatch** | 15 checked, 15 agree, 0 mismatch |
+| compiled variants entered | 16 | 0 |
+
+**Accurate**: every bit set genuinely executed -- the hook fires immediately
+before `interp816_runOpcode`, with no intervening branch -- and the checker
+finds zero mismatches on it.
+
+**Incomplete**: ~35% of addresses are missing, all of them inside compiled
+bodies, which is why the checker sees 9 sites instead of 15.
+
+So a fiber bitmap supports **presence** claims and must never be used for
+**absence** claims. "This address executed" is sound. "This address never
+executed" is not, and that is precisely the shape of reasoning the coverage
+tools do when proposing directives. Unioning a fiber bitmap into a per-opcode
+set is safe -- it can only add real observations.
+
+One incidental finding: the fiber bitmap is not a strict subset of the
+per-opcode one. Seven addresses in bank `05` (around `$9417-$94FC`) appear only
+in the fiber run. Both hosts cover that bank heavily (386 vs 563 addresses), and
+the hosts sit at different animation phases, so this is a marginally different
+path through well-covered code rather than a defect.
