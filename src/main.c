@@ -561,8 +561,27 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
 /* SPC cycles per master clock (LakeSnes: (32040*32)/(1364*262*60)). */
 static const double kApuCyclesPerMaster = (32040.0 * 32.0) / (1364.0 * 262.0 * 60.0);
 
+/* SC_WIDESCREEN=<pixels per side>: widen the rendered picture.
+ *
+ * The runner's PPU already supports this -- PpuSetExtraSpace() sets a
+ * symmetric border and the internal render width becomes 256 + 2*extra, up to
+ * kPpuExtraLeftRight (96) per side. Nothing here reimplements a renderer; the
+ * guest still draws every pixel, so all the existing verification stays valid
+ * (see docs/PLAN_renderer.md, Stage 1).
+ *
+ * Motivation is the map-scroll complaint: showing more map at once is a
+ * different answer to "panning is slow" than making the pan faster, and unlike
+ * the pan work it costs no authenticity.
+ *
+ * Buffers are sized for the maximum so the allocation never depends on the
+ * runtime value; only the active width does. */
 enum { kVideoWidth = 256, kVideoHeight = 224, kVideoPitch = kVideoWidth * 4 };
-static uint8_t s_video_pixels[kVideoPitch * kVideoHeight];
+enum { kVideoWidthMax = kVideoWidth + 96 * 2,
+       kVideoPitchMax = kVideoWidthMax * 4 };
+static int s_ws_extra;                 /* pixels per side; 0 = authentic 256 */
+static int s_video_w = kVideoWidth;    /* active render width */
+static int s_video_pitch = kVideoPitch;
+static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
 
 /* `input1_currentState`'s bit layout is NOT the plain hardware joypad
  * register layout. The shared runner's auto-joy-read path (snes.c) does
@@ -1294,11 +1313,16 @@ static bool run_one_frame(void) {
 static bool write_ppm(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) return false;
-  fprintf(f, "P6\n%d %d\n255\n", kVideoWidth, kVideoHeight);
-  const uint32_t *pixels = (const uint32_t *)s_video_pixels;
-  for (size_t i = 0; i < (size_t)kVideoWidth * kVideoHeight; i++) {
-    uint8_t rgb[3] = { (uint8_t)(pixels[i] >> 16), (uint8_t)(pixels[i] >> 8), (uint8_t)pixels[i] };
-    if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); return false; }
+  /* Row-wise at the ACTIVE width, using the buffer's real stride. The buffer
+   * is allocated for the widescreen maximum, so a flat index over
+   * s_video_w * height would walk diagonally through it. */
+  fprintf(f, "P6\n%d %d\n255\n", s_video_w, kVideoHeight);
+  for (int y = 0; y < kVideoHeight; y++) {
+    const uint32_t *row = (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    for (int x = 0; x < s_video_w; x++) {
+      uint8_t rgb[3] = { (uint8_t)(row[x] >> 16), (uint8_t)(row[x] >> 8), (uint8_t)row[x] };
+      if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); return false; }
+    }
   }
   return fclose(f) == 0;
 }
@@ -2479,7 +2503,10 @@ static int run_qualification(uint64_t frames) {
     }
 
     uint64_t vh = 1469598103934665603ULL;
-    for (size_t i = 0; i < sizeof(s_video_pixels); i++) { vh ^= s_video_pixels[i]; vh *= 1099511628211ULL; }
+    /* Active area only -- the buffer is sized for the widescreen maximum, and
+     * hashing the unused tail would dilute the signal. */
+    for (size_t i = 0; i < (size_t)s_video_pitch * kVideoHeight; i++)
+      { vh ^= s_video_pixels[i]; vh *= 1099511628211ULL; }
     if (f > 1 && vh != last_video_hash) video_changes++;
     last_video_hash = vh;
 
@@ -3033,7 +3060,21 @@ int main(int argc, char **argv) {
     return 1;
   }
   snes_reset(g_snes, true);
-  PpuBeginDrawing(g_ppu, s_video_pixels, kVideoPitch, 0);
+  { const char *e = getenv("SC_WIDESCREEN");
+    if (e && *e) {
+      int v = atoi(e);
+      if (v < 0) v = 0;
+      if (v > 96) v = 96;
+      s_ws_extra = v;
+    } }
+  if (s_ws_extra > 0) {
+    s_video_w = kVideoWidth + s_ws_extra * 2;
+    s_video_pitch = s_video_w * 4;
+    PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
+    fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
+            s_ws_extra, s_video_w, kVideoHeight);
+  }
+  PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, 0);
 
   g_cpu = interp816_init(NULL, bus_read, bus_write);
   interp816_reset(g_cpu);
@@ -3072,7 +3113,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   SDL_Window *window = snesrecomp_sdl_create_window(
-      "SimCitySNESRecomp", kVideoWidth * scale, kVideoHeight * scale, 0);
+      "SimCitySNESRecomp", s_video_w * scale, kVideoHeight * scale, 0);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
@@ -3087,7 +3128,7 @@ int main(int argc, char **argv) {
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-      kVideoWidth, kVideoHeight);
+      s_video_w, kVideoHeight);
 
   /* The framebuffer is ARGB8888 but the PPU never writes an alpha byte, so
    * every pixel carries A=0. Under SDL2 that was harmless: a texture defaults
@@ -3314,7 +3355,7 @@ int main(int argc, char **argv) {
 #else
         SDL_GetRendererOutputSize(renderer, &ow, &oh);
 #endif
-        double sx = ow > 0 ? (double)ow / (double)kVideoWidth  : (double)scale;
+        double sx = ow > 0 ? (double)ow / (double)s_video_w  : (double)scale;
         double sy = oh > 0 ? (double)oh / (double)kVideoHeight : (double)scale;
         if (sx < 1.0) sx = 1.0;
         if (sy < 1.0) sy = 1.0;
@@ -3655,7 +3696,16 @@ int main(int argc, char **argv) {
 
     void *pixels = NULL; int pitch = 0;
     bool _lok = SDL_LockTexture(texture, NULL, &pixels, &pitch) SC_SDL_OK;
-    if (_lok && pixels) memcpy(pixels, s_video_pixels, sizeof(s_video_pixels));
+    /* Row-wise, NOT one memcpy of the whole array. s_video_pixels is sized for
+     * the maximum widescreen width so the allocation never depends on the
+     * runtime value -- copying sizeof() of it into a narrower texture would
+     * both overrun the destination and misalign every row. */
+    if (_lok && pixels) {
+      const int row_bytes = s_video_w * 4;
+      for (int y = 0; y < kVideoHeight; y++)
+        memcpy((uint8_t *)pixels + (size_t)y * pitch,
+               s_video_pixels + (size_t)y * s_video_pitch, (size_t)row_bytes);
+    }
     SDL_UnlockTexture(texture);
     SDL_RenderClear(renderer);
     bool _cok = SDL_RenderCopy(renderer, texture, NULL, NULL) SC_SDL_OK;
@@ -3663,7 +3713,7 @@ int main(int argc, char **argv) {
       if (diag < 0) diag = getenv("SC_SDL_DIAG") ? 0 : 99;
       if (diag < 99 && (s_frames % 60) == 0) {
         fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
-                (int)_lok, pitch, (int)kVideoPitch, (int)_cok, SDL_GetError()); } }
+                (int)_lok, pitch, (int)s_video_pitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
 
     if (s_menu_preview && --s_menu_preview_countdown <= 0) {
