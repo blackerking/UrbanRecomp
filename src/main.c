@@ -1903,6 +1903,7 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
  * consume them, so execution stays on paths the game really takes. */
 /* The loaded ROM image, so the UFO population gate can be lifted for the
  * duration of a triggered event. Set in main() once the ROM is read. */
+static bool s_rom_is_us = true;
 static uint8_t *s_rom_data;
 static uint32_t s_rom_size;
 
@@ -2612,7 +2613,42 @@ static int run_qualification(uint64_t frames) {
 }
 
 int main(int argc, char **argv) {
+  /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
+   *
+   * All five regions are 512KB and all five pass --qualify 600 unchanged on
+   * the interpreter tier, which is ROM-agnostic: it interprets whatever bytes
+   * are there. So a language selector costs nothing but the file choice.
+   *
+   * The AOT tier is a different matter -- see the fingerprint guard below.
+   *
+   * Candidate filenames per region, tried in order, because the No-Intro names
+   * carry decorations ("[!]") that vary by dump. An explicit ROM argument
+   * always wins over SC_LANG. */
   const char *rom_path = "simcity.sfc";
+  { const char *lang = getenv("SC_LANG");
+    if (lang && *lang) {
+      static const struct { char code; const char *names[3]; } kRoms[] = {
+        { 'U', { "simcity.sfc", "Sim City (U) [!].sfc", NULL } },
+        { 'E', { "Sim City (E) [!].sfc", "Sim City (E).sfc", NULL } },
+        { 'F', { "Sim City (F).sfc", "Sim City (F) [!].sfc", NULL } },
+        { 'G', { "Sim City (G) [!].sfc", "Sim City (G).sfc", NULL } },
+        { 'J', { "Sim City (J).sfc", "Sim City (J) [!].sfc", NULL } },
+      };
+      char want = (char)toupper((unsigned char)lang[0]);
+      const char *picked = NULL;
+      for (size_t i = 0; i < sizeof(kRoms)/sizeof(kRoms[0]) && !picked; i++) {
+        if (kRoms[i].code != want) continue;
+        for (int n = 0; n < 3 && kRoms[i].names[n]; n++) {
+          FILE *f = fopen(kRoms[i].names[n], "rb");
+          if (f) { fclose(f); picked = kRoms[i].names[n]; break; }
+        }
+        if (!picked)
+          fprintf(stderr, "SC_LANG=%c: no ROM file found for that region\n", want);
+      }
+      if (picked) { rom_path = picked; }
+      else if (!strchr("UEFGJ", want))
+        fprintf(stderr, "SC_LANG: want one of U E F G J\n");
+    } }
   const char *load_state_path = NULL;
   uint64_t qualify_frames = 0;
   int scale = 3;
@@ -2742,6 +2778,43 @@ int main(int argc, char **argv) {
   uint32_t rom_size = 0;
   uint8_t *rom_data = read_file(rom_path, &rom_size);
   s_rom_data = rom_data; s_rom_size = rom_size;
+  /* Region report + AOT fingerprint guard.
+   *
+   * The generated AOT code is compiled against the US ROM: its addresses, its
+   * dispatch table, every cfg directive. Point it at another region and it
+   * would execute US code offsets over foreign bytes -- silently, and wrongly.
+   *
+   * The default path is safe today because it reports bounces=0, i.e. it is
+   * pure interpreter; only SC_FIBER actually enters compiled bodies. So the
+   * guard refuses SC_FIBER on a non-US image rather than refusing to run at
+   * all, which keeps every region playable on the interpreter.
+   *
+   * FNV-1a over the whole file. US = 0xec01686a; E/F/G/J are 0xb76b1a0d,
+   * 0xe1f99069, 0xaeca7623, 0xccb8c347. */
+  { uint32_t fp = 2166136261u;
+    for (uint32_t i = 0; i < rom_size; i++) { fp ^= rom_data[i]; fp *= 16777619u; }
+    const uint8_t region = rom_size > 0x7fd9 ? rom_data[0x7fd9] : 0xff;
+    const char *name = region == 0x00 ? "Japan" : region == 0x01 ? "USA"
+                     : region == 0x02 ? "Europe" : region == 0x06 ? "France"
+                     : region == 0x09 ? "Germany" : "unknown";
+    s_rom_is_us = (fp == 0xec01686au);
+    fprintf(stderr, "rom: %s  region=%s (%02x)  fnv=%08x%s\n",
+            rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
+  }
+#ifdef SIMCITY_AOT_TIER
+  /* Checked HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
+   * is read, so the fingerprint is not known yet. The first version of this
+   * guard sat at the parse site and did nothing at all -- a German ROM ran 60
+   * compiled bounces straight past it. */
+  if (s_fiber_mode && !s_rom_is_us) {
+    fprintf(stderr,
+            "SC_FIBER refused: the AOT code is compiled against the US ROM and "
+            "this image is a different region.\n"
+            "  Run without SC_FIBER -- the interpreter tier handles every "
+            "region.\n");
+    return 1;
+  }
+#endif
   if (!rom_data) {
     fprintf(stderr, "cannot read ROM '%s'\n", rom_path);
     return 1;
@@ -2812,7 +2885,11 @@ int main(int argc, char **argv) {
     int patched = 0;
     for (size_t i = 0; i < sizeof(kCursorDelaySites) / sizeof(kCursorDelaySites[0]); i++) {
       uint32_t off = kCursorDelaySites[i];
-      if (off < rom_size && rom_data[off] == 0x03) {
+      /* Gated on the US fingerprint: this checks a SINGLE byte, which cannot
+       * identify a site in a different build. Measured: without the gate, both
+       * US patches "applied" cleanly to all of E/F/G/J -- i.e. they were
+       * patching foreign ROMs on coincidental byte matches. */
+      if (s_rom_is_us && off < rom_size && rom_data[off] == 0x03) {
         rom_data[off] = 0x00;
         patched++;
       }
@@ -2896,7 +2973,7 @@ int main(int argc, char **argv) {
   }
   {
     uint32_t off = 0x40fb; /* 00:c0fb's STA $7e21b5 (long), file offset = addr-0x8000 (bank 0) */
-    if (off + 3 < rom_size && rom_data[off] == 0x8f && rom_data[off+1] == 0xb5 &&
+    if (s_rom_is_us && off + 3 < rom_size && rom_data[off] == 0x8f && rom_data[off+1] == 0xb5 &&
         rom_data[off+2] == 0x21 && rom_data[off+3] == 0x7e) {
       rom_data[off] = rom_data[off+1] = rom_data[off+2] = rom_data[off+3] = 0xea; /* NOP x4 */
       fprintf(stderr, "view fix: patched 00:c0fb STA $7e21b5 -> NOP (stop stomping the Up/Down View cursor)\n");
