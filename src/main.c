@@ -1125,6 +1125,7 @@ static void scenario_event_tick(void);            /* defined with the menu */
 static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what);
 static void service_disaster_menu8(void);
 static void position_disaster_menu8_rows(void);
+static void probe_menu_buffer(void);
 
 /* SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>: the headless twin of the F10
  * MELTDOWN / UFO rows, so the trigger can be verified without a human at the
@@ -1158,6 +1159,7 @@ static bool run_one_frame(void) {
   scenario_event_tick();
   service_disaster_menu8();
   position_disaster_menu8_rows();
+  probe_menu_buffer();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -2045,7 +2047,19 @@ static void scenario_event_tick(void) {
  * draw a checkbox with nothing beside it until that is extended too. */
 static bool s_disaster_menu8;
 
-/* Position the two new disaster rows.
+/* Position the two new disaster rows. DOES NOT WORK YET -- kept for the
+ * calibration it enables, not because it renders anything.
+ *
+ * Writing these bytes changes WRAM as intended, and an earlier note here
+ * claimed that meant the rows were "placed instead of parked". That was wrong,
+ * and checking the FRAMEBUFFER rather than the buffer is what showed it: a
+ * sweep of the band byte over $60,$68,$70,$78,$80,$88 renders nothing visible
+ * at any value. Confirming a write landed is not confirming a pixel changed.
+ *
+ * So the six-slot checkbox page cannot be widened by moving bytes around in
+ * this buffer; whatever positions those rows lives elsewhere. The better route
+ * is 01:aad5, the game's own EIGHT-item menu ($01fb, per-item gating on
+ * $01e7) -- clone its layout rather than stretching this page.
  *
  * 01:a918/a93a write only the TILE byte of each row's four OAM-style entries
  * at $7e2063 + row*16 (+0,+4,+8,+12). Positions come from page-setup code that
@@ -2062,6 +2076,37 @@ static bool s_disaster_menu8;
  * byte on every toggle and we must not fight it -- only bytes 0 and 1 are
  * touched, never the tile. */
 #define SC_MENU_OAM 0x2061u   /* $7e2061: row stride 16, four 4-byte entries */
+
+/* SC_MENU8_PROBE=<first>,<count>: paint a known marker into the menu buffer
+ * and photograph the result, to map buffer offset -> screen position.
+ *
+ * The buffer at $7e2060+ is uploaded by 01:a8ff (a wrapper around JSL $008e1d),
+ * and writing into it demonstrably works -- it is how rows 6/7 were moved. What
+ * is NOT known is its geometry, and six sample rows were not enough to derive
+ * it: the second byte runs 6c, a0, a4, a8, ac, e0 across two bands, which fits
+ * no arithmetic reading. Deriving it from more disassembly has cost more than
+ * it has returned.
+ *
+ * So: write the CHECKED tile ($34) into a contiguous span of row slots and look
+ * at where the marks land. One screenshot maps the format that inspection has
+ * failed to. Rows are 16 bytes apart with four 4-byte cells, so this walks the
+ * same slots the ROM does and cannot corrupt anything outside them. */
+static void probe_menu_buffer(void) {
+  if (!s_disaster_menu8 || g_ram[0x01df] != 2) return;
+  static int first = -1, count = 0;
+  if (first < 0) {
+    const char *e = getenv("SC_MENU8_PROBE");
+    if (!e || !*e) { first = -2; return; }
+    unsigned f = 0, c = 16;
+    sscanf(e, "%u,%u", &f, &c);
+    first = (int)f; count = (int)c;
+    fprintf(stderr, "menu probe: marking rows %d..%d\n", first, first + count - 1);
+  }
+  if (first < 0) return;
+  for (int r = first; r < first + count; r++)
+    for (int k = 0; k < 4; k++)
+      g_ram[SC_MENU_OAM + 2 + (uint32_t)r * 16 + (uint32_t)k * 4] = 0x34;
+}
 
 static void position_disaster_menu8_rows(void) {
   if (!s_disaster_menu8) return;

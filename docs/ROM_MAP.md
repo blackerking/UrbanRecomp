@@ -1883,6 +1883,25 @@ Verified: `SC_DISASTER=6@<frame>` arms the meltdown and `7` the UFO, each
 through the full chain and each restoring afterwards. `--qualify` is
 byte-identical with and without the patch, so it is inert until a bit is set.
 
+### Expanding the page: what is measured, and what failed
+
+A probe that forces rows 0-15 to the checked tile and diffs the framebuffer
+shows the six real entries occupy **tile rows 8-13** (y=64-111), columns 5-14,
+and that rows past 5 splatter into a separate band at tile rows 2-4. So the
+buffer is not a linear screen map.
+
+**Moving the row bytes does not make rows 6/7 appear.** Sweeping the band byte
+over `$60`-`$88` renders nothing visible at any value. An earlier revision of
+this file claimed the rows had been "placed instead of parked" -- that was
+wrong, and it was wrong for an avoidable reason: the WRAM write was verified
+and the framebuffer was not. Confirming a write landed is not confirming a
+pixel changed, which is the same lesson the SDL3 work already paid for once.
+
+Whatever assigns those positions is not in this buffer. The route worth taking
+instead is `01:aad5`, the game's own **eight-item** menu (`$01fb`, per-item
+gating on `$01e7` at `01:aafe`/`ab0d`) -- clone its layout and item handling
+rather than stretching the six-slot checkbox page.
+
 ### Why the two new rows are invisible: they are SPRITES, parked
 
 The patch works — rows 6 and 7 get the unchecked-checkbox tile written, exactly
