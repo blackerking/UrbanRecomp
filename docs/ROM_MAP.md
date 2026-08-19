@@ -1883,24 +1883,41 @@ Verified: `SC_DISASTER=6@<frame>` arms the meltdown and `7` the UFO, each
 through the full chain and each restoring afterwards. `--qualify` is
 byte-identical with and without the patch, so it is inert until a bit is set.
 
-### Expanding the page: what is measured, and what failed
+### The page cannot be widened in place: slots 6 and 7 are IN USE
 
-A probe that forces rows 0-15 to the checked tile and diffs the framebuffer
-shows the six real entries occupy **tile rows 8-13** (y=64-111), columns 5-14,
-and that rows past 5 splatter into a separate band at tile rows 2-4. So the
-buffer is not a linear screen map.
+Settled by play, and it is a negative result worth keeping.
 
-**Moving the row bytes does not make rows 6/7 appear.** Sweeping the band byte
-over `$60`-`$88` renders nothing visible at any value. An earlier revision of
-this file claimed the rows had been "placed instead of parked" -- that was
-wrong, and it was wrong for an avoidable reason: the WRAM write was verified
-and the framebuffer was not. Confirming a write landed is not confirming a
-pixel changed, which is the same lesson the SDL3 work already paid for once.
+Raising the row count (`LDY #$0005` -> `#$0007`, ASLs NOPped) does give the page
+eight bits to walk. It also **wrecks the colours on the Speed, Options and
+Disasters pages** -- reported as "all colourful even when not selected". A clean
+dump shows why: slots 6/7 hold `e0 00 32 80`, byte 3 being a palette/attribute
+byte, and slot 8 holds different tiles again (`$35`/`$33`). The buffer at
+`$7e2063` is shared with other UI elements, so the extra rows write checkbox
+tiles and palettes over them wherever they appear.
 
-Whatever assigns those positions is not in this buffer. The route worth taking
-instead is `01:aad5`, the game's own **eight-item** menu (`$01fb`, per-item
-gating on `$01e7` at `01:aafe`/`ab0d`) -- clone its layout and item handling
-rather than stretching the six-slot checkbox page.
+Both attempts are reverted. What remains is host-side servicing of `$0197` bits
+6 and 7, which touches no ROM and keeps `SC_DISASTER=6/7` usable headlessly; the
+F10 rows remain the working way to fire either event.
+
+### How the page is actually drawn
+
+`01:d94f` blits four 16-word rows from ROM tables at `01:d8af`/`d8cf`/`d8ef`/...
+into the tilemap at `$7e2440`, slots `$0100`/`$0120`/`$0140`/`$0160`.
+
+Page setup for `$01df==2` (`01:d083`) and `==3` (`01:d0aa`) is byte-for-byte
+identical **except** the final call -- `JSR $d94f` vs `JSR $d9ea` -- and both
+blit into the same four slots. Only the source tables differ. So adding entries
+means authoring new table rows there, not moving bytes in the sprite buffer.
+
+### Two methodology traps, both paid for here
+
+- **A WRAM write landing is not a pixel changing.** Sweeping the row-position
+  byte over `$60`-`$88` rendered nothing at any value, while the buffer dutifully
+  showed the new bytes. The framebuffer is the oracle.
+- **Replaying a save state already parked on a page never re-runs that page's
+  setup**, so it is blind to any setup-time change. Several screenshots taken
+  that way proved nothing in either direction, including the one that appeared
+  to show the layout clone doing nothing.
 
 ### Why the two new rows are invisible: they are SPRITES, parked
 

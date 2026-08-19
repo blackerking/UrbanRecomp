@@ -1124,8 +1124,6 @@ static uint64_t s_disaster_frame;
 static void scenario_event_tick(void);            /* defined with the menu */
 static void arm_scenario_event(unsigned idx, uint16_t countdown, const char *what);
 static void service_disaster_menu8(void);
-static void position_disaster_menu8_rows(void);
-static void probe_menu_buffer(void);
 
 /* SC_SCENARIO_EVENT=<meltdown|ufo>@<frame>: the headless twin of the F10
  * MELTDOWN / UFO rows, so the trigger can be verified without a human at the
@@ -1158,8 +1156,6 @@ static bool run_one_frame(void) {
   sc_maybe_trigger_scenario_event();
   scenario_event_tick();
   service_disaster_menu8();
-  position_disaster_menu8_rows();
-  probe_menu_buffer();
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
@@ -2047,91 +2043,31 @@ static void scenario_event_tick(void) {
  * draw a checkbox with nothing beside it until that is extended too. */
 static bool s_disaster_menu8;
 
-/* Position the two new disaster rows. DOES NOT WORK YET -- kept for the
- * calibration it enables, not because it renders anything.
+/* The disaster page cannot be widened in place -- slots 6 and 7 are IN USE.
  *
- * Writing these bytes changes WRAM as intended, and an earlier note here
- * claimed that meant the rows were "placed instead of parked". That was wrong,
- * and checking the FRAMEBUFFER rather than the buffer is what showed it: a
- * sweep of the band byte over $60,$68,$70,$78,$80,$88 renders nothing visible
- * at any value. Confirming a write landed is not confirming a pixel changed.
+ * Attempted and reverted: raise the row count, then position the two new rows
+ * by writing their bytes in the buffer at $7e2063 + row*16. Both failed, and
+ * the second failed destructively.
  *
- * So the six-slot checkbox page cannot be widened by moving bytes around in
- * this buffer; whatever positions those rows lives elsewhere. The better route
- * is 01:aad5, the game's own EIGHT-item menu ($01fb, per-item gating on
- * $01e7) -- clone its layout rather than stretching this page.
+ * A clean dump shows slots 6/7 holding `e0 00 32 80` -- byte 3 a palette or
+ * attribute byte -- and slot 8 holding different tiles again ($35/$33). The
+ * buffer is shared with other UI elements, so writing checkbox tiles and
+ * palettes there corrupts them wherever they appear. Reported from play as
+ * "Speed, Options and Disasters are all colourful even when not selected",
+ * which is exactly that.
  *
- * 01:a918/a93a write only the TILE byte of each row's four OAM-style entries
- * at $7e2063 + row*16 (+0,+4,+8,+12). Positions come from page-setup code that
- * lays out exactly six rows, so rows 6 and 7 sit at the parked value $e0 and
- * never appear -- the checkbox is drawn onto a sprite nobody placed.
+ * Two methodology notes, both of which cost real time here:
  *
- * Rather than reverse-engineer the layout byte format from six samples (the
- * progression is irregular: bytes go 6c, a0, a4, a8, ac, e0 across two bands
- * at $40/$50 and $58/$68), place them empirically: clone a row that is known to
- * render, then move it. SC_MENU8_POS=<b0_row6>,<b0_row7> overrides the band
- * byte in hex so the position can be tuned without a rebuild.
+ *   - Sweeping the position byte over $60-$88 rendered NOTHING at any value.
+ *     Verifying that a WRAM write landed is not verifying a pixel changed.
+ *   - Replaying a save state already parked on a page never re-runs that
+ *     page setup, so it is blind to any setup-time change. Several
+ *     screenshots taken that way proved nothing either way.
  *
- * Rewritten every frame while the page is up, because the ROM redraws the tile
- * byte on every toggle and we must not fight it -- only bytes 0 and 1 are
- * touched, never the tile. */
-#define SC_MENU_OAM 0x2061u   /* $7e2061: row stride 16, four 4-byte entries */
+ * The page is drawn by 01:d94f, which blits four 16-word rows from ROM tables
+ * at 01:d8af/d8cf/d8ef/... into the tilemap at $7e2440. Adding entries means
+ * authoring new table rows there, not moving bytes in the sprite buffer. */
 
-/* SC_MENU8_PROBE=<first>,<count>: paint a known marker into the menu buffer
- * and photograph the result, to map buffer offset -> screen position.
- *
- * The buffer at $7e2060+ is uploaded by 01:a8ff (a wrapper around JSL $008e1d),
- * and writing into it demonstrably works -- it is how rows 6/7 were moved. What
- * is NOT known is its geometry, and six sample rows were not enough to derive
- * it: the second byte runs 6c, a0, a4, a8, ac, e0 across two bands, which fits
- * no arithmetic reading. Deriving it from more disassembly has cost more than
- * it has returned.
- *
- * So: write the CHECKED tile ($34) into a contiguous span of row slots and look
- * at where the marks land. One screenshot maps the format that inspection has
- * failed to. Rows are 16 bytes apart with four 4-byte cells, so this walks the
- * same slots the ROM does and cannot corrupt anything outside them. */
-static void probe_menu_buffer(void) {
-  if (!s_disaster_menu8 || g_ram[0x01df] != 2) return;
-  static int first = -1, count = 0;
-  if (first < 0) {
-    const char *e = getenv("SC_MENU8_PROBE");
-    if (!e || !*e) { first = -2; return; }
-    unsigned f = 0, c = 16;
-    sscanf(e, "%u,%u", &f, &c);
-    first = (int)f; count = (int)c;
-    fprintf(stderr, "menu probe: marking rows %d..%d\n", first, first + count - 1);
-  }
-  if (first < 0) return;
-  for (int r = first; r < first + count; r++)
-    for (int k = 0; k < 4; k++)
-      g_ram[SC_MENU_OAM + 2 + (uint32_t)r * 16 + (uint32_t)k * 4] = 0x34;
-}
-
-static void position_disaster_menu8_rows(void) {
-  if (!s_disaster_menu8) return;
-  if (g_ram[0x01df] != 2) return;            /* only on the disaster page */
-  static int y6 = -1, y7 = -1;
-  if (y6 < 0) {
-    const char *e = getenv("SC_MENU8_POS");
-    unsigned a6 = 0x70, a7 = 0x88;
-    if (e && *e) sscanf(e, "%x,%x", &a6, &a7);
-    y6 = (int)a6; y7 = (int)a7;
-    fprintf(stderr, "disaster menu: placing rows 6/7 at band $%02x/$%02x\n", y6, y7);
-  }
-  /* Clone rows 2 and 5 -- one from each existing band -- keeping their X/attr
-   * and replacing only the band byte. */
-  for (int k = 0; k < 4; k++) {
-    uint32_t src2 = SC_MENU_OAM + 2 * 16 + (uint32_t)k * 4;
-    uint32_t src5 = SC_MENU_OAM + 5 * 16 + (uint32_t)k * 4;
-    uint32_t d6   = SC_MENU_OAM + 6 * 16 + (uint32_t)k * 4;
-    uint32_t d7   = SC_MENU_OAM + 7 * 16 + (uint32_t)k * 4;
-    g_ram[d6 + 0] = (uint8_t)y6;  g_ram[d6 + 1] = g_ram[src2 + 1];
-    g_ram[d6 + 3] = g_ram[src2 + 3];
-    g_ram[d7 + 0] = (uint8_t)y7;  g_ram[d7 + 1] = g_ram[src5 + 1];
-    g_ram[d7 + 3] = g_ram[src5 + 3];
-  }
-}
 
 static void service_disaster_menu8(void) {
   if (!s_disaster_menu8) return;
@@ -2946,28 +2882,17 @@ int main(int argc, char **argv) {
    * cart_init() copies the ROM -- a patch after that lands in a buffer nobody
    * reads. */
   if (getenv("SC_DISASTER_MENU8")) {
-    if (0xaa47 < rom_size && rom_data[0xaa3e] == 0x0a && rom_data[0xaa3f] == 0x0a &&
-        rom_data[0xaa45] == 0xa0 && rom_data[0xaa46] == 0x05) {
-      rom_data[0xaa3e] = rom_data[0xaa3f] = 0xea;   /* ASL A ; ASL A -> NOP NOP */
-      rom_data[0xaa46] = 0x07;                      /* LDY #$0005 -> LDY #$0007 */
-      /* SC_MENU8_LAYOUT=1: draw the disaster page with the EIGHT-item menu's
-       * layout instead of its own.
-       *
-       * Page setup for $01df==2 (01:d083) and ==3 (01:d0aa) are identical
-       * except for their final call: JSR $d94f vs JSR $d9ea. Both blit four
-       * 16-tile rows into the same slots ($0100/$0120/$0140/$0160 of the
-       * tilemap at $7e2440); only the ROM source tables differ. So pointing
-       * one at the other is the whole "clone", in two bytes. */
-      if (getenv("SC_MENU8_LAYOUT") && rom_data[0xd0a6] == 0x20 &&
-          rom_data[0xd0a7] == 0x4f && rom_data[0xd0a8] == 0xd9) {
-        rom_data[0xd0a7] = 0xea; rom_data[0xd0a8] = 0xd9;   /* $d94f -> $d9ea */
-        fprintf(stderr, "disaster page: using the 8-item menu layout\n");
-      }
-      s_disaster_menu8 = true;
-      fprintf(stderr, "disaster menu: 8 rows (bits 6=meltdown, 7=UFO)\n");
-    } else {
-      fprintf(stderr, "SC_DISASTER_MENU8: 01:aa3e/aa45 bytes unexpected, not patching\n");
-    }
+    /* The row-count patch is GONE. Raising LDY #$0005 to #$0007 and dropping
+     * the two ASLs did give the page eight bits to walk, and it wrecked the
+     * colours on the Speed, Options and Disasters pages: slots 6 and 7 of the
+     * buffer at $7e2063 are not free, so the extra rows wrote checkbox tiles
+     * and palettes over other UI elements. See the note above.
+     *
+     * What is left is only the host-side servicing of bits 6 and 7, which
+     * touches no ROM and keeps SC_DISASTER=6/7 usable as a headless trigger.
+     * The F10 MELTDOWN and UFO rows remain the working way to fire these. */
+    s_disaster_menu8 = true;
+    fprintf(stderr, "disaster bits 6/7 serviced host-side (no ROM patch)\n");
   }
   {
     uint32_t off = 0x40fb; /* 00:c0fb's STA $7e21b5 (long), file offset = addr-0x8000 (bank 0) */
