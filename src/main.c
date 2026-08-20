@@ -904,6 +904,24 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * manual fast-forward is unaffected either way. */
 static bool s_auto_turbo_enabled; /* off by default -- see above */
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
+
+/* Guest frames per host frame while the map-generation / decompression loop is
+ * active. This is how the generation wait is removed WITHOUT moving generation
+ * host-side.
+ *
+ * Generating the map host-side would cross the line docs/PLAN_renderer.md sets
+ * out: the map is state, not presentation. It is genuinely procedural --
+ * 03:d840 seeds the PRNG a seed-dependent 1-32 times, then JSL $01f1ed runs
+ * five distinct terrain-feature routines -- so a host implementation would have
+ * to match it bit-for-bit, and any divergence would produce a different city
+ * with nothing to detect it. The guest stays authoritative; it just runs
+ * faster while nobody is looking at the screen.
+ *
+ * Separate from AUTO TURBO, which stays off by default for its own reasons
+ * (it fired during ordinary gameplay and made the game feel rough). This only
+ * engages on the two load-specific triggers. */
+static int s_mapgen_turbo = 16;   /* 1 = off */
+static const int kMapgenTurbos[] = { 1, 4, 8, 16, 32, 64 };
 #define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
 
 /* Post-load power dropout fix.
@@ -2426,6 +2444,8 @@ static SettingDesc s_settings[] = {
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
+  { "MAPGEN TURBO",          kSettingCycle, &s_mapgen_turbo,        0,    NULL,
+    kMapgenTurbos, (int)(sizeof(kMapgenTurbos) / sizeof(kMapgenTurbos[0])) },
   { "CHEATS",                kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
@@ -3829,8 +3849,15 @@ int main(int argc, char **argv) {
     const bool dragging = s_drag_turbo > 1 &&
       (SDL_GetMouseState(NULL, NULL) &
        (SDL_BUTTON(SDL_BUTTON_LEFT) | SDL_BUTTON(SDL_BUTTON_RIGHT))) != 0;
-    bool fast_forward = keys[SDL_SCANCODE_TAB] || s_gen_loop_active_frames > 0;
-    int frames_this_iter = fast_forward ? 6 : (dragging ? s_drag_turbo : 1);
+    /* Map generation gets its own, much larger factor. 6x barely dents a wait
+     * the player is staring at; the point is to collapse it, and nothing is
+     * being watched while the generator runs. Tab-held fast-forward keeps its
+     * modest 6x, since that IS being watched. */
+    const bool generating = s_gen_loop_active_frames > 0;
+    bool fast_forward = keys[SDL_SCANCODE_TAB] || generating;
+    int frames_this_iter = generating ? s_mapgen_turbo
+                         : fast_forward ? 6
+                         : (dragging ? s_drag_turbo : 1);
 
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
      * time for any run_one_frame() call slower than the threshold -- there's
