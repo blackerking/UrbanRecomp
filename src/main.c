@@ -902,7 +902,17 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * The two remaining triggers are genuinely load-specific. Toggle the
  * feature from the F10 settings menu ("AUTO TURBO ON LOAD"); Tab-held
  * manual fast-forward is unaffected either way. */
-static bool s_auto_turbo_enabled; /* off by default -- see above */
+/* AUTO TURBO is DELETED, not merely defaulted off.
+ *
+ * Reported from play: it makes the sound laggy. That matches the long note
+ * above -- intermittent 6x bursts during ordinary gameplay made the game feel
+ * rough and worsened the fast-forward audio delay. A setting whose only honest
+ * advice is "leave it alone" is worse than no setting, so the row and the flag
+ * are gone.
+ *
+ * What it existed for survives as MAPGEN TURBO, which uses the same two
+ * load-specific triggers but only inside the generation/decompression window,
+ * where nothing is being listened to either. */
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
 
 /* Guest frames per host frame while the map-generation / decompression loop is
@@ -1266,8 +1276,10 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
-    if (s_auto_turbo_enabled &&
-        ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd)))
+    /* Unconditional now that AUTO TURBO is gone. This only opens the
+     * generation/decompression window; whether anything speeds up is MAPGEN
+     * TURBO's decision, and 1 means off. */
+    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd))
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
     /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
      * the map already unpacked and SRAM already restored. */
@@ -2443,7 +2455,6 @@ static SettingDesc s_settings[] = {
     kScenarioOverrideNames },
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
-  { "AUTO TURBO",            kSettingBool, &s_auto_turbo_enabled,  0,    NULL, NULL, 0 },
   { "MAPGEN TURBO",          kSettingCycle, &s_mapgen_turbo,        0,    NULL,
     kMapgenTurbos, (int)(sizeof(kMapgenTurbos) / sizeof(kMapgenTurbos[0])) },
   { "CHEATS",                kSettingHeader, NULL, 0, NULL, NULL, 0 },
