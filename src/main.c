@@ -1478,30 +1478,17 @@ static void host_map_compose(void) {
    * states). Without this the map painted over the scenario select, the
    * disaster page and everything else -- reported from play as "menu broken",
    * and entirely my omission rather than a renderer fault. */
-  if (g_ram[0x01df] != 3) {
-    /* Not the city view, so no host map -- but in widescreen the guest still
-     * tiles this screen's background sideways into the margins, and clamping
-     * the BG layers does not stop all of it (measured: 26 of 96 margin columns
-     * still repeated on a clean start, which sits at $01df == 4).
-     *
-     * Handle it deterministically instead: move the authentic 256 columns to
-     * the left edge -- matching where the UI is anchored in map view -- and
-     * fill what is left with the backdrop. Pillarboxed rather than repeated,
-     * and it cannot depend on which layer leaked. */
-    if (s_ws_extra > 0 && g_ppu) {
-      uint16_t bd = g_ppu->cgram[0];
-      uint32_t fill = 0xFF000000u
-          | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
-          | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
-          | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
-      for (int y = 0; y < kVideoHeight; y++) {
-        uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-        memmove(row, row + s_ws_extra, (size_t)kVideoWidth * 4);
-        for (int x = kVideoWidth; x < s_video_w; x++) row[x] = fill;
-      }
-    }
-    return;
-  }
+  /* NO screen-mode gate.
+   *
+   * $01df was read as "3 means the city view". It is not: the same city view
+   * with a tool palette open has been observed at 3, at 4 AND at 0. Gating on
+   * it made the map vanish and left the widescreen margins black -- reported
+   * from play.
+   *
+   * No gate is needed. The capture pass takes every layer except BG2, so
+   * whatever the guest draws on any other layer covers the map by itself.
+   * That is the same property that made in-view menus work without a special
+   * case, applied consistently. */
   { static int shown = 0;
     if (shown < 3) { shown++;
       int n3 = 0, no = 0;
@@ -2213,6 +2200,20 @@ static void menu_action_load_slot1(void) {
  * bit (see docs/ROM_MAP.md); bits 0 and 1 are still unidentified and are
  * labelled by number so the menu never asserts something unproven. Naming
  * them after a guess is how the $0199 mistake happened. */
+/* ARM TRIGGERS: a safety catch in front of the disaster rows.
+ *
+ * Requested after a stray selection set one off mid-game. The rows sit right
+ * under the cheats in a menu navigated with the D-pad, and firing an
+ * earthquake by accident is not recoverable without a save state. Off by
+ * default, so the triggers do nothing until deliberately armed. */
+static bool s_disaster_armed;
+
+static bool disaster_triggers_armed(const char *what) {
+  if (s_disaster_armed) return true;
+  fprintf(stderr, "[menu] %s ignored -- ARM TRIGGERS is off\n", what);
+  return false;
+}
+
 static void trigger_disaster_bit(unsigned bit, const char *what) {
   g_ram[0x0197] |= (uint8_t)(1u << bit);
   fprintf(stderr, "[menu] set $0197 bit %u (%s) -> $0197=%02x, frame %llu\n",
@@ -2414,20 +2415,24 @@ static void service_disaster_menu8(void) {
                        arm_scenario_event(6, 16, "UFO (in-game menu)"); }
 }
 
-static void menu_trigger_meltdown(void) { arm_scenario_event(4, 1,  "nuclear meltdown"); }
+static void menu_trigger_meltdown(void) {
+  if (disaster_triggers_armed("nuclear meltdown")) arm_scenario_event(4, 1, "nuclear meltdown");
+}
 /* The UFO additionally passes a population gate at 03:b9b3 -- a 32-bit
  * compare of ($0ba7:$0ba5) against $0001_4c08 -- so it will not appear in a
  * city under 84,488 people. Measured: on a small free-play city the arm is
  * reached and the gate rejects it, so the menu row is not broken, the city is
  * just too small. */
-static void menu_trigger_ufo(void)      { arm_scenario_event(6, 16, "UFO"); }
+static void menu_trigger_ufo(void) {
+  if (disaster_triggers_armed("UFO")) arm_scenario_event(6, 16, "UFO");
+}
 
-static void menu_trigger_fire(void)  { trigger_disaster_bit(0, "fire"); }
-static void menu_trigger_flood(void) { trigger_disaster_bit(1, "flood"); }
-static void menu_trigger_plane(void) { trigger_disaster_bit(2, "plane crash"); }
-static void menu_trigger_tornado(void) { trigger_disaster_bit(3, "tornado"); }
-static void menu_trigger_quake(void) { trigger_disaster_bit(4, "earthquake"); }
-static void menu_trigger_monster(void) { trigger_disaster_bit(5, "monster"); }
+static void menu_trigger_fire(void) { if (disaster_triggers_armed("fire")) trigger_disaster_bit(0, "fire"); }
+static void menu_trigger_flood(void) { if (disaster_triggers_armed("flood")) trigger_disaster_bit(1, "flood"); }
+static void menu_trigger_plane(void) { if (disaster_triggers_armed("plane crash")) trigger_disaster_bit(2, "plane crash"); }
+static void menu_trigger_tornado(void) { if (disaster_triggers_armed("tornado")) trigger_disaster_bit(3, "tornado"); }
+static void menu_trigger_quake(void) { if (disaster_triggers_armed("earthquake")) trigger_disaster_bit(4, "earthquake"); }
+static void menu_trigger_monster(void) { if (disaster_triggers_armed("monster")) trigger_disaster_bit(5, "monster"); }
 
 /* This table is the whole "extension" mechanism, mirroring ar-recomp's own
  * randomizer/HD-replacements pattern: each row is one self-contained
@@ -2439,6 +2444,7 @@ static SettingDesc s_settings[] = {
   /* Labels are kept short enough that the longest one plus its ON/OFF
    * value still fits the menu box at the current font size -- see
    * render_settings_menu()'s width math. */
+  { "QOL",                   kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "MOUSE CURSOR",          kSettingBool, &s_mouse_enabled,       0,    NULL, NULL, 0 },
   { "FAST TICKS",            kSettingBool, &s_fast_ticks,          0,    NULL, NULL, 0 },
   { "DRAG TURBO",            kSettingCycle, &s_drag_turbo,          0,    NULL,
@@ -2450,9 +2456,6 @@ static SettingDesc s_settings[] = {
   { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
-  { "SCENARIO OVR",          kSettingCycle, &s_scenario_override,  0,    NULL,
-    kScenarioOverrides, (int)(sizeof(kScenarioOverrides) / sizeof(kScenarioOverrides[0])),
-    kScenarioOverrideNames },
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "MAPGEN TURBO",          kSettingCycle, &s_mapgen_turbo,        0,    NULL,
@@ -2468,6 +2471,7 @@ static SettingDesc s_settings[] = {
     kClassOverrides, (int)(sizeof(kClassOverrides) / sizeof(kClassOverrides[0])) },
   { "CLR MILESTONE",         kSettingAction, NULL, 0, menu_action_clear_milestones, NULL, 0 },
   { "DISASTER TRIGGER",      kSettingHeader, NULL, 0, NULL, NULL, 0 },
+  { "ARM TRIGGERS",          kSettingBool, &s_disaster_armed,      0,    NULL, NULL, 0 },
   { "FIRE",                  kSettingAction, NULL, 0, menu_trigger_fire,     NULL, 0 },
   { "FLOOD",                 kSettingAction, NULL, 0, menu_trigger_flood,    NULL, 0 },
   { "PLANE CRASH",           kSettingAction, NULL, 0, menu_trigger_plane,    NULL, 0 },
