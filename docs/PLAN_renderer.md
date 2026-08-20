@@ -130,3 +130,47 @@ The runner already has the correct mechanism: `PpuBindOverlaySurface` /
 `docs/HOST_OVERLAY_EXTRACTION.md`. Switch to that before this goes near the
 host, rather than shipping a black-key hack.
 
+## The right compositing mechanism, and it is the ActRaiser one
+
+`snesrecomp/docs/HOST_OVERLAY_EXTRACTION.md`: the PPU can export selected,
+already-rendered layers into **transparent ARGB surfaces** without touching
+VRAM, OAM, WRAM, registers, DMA or savestate data. It was *"ported (additively,
+preserving this engine's existing widescreen layer-policy API) from Derrick
+Gold's ActRaiser fork"* -- so the ActRaiser reuse asked about is real, and it is
+exactly this.
+
+```c
+PpuBindOverlaySurface(ppu, kPpuOverlaySource_Bg3, bg3_argb, pitch);
+PpuBindOverlaySurface(ppu, kPpuOverlaySource_Obj, obj_argb, pitch);
+
+/* once per emulated frame, before scanout */
+PpuClearOverlayCaptures(ppu);
+PpuSetOverlayCapture(ppu, kPpuOverlaySource_Bg3, 0, 0, 256, 224,
+                     kPpuOverlayFlag_RemoveFromGame);
+PpuSetOverlayCapture(ppu, kPpuOverlaySource_Obj, 0, 0, 256, 224,
+                     kPpuOverlayFlag_RemoveFromGame);
+```
+
+Two properties make this the correct basis rather than the black-key hack:
+
+- **Real alpha.** A black HUD pixel and an absent one stop being the same
+  thing, which the current composite cannot distinguish.
+- **Provably inert when unused.** "With no surface bound and no capture
+  rectangle configured, every source is a deterministic no-op ... authentic/
+  headless/oracle output is byte-identical." That is precisely the property
+  this project needs: the oracle survives the feature existing.
+
+The boundary it defines also matches the state/presentation line already drawn
+here -- the runner isolates and decodes layers, the *game policy* decides which
+rectangle and when, and the host frontend composes. Only the last two are ours.
+
+### Remaining work to make Stage 2 real
+
+1. Port `tools/render_map.py` into the host in C (the larger piece).
+2. Bind BG3/OBJ overlay surfaces and composite with real alpha instead of the
+   black key.
+3. Wire the map render through `PpuSetWidescreenLineEnhancer` so the widescreen
+   margins get genuine map instead of the tilemap repeat.
+
+Steps 2 and 3 are mechanical once 1 exists. Step 1 is where the effort is.
+
