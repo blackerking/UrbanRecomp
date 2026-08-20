@@ -1478,6 +1478,8 @@ static bool write_host_map_ppm(const char *path, int cols, int rows) {
   const int pitch = w * 4;
   uint8_t *buf = (uint8_t *)malloc((size_t)pitch * h);
   if (!buf) return false;
+  { const char *z = getenv("SC_MAP_ZOOM");
+    if (z && *z) ScMapView_SetCellPx(atoi(z)); }
   int sx = 0, sy = 0;
   ScMapView_GetScroll(&sx, &sy);
   if (!ScMapView_Render(buf, pitch, cols, rows, sx, sy)) {
@@ -3392,6 +3394,35 @@ int main(int argc, char **argv) {
       if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F2 && !ev.key.repeat) {
         queue_debug_menu_code(s_frames + 1);
       }
+      /* +/- : zoom the host-rendered map.
+       *
+       * Only possible because the map is drawn host-side; the guest's own
+       * renderer is fixed at 8 pixels per cell. Steps through a small set of
+       * cell sizes rather than free-scaling, so every step stays an exact
+       * nearest-neighbour ratio and the tiles keep their shape.
+       *
+       * The HUD is unaffected -- it comes from the guest at 1:1 and is
+       * composited after, so it stays crisp at every zoom level. */
+      if (ev.type == SDL_KEYDOWN && !ev.key.repeat && s_host_map) {
+        static const int kCellSizes[] = { 2, 4, 8, 16, 32 };
+        const int n = (int)(sizeof(kCellSizes) / sizeof(kCellSizes[0]));
+        SDL_Scancode sc = SC_EVENT_SCANCODE(ev);
+        int dir = 0;
+        if (sc == SDL_SCANCODE_EQUALS || sc == SDL_SCANCODE_KP_PLUS) dir = +1;
+        if (sc == SDL_SCANCODE_MINUS  || sc == SDL_SCANCODE_KP_MINUS) dir = -1;
+        if (dir) {
+          int cur = ScMapView_GetCellPx(), idx = 2;
+          for (int i = 0; i < n; i++) if (kCellSizes[i] == cur) idx = i;
+          idx += dir;
+          if (idx < 0) idx = 0;
+          if (idx >= n) idx = n - 1;
+          ScMapView_SetCellPx(kCellSizes[idx]);
+          fprintf(stderr, "[zoom] %d px per map cell (%s)\n", kCellSizes[idx],
+                  kCellSizes[idx] == 8 ? "native" :
+                  kCellSizes[idx] > 8 ? "zoomed in" : "zoomed out");
+        }
+      }
+
       /* F3: toggle host-mouse cursor control (see apply_mouse_delta below).
        * Off by default -- it's a ported experimental community patch, and
        * incidental OS mouse movement over the window shouldn't silently

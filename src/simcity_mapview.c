@@ -58,12 +58,24 @@ void ScMapView_GetScroll(int *sx, int *sy) {
     if (sy) *sy = (int8_t)g_ram[SC_SCROLL_Y];
 }
 
-/* BGR555 -> ARGB8888. */
+/* BGR555 -> ARGB8888, through the PPU's master-brightness table.
+ *
+ * The brightness step is not cosmetic. The guest's own layers are composited by
+ * the PPU and therefore dim during a fade; a host map converted raw does not,
+ * so a fade left the menu dimming over a map that stayed at full brightness.
+ * Worse, the host composite keys transparency on the backdrop colour, which IS
+ * computed through brightnessMult -- so as the fade progressed the key drifted
+ * out of step with the map and pixels flipped in and out. Reported from play as
+ * the VOICE/HISTORY fade showing tiles visibly changing while the end result
+ * was still correct.
+ *
+ * Using the same table the PPU uses keeps both sides on one scale. */
 static uint32_t pal_entry(unsigned index) {
     uint16_t v = ram_u16(SC_PAL_OFF + (index & 0xFFu) * 2u);
-    uint32_t r = (uint32_t)((v & 31u) * 255u / 31u);
-    uint32_t g = (uint32_t)(((v >> 5) & 31u) * 255u / 31u);
-    uint32_t b = (uint32_t)(((v >> 10) & 31u) * 255u / 31u);
+    const uint8_t *bm = g_ppu->brightnessMult;
+    uint32_t r = bm[v & 31u];
+    uint32_t g = bm[(v >> 5) & 31u];
+    uint32_t b = bm[(v >> 10) & 31u];
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
@@ -88,19 +100,33 @@ static void decode_tile(unsigned tile, uint8_t out[64]) {
     }
 }
 
+static int s_cell_px = 8;   /* 8 = native */
+
+void ScMapView_SetCellPx(int px) {
+    if (px < 1) px = 1;
+    if (px > 64) px = 64;
+    s_cell_px = px;
+}
+int ScMapView_GetCellPx(void) { return s_cell_px; }
+
+/* Draw one 8x8 tile scaled to cell_px, nearest-neighbour in both directions so
+ * a single path serves zoom-in and zoom-out. Source pixel is chosen per
+ * destination pixel, which keeps zoom-out honest: it samples rather than
+ * pretending to average, and never reads outside the tile. */
 static void blit_tile(uint8_t *out, int pitch, int w, int h,
-                      unsigned tc, int px, int py) {
+                      unsigned tc, int px, int py, int cell) {
     uint8_t pix[64];
     decode_tile(tc, pix);
     unsigned pbase = ((tc >> 10) & 7u) * 16u;
-    for (int ty = 0; ty < 8; ty++) {
-        int oy = py + ty;
+    for (int dy = 0; dy < cell; dy++) {
+        int oy = py + dy;
         if (oy < 0 || oy >= h) continue;
+        int ty = dy * 8 / cell;
         uint32_t *row = (uint32_t *)(out + (size_t)oy * pitch);
-        for (int tx = 0; tx < 8; tx++) {
-            int ox = px + tx;
+        for (int dx = 0; dx < cell; dx++) {
+            int ox = px + dx;
             if (ox < 0 || ox >= w) continue;
-            uint8_t ci = pix[ty * 8 + tx];
+            uint8_t ci = pix[ty * 8 + (dx * 8 / cell)];
             if (ci == 0) continue;              /* transparent */
             row[ox] = pal_entry(pbase + ci);
         }
@@ -113,7 +139,13 @@ bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
         !g_snes->cart->rom || !s_rom_is_us) return false;
 
     const uint8_t *rom = g_snes->cart->rom;
+    /* cols/rows are the caller's cell budget at native scale; the actual
+     * surface is whatever it asked for, so derive the drawn extent from the
+     * current cell size and widen the cell budget to fill it when zoomed out. */
+    const int cell = s_cell_px;
     const int w = cols * 8, h = rows * 8;
+    cols = (w + cell - 1) / cell;
+    rows = (h + cell - 1) / cell;
 
     for (int y = 0; y < h; y++)
         memset(out + (size_t)y * pitch, 0, (size_t)w * 4);
@@ -131,12 +163,13 @@ bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
                 if (pass == 0) {
                     unsigned tp = (unsigned)(rom[SC_TILE_ADDR + v * 2] |
                                              (rom[SC_TILE_ADDR + v * 2 + 1] << 8));
-                    blit_tile(out, pitch, w, h, tp, rx * 8, ry * 8);
+                    blit_tile(out, pitch, w, h, tp, rx * cell, ry * cell, cell);
                 } else {
                     unsigned tu = (unsigned)(rom[SC_TILU_ADDR + v * 2] |
                                              (rom[SC_TILU_ADDR + v * 2 + 1] << 8));
                     if ((tu & 0x3FFu) == 0x300u) continue;
-                    blit_tile(out, pitch, w, h, tu, rx * 8 - 1, ry * 8 - 1);
+                    blit_tile(out, pitch, w, h, tu, rx * cell - cell / 8,
+                              ry * cell - cell / 8, cell);
                 }
             }
         }

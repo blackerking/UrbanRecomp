@@ -24,4 +24,10 @@ bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
 /* Current map scroll in cells, read from $01bd/$01bf. */
 void ScMapView_GetScroll(int *sx, int *sy);
 
+/* Pixels per map cell. 8 is native; larger zooms in, smaller zooms out.
+ * Only meaningful because the map is drawn host-side -- the guest's own
+ * renderer is fixed at 8. */
+void ScMapView_SetCellPx(int px);
+int  ScMapView_GetCellPx(void);
+
 #endif /* SIMCITY_MAPVIEW_H */
