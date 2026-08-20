@@ -738,7 +738,19 @@ static void handle_pos_stuff(void) {
        * which arms cleanly but exports nothing. Needs no cooperation from the
        * runner beyond retargeting PpuBeginDrawing between the two calls. */
       if (s_host_map && s_hud_pixels && snes->vPos > 0) {
-        g_snes_ppu_dbg_layer_mask = 0x14;          /* BG3 | OBJ */
+        /* Everything EXCEPT BG2, not just BG3|OBJ.
+         *
+         * BG2 is the map -- the only layer being replaced. Capturing every
+         * other layer means anything the guest draws wins over the host map
+         * automatically: the HUD, sprites, AND any menu, including the ones
+         * that open *inside* the city view without changing $01df. Reported
+         * from play: savestate_3 opens such a menu and $01df stays 3
+         * throughout, so no screen-mode gate could ever have caught it.
+         *
+         * Self-correcting by construction, which is why it beats hunting for
+         * a "menu is open" flag -- a search through the WRAM delta across the
+         * B press turned up only transient direct-page scratch. */
+        g_snes_ppu_dbg_layer_mask = (uint8_t)~0x02;   /* all but BG2 */
         PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, 0);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask = 0xff;
