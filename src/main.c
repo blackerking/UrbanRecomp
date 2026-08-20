@@ -1302,7 +1302,18 @@ static bool run_one_frame(void) {
     }
     /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
      * the map already unpacked and SRAM already restored. */
-    if (s_power_fix && cpu->k == 0x03 && cpu->pc == 0xc8dd) apply_power_fix();
+    /* TWO hook points, because there are two ways a map arrives.
+     *
+     * 03:c8dd is the save-load path: 03:c8c8 has unpacked the map and
+     * 03:c8cb has restored SRAM. Scenarios never go through it -- they load
+     * via 03:ce2e, which unpacks with its own JSR $d15f at 03:ce5e and
+     * returns to 03:ce61. So the power fix has been firing on loaded cities
+     * and never on scenarios, which is exactly the "scenarios lose power at
+     * start" report: the same post-load dropout, unpatched.
+     *
+     * 03:ce61 is the scenario equivalent -- map in place, about to return. */
+    if (s_power_fix && cpu->k == 0x03 &&
+        (cpu->pc == 0xc8dd || cpu->pc == 0xce61)) apply_power_fix();
     /* LC_LZ5 decompressor instrumentation -- see the SC_DECOMP_TRACE comment
      * above bus_read for the decoded calling convention and why the samples
      * are taken at 00:90eb / 00:9106 rather than at the JSR and the RTS. */
