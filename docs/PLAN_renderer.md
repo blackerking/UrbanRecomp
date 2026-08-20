@@ -243,3 +243,30 @@ One extra PPU pass per visible line while enabled. The guest still computes
 everything; only the map is drawn differently, so every existing check remains
 valid and the default build is byte-identical to baseline.
 
+### There is no per-screen work
+
+Worth stating, because it is the thing that decides whether this design scales.
+Every save state, at `SC_WIDESCREEN=96` with the host map on:
+
+```
+$01df  path        states                    margin repeats
+  3    host map    0, 2, 3, 4, 5, 6, 7, 8         0/96
+  1,4  pillarbox   9, 1                           0/96
+```
+
+Two paths, neither of which knows which screen it is on:
+
+- The map path keys on "capture every layer except BG2", so any menu drawn on
+  any other layer wins automatically. That is why the in-view menu works
+  without being special-cased -- it never changes `$01df`.
+- The pillarbox path keys on "the host map is not drawing", so it covers every
+  non-map screen that exists, including ones nobody has looked at.
+
+The clean-start bug was not a screen-specific fault; it was a missing generic
+path, and adding it fixed the whole class at once.
+
+This is the concrete difference from going fully host-side. Reimplementing the
+screens would be per-screen work without end -- every menu tilemap, font,
+dialog and animation -- and with no oracle, since the guest would no longer be
+drawing the thing being checked.
+
