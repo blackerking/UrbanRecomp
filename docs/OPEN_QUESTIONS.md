@@ -1117,7 +1117,24 @@ This is worth generalising upstream. A cfg `func` silently defaulting to
 the resulting body looks completely clean — same signature as the
 inline-argument bug, and found the same way.
 
-### E1. Old save states restore with broken tiles — **CLOSED, stale files**
+### E1. Old save states restore with broken tiles — **REOPENED with evidence**
+
+> It reproduces, headlessly, and the host map renderer accidentally isolated
+> the cause. Rendering `savestate_5` at frame 400: the GUEST framebuffer shows
+> tile errors "never seen in normal play", while `tools/render_map.py` --
+> drawing the same area from `$7F0200` plus VRAM CHR -- comes out clean, and
+> both show the same part of the city. Confirmed from play.
+>
+> That splits the problem. **CHR is intact** (the host render uses it and looks
+> right); the damage is in the guest's **BG tilemap**, which a save-state
+> restore evidently leaves partially stale until the game rebuilds it. That
+> also matches the original report that starting a new map fixes it.
+>
+> Note this contradicts the earlier close as "stale files, nothing to repair"
+> — it is a real defect in what save-state restore leaves behind, and it has a
+> reproducible fixture now. It also means a host-rendered map would sidestep
+> it entirely, which is a user-facing reason for Stage 2 beyond scroll speed.
+ — **CLOSED, stale files**
 
 > Re-tested on a clean run: states load and render correctly ("works as
 > intended, no problems"). The broken tiles were seen while the SDL3 texture
