@@ -1365,16 +1365,42 @@ static void host_map_arm_captures(void) {
   memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
   memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
   PpuClearOverlayCaptures(g_ppu);
-  PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Bg3, 0, 0, s_video_w, kVideoHeight,
-                       kPpuOverlayFlag_RemoveFromGame);
-  PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Obj, 0, 0, s_video_w, kVideoHeight,
-                       kPpuOverlayFlag_RemoveFromGame);
+  bool c3 = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Bg3, 0, 0, s_video_w,
+                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
+  bool co = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Obj, 0, 0, s_video_w,
+                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
+  { static int shown = 0;
+    if (shown < 2) { shown++;
+      fprintf(stderr, "host map: capture armed bg3=%d obj=%d mode=%d\n",
+              (int)c3, (int)co, (int)PPU_mode(g_ppu)); } }
 }
 
 /* After the guest frame: replace the picture with our map, then put the
  * captured HUD and sprites back over it using their real alpha. */
 static void host_map_compose(void) {
   if (!s_host_map || !s_ov_bg3) return;
+  /* Only on the main map screen. $01df is the screen-mode index: 3 is the
+   * city view, while 0/1/2 are the menu pages (measured across the save
+   * states). Without this the map painted over the scenario select, the
+   * disaster page and everything else -- reported from play as "menu broken",
+   * and entirely my omission rather than a renderer fault. */
+  if (g_ram[0x01df] != 3) return;
+  { static int shown = 0;
+    if (shown < 3) { shown++;
+      int n3 = 0, no = 0;
+      for (int y = 0; y < kVideoHeight; y++) {
+        const uint32_t *b3 = (const uint32_t *)(s_ov_bg3 + (size_t)y * s_ov_pitch);
+        const uint32_t *ob = (const uint32_t *)(s_ov_obj + (size_t)y * s_ov_pitch);
+        for (int x = 0; x < s_video_w; x++) { if (b3[x] >> 24) n3++; if (ob[x] >> 24) no++; }
+      }
+      /* KNOWN ISSUE: both counts are 0. The captures arm successfully and the
+       * mode is 1, which HOST_OVERLAY_EXTRACTION.md lists as covered, yet the
+       * surfaces stay empty -- so the HUD and sprites do not come back and the
+       * frame is bare map. Reported from play as "map works, no overlay".
+       * Whatever the reason is, it is inside the runner's export path rather
+       * than this wiring. Diagnostic kept until it is understood. */
+      fprintf(stderr, "host map: composing, bgmode=%d bg3px=%d objpx=%d\n",
+              (int)PPU_mode(g_ppu), n3, no); } }
   int sx = 0, sy = 0;
   ScMapView_GetScroll(&sx, &sy);
   const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
