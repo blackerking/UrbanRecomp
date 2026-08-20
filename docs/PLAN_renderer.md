@@ -98,3 +98,35 @@ because the map format and the layer hooks are both already in hand.
 Not the renderer. The line is **simulation**: the moment host code decides what
 the city does, the ROM becomes documentation rather than the program. Stages
 0-3 all keep the guest computing the city.
+
+## Stage 2 progress: layer roles, measured
+
+`SNESRECOMP_LAYER_MASK` (bit0=BG1 .. bit3=BG4, bit4=OBJ) isolates layers as a
+host-only render filter -- it never touches guest state. Measured on
+`savestate_5`, a live Las Vegas game:
+
+| layer | coverage | top band | bottom band | role |
+|---|---|---|---|---|
+| BG1 | 2% | 3% | 2% | ~unused |
+| **BG2** | **95%** | 94% | 97% | **the map** |
+| **BG3** | 26% | **68%** | 9% | **HUD / status bar** |
+| BG4 | 0% | 0% | 0% | unused |
+| **OBJ** | 12% | 18% | **0%** | **sprites / cursor** |
+
+So the composite is: host-rendered map, plus the guest rendered with
+`SNESRECOMP_LAYER_MASK=0x14` (BG3 | OBJ) laid over it. That keeps the HUD, the
+status bar and the cursor authored by the game -- only the map is ours.
+
+First composite lands 14,774 HUD/sprite pixels, 26% of the frame.
+
+### Known limitation of this first pass
+
+Transparency is inferred from "pixel is not black", because the masked render
+writes 0 for transparent and a black HUD pixel is indistinguishable from an
+absent one. Good enough to prove the composite, wrong in principle.
+
+The runner already has the correct mechanism: `PpuBindOverlaySurface` /
+`PpuOverlaySource` -- "renderer-neutral host-overlay extraction", with its own
+`docs/HOST_OVERLAY_EXTRACTION.md`. Switch to that before this goes near the
+host, rather than shipping a black-key hack.
+
