@@ -705,6 +705,10 @@ static void hdma_do_line(HdmaChanState *c) {
 
 /* ── accurate H/V position driver, ported from snesrecomp/cosim/ref_driver.c
  * (the framework's own game-neutral reference frame loop) ──────────────── */
+/* Defined with the host-map block far below; called from the frame loop here. */
+static void host_map_arm_captures(void);
+static void host_map_compose(void);
+
 static void handle_pos_stuff(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
@@ -728,6 +732,7 @@ static void handle_pos_stuff(void) {
     if (snes->vPos <= kVideoHeight)
       ppu_runLine(g_ppu, snes->vPos);
     if (snes->vPos == 0) {
+      host_map_arm_captures();
       snes->inVblank = false; snes->inNmi = false;
       /* Real "HDMA init": (re)latch each currently-enabled channel's table
        * pointer once per frame. This replaces an old `dma_startDma(dma, 0,
@@ -744,6 +749,7 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
+      host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
       snes->inNmi = true;
       if (snes->nmiEnabled) { cpu->nmiWanted = true; s_nmi_requests++; }
@@ -1323,6 +1329,67 @@ static bool run_one_frame(void) {
  * against real play first; dumping the C port the same way lets the two be
  * diffed, so the port is checked against a known-good implementation rather
  * than only against itself. Nothing here touches presentation yet. */
+/* SC_HOST_MAP=1: draw the map host-side and composite the game's own HUD and
+ * sprites back on top.
+ *
+ * BG3 and OBJ are captured into transparent ARGB surfaces via the overlay
+ * export (snesrecomp/docs/HOST_OVERLAY_EXTRACTION.md, ported from the ActRaiser
+ * fork) with RemoveFromGame, so the guest frame comes out carrying only the
+ * layers we are replacing. Real alpha, not a black key.
+ *
+ * The guest still computes everything -- this only draws the map differently,
+ * which is the state/presentation line docs/PLAN_renderer.md sets out.
+ *
+ * Opt-in: with nothing bound and no capture configured the export is a
+ * documented no-op, so the default build stays byte-identical. */
+static bool s_host_map;
+static uint8_t *s_ov_bg3, *s_ov_obj;
+static int s_ov_pitch;
+
+static void host_map_init(void) {
+  if (!s_host_map || !g_ppu || s_ov_bg3) return;
+  s_ov_pitch = kVideoWidthMax * 4;
+  s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
+  s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
+  if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
+  PpuClearOverlayBindings(g_ppu);
+  bool a = PpuBindOverlaySurface(g_ppu, kPpuOverlaySource_Bg3, s_ov_bg3, (size_t)s_ov_pitch);
+  bool b = PpuBindOverlaySurface(g_ppu, kPpuOverlaySource_Obj, s_ov_obj, (size_t)s_ov_pitch);
+  fprintf(stderr, "host map: overlay bind bg3=%d obj=%d, bgmode=%d\n",
+          (int)a, (int)b, (int)PPU_mode(g_ppu));
+}
+
+/* Per frame, before any line renders. */
+static void host_map_arm_captures(void) {
+  if (!s_host_map || !g_ppu || !s_ov_bg3) return;
+  memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
+  memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
+  PpuClearOverlayCaptures(g_ppu);
+  PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Bg3, 0, 0, s_video_w, kVideoHeight,
+                       kPpuOverlayFlag_RemoveFromGame);
+  PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Obj, 0, 0, s_video_w, kVideoHeight,
+                       kPpuOverlayFlag_RemoveFromGame);
+}
+
+/* After the guest frame: replace the picture with our map, then put the
+ * captured HUD and sprites back over it using their real alpha. */
+static void host_map_compose(void) {
+  if (!s_host_map || !s_ov_bg3) return;
+  int sx = 0, sy = 0;
+  ScMapView_GetScroll(&sx, &sy);
+  const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
+  if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) return;
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    const uint32_t *b3 = (const uint32_t *)(s_ov_bg3 + (size_t)y * s_ov_pitch);
+    const uint32_t *ob = (const uint32_t *)(s_ov_obj + (size_t)y * s_ov_pitch);
+    for (int x = 0; x < s_video_w; x++) {
+      if (b3[x] >> 24) dst[x] = b3[x];
+      if (ob[x] >> 24) dst[x] = ob[x];
+    }
+  }
+}
+
 static bool write_host_map_ppm(const char *path, int cols, int rows) {
   const int w = cols * 8, h = rows * 8;
   const int pitch = w * 4;
@@ -3116,6 +3183,8 @@ int main(int argc, char **argv) {
       if (v > 96) v = 96;
       s_ws_extra = v;
     } }
+  { const char *e = getenv("SC_HOST_MAP");
+    if (e && *e && *e != '0') s_host_map = true; }
   if (s_ws_extra > 0) {
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
@@ -3124,6 +3193,7 @@ int main(int argc, char **argv) {
             s_ws_extra, s_video_w, kVideoHeight);
   }
   PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, 0);
+  host_map_init();
 
   g_cpu = interp816_init(NULL, bus_read, bus_write);
   interp816_reset(g_cpu);
