@@ -705,9 +705,11 @@ static void hdma_do_line(HdmaChanState *c) {
 
 /* ── accurate H/V position driver, ported from snesrecomp/cosim/ref_driver.c
  * (the framework's own game-neutral reference frame loop) ──────────────── */
-/* Defined with the host-map block far below; called from the frame loop here. */
+/* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
+static bool     s_host_map;
+static uint8_t *s_hud_pixels;
 
 static void handle_pos_stuff(void) {
   Snes *snes = g_snes;
@@ -729,8 +731,21 @@ static void handle_pos_stuff(void) {
 
   if (snes->hPos == 0) {
     bool startingVblank = false;
-    if (snes->vPos <= kVideoHeight)
+    if (snes->vPos <= kVideoHeight) {
+      /* Host-map mode renders each visible line TWICE: once with the layer
+       * mask limited to BG3|OBJ into a scratch buffer, once normally. That
+       * gets the HUD and sprites in isolation without the overlay export,
+       * which arms cleanly but exports nothing. Needs no cooperation from the
+       * runner beyond retargeting PpuBeginDrawing between the two calls. */
+      if (s_host_map && s_hud_pixels && snes->vPos > 0) {
+        g_snes_ppu_dbg_layer_mask = 0x14;          /* BG3 | OBJ */
+        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, 0);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, 0);
+      }
       ppu_runLine(g_ppu, snes->vPos);
+    }
     if (snes->vPos == 0) {
       host_map_arm_captures();
       snes->inVblank = false; snes->inNmi = false;
@@ -1342,8 +1357,13 @@ static bool run_one_frame(void) {
  *
  * Opt-in: with nothing bound and no capture configured the export is a
  * documented no-op, so the default build stays byte-identical. */
-static bool s_host_map;
 static uint8_t *s_ov_bg3, *s_ov_obj;
+/* HUD-only pass: BG3 + OBJ rendered into their own buffer, independent of the
+ * overlay export. The export arms cleanly and reports success but writes no
+ * pixels, and every check on this side came back correct, so this route stops
+ * depending on it entirely -- it needs nothing from the runner but the public
+ * layer mask and a retargeted PpuBeginDrawing. */
+static uint32_t s_backdrop_argb;
 static int s_ov_pitch;
 
 static void host_map_init(void) {
@@ -1362,6 +1382,7 @@ static void host_map_init(void) {
    * That is exactly why both surfaces came back with zero non-transparent
    * pixels while binding and arming reported success. */
   s_ov_pitch = s_video_pitch;
+  s_hud_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
   s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
@@ -1418,13 +1439,24 @@ static void host_map_compose(void) {
   ScMapView_GetScroll(&sx, &sy);
   const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
   if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) return;
-  for (int y = 0; y < kVideoHeight; y++) {
-    uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-    const uint32_t *b3 = (const uint32_t *)(s_ov_bg3 + (size_t)y * s_ov_pitch);
-    const uint32_t *ob = (const uint32_t *)(s_ov_obj + (size_t)y * s_ov_pitch);
-    for (int x = 0; x < s_video_w; x++) {
-      if (b3[x] >> 24) dst[x] = b3[x];
-      if (ob[x] >> 24) dst[x] = ob[x];
+  /* Composite the HUD-only pass over the map.
+   *
+   * An isolated render still paints the backdrop, so "not black" is the wrong
+   * test -- the whole scratch buffer would count as opaque. Key on the actual
+   * backdrop colour instead, taken from CGRAM entry 0 through the same
+   * brightness the PPU applies, so it matches whatever the pass produced. */
+  if (s_hud_pixels) {
+    uint16_t bd = g_ppu->cgram[0];
+    s_backdrop_argb = 0xFF000000u
+        | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+        | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+        | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+    for (int y = 0; y < kVideoHeight; y++) {
+      uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+      const uint32_t *hud = (const uint32_t *)(s_hud_pixels + (size_t)y * s_video_pitch);
+      for (int x = 0; x < s_video_w; x++)
+        if (hud[x] != s_backdrop_argb && (hud[x] & 0x00FFFFFFu) != 0)
+          dst[x] = hud[x];
     }
   }
 }
