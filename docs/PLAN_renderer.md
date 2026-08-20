@@ -174,3 +174,38 @@ rectangle and when, and the host frontend composes. Only the last two are ours.
 
 Steps 2 and 3 are mechanical once 1 exists. Step 1 is where the effort is.
 
+## Stage 3 reached: widescreen margins now carry real map
+
+The original complaint about widescreen was that the map repeated left and
+right. That was the guest BG tilemap wrapping past its 32/64-tile width. The
+host renderer reads map cells by absolute position and does not wrap, so
+`SC_WIDESCREEN` and `SC_HOST_MAP` together do what widescreen alone could not.
+
+Measured at `SC_WIDESCREEN=96` (448x224): **0 of 96** left-margin columns are
+identical to a column 256px to their right. Independent map, not a repeat.
+
+### Seeing more map: what each control does
+
+| control | effect | ceiling |
+|---|---|---|
+| `SC_WIDESCREEN=<px/side>` | wider picture, more map columns | **96/side** (`kPpuExtraLeftRight`), i.e. 448x224 |
+| `+` / `-` | pixels per map cell, 2..32 | zoom out shows far more map in the same frame |
+| `--scale <n>` | window magnification only | no extra map |
+
+Zoom is the cheap way to see more map, and it has no PPU-imposed ceiling: at 4
+px per cell a 256-wide frame covers 64 map cells instead of 32.
+
+### Why the window cannot simply grow further
+
+The framebuffer is the PPU render target, and the PPU caps the widescreen
+border at `kPpuExtraLeftRight = 96` per side. Height has no equivalent knob at
+all -- 224 lines is the render.
+
+Going beyond that means decoupling the host map canvas from the PPU buffer:
+draw the map into a surface of arbitrary size and composite the guest 256x224
+output onto a region of it. That is a real change rather than a knob, and it
+raises a question worth answering first -- the HUD comes from the guest at a
+fixed 256x224, so on a much larger canvas it either floats in the middle,
+stretches, or has to be repositioned. None of those is obviously right, and it
+is a design decision rather than a bug.
+
