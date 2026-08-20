@@ -1255,6 +1255,60 @@ static bool s_fast_ticks = true;
 static int s_drag_turbo = 1;
 static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
 
+/* SC_NINTH=1: a ninth scenario slot, and the wider scroll it needs.
+ *
+ * The selector is a 4x2 grid bounded in three places (all 8-bit A):
+ *
+ *   03:ddba  LDA #$02 ; LDX $42 ; BPL +1 ; INC A ; STA $79
+ *              $79 = max column: 2, or 3 once every scenario is beaten
+ *   03:de00  CMP #$03 ... LDA #$06 / LDA #$07
+ *              column 3 maps to index 6 (row 0) or 7 (row 1)
+ *   03:de27  CPX #$0003 ; LDA #$0050 ; STA $22
+ *              column 3 scrolls the view to $50
+ *
+ * The ninth map already exists: the pointer table at 03:ce70 carries NINE
+ * entries and index 8 decodes cleanly (docs/ROM_MAP.md). Only the selector
+ * caps out. What does NOT exist is a ninth seed -- the per-scenario tables at
+ * 03:cec9 are eight entries, so index 8 would read past them into whatever
+ * follows.
+ *
+ * Done with PC hooks rather than ROM patches: each of the three sites is a
+ * value the host can simply overwrite the instant the ROM has written it,
+ * which needs no free ROM space and leaves every byte of the image intact. */
+static bool s_ninth_scenario;
+static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column */
+
+static void ninth_scenario_hook(unsigned bank, unsigned pc) {
+  if (!s_ninth_scenario || bank != 0x03) return;
+  switch (pc) {
+    case 0xddc1:   /* STA $79 has just set the max column -- widen it */
+      g_ram[0x79] = 4;
+      break;
+    case 0xde1a:   /* STA $40 has just set the scenario index */
+      if (g_ram[0x52] == 4) g_ram[0x40] = 8;
+      break;
+    case 0xde2f:   /* STA $22 has just set the smooth-scroll target */
+      if (g_ram[0x52] == 4) {
+        g_ram[0x22] = (uint8_t)(s_ninth_scroll & 0xff);
+        g_ram[0x23] = (uint8_t)((s_ninth_scroll >> 8) & 0xff);
+      }
+      break;
+    case 0xcec8:   /* 03:ce8b has just seeded from its 8-entry tables */
+      if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8) {
+        /* Index 8 read past the tables. Give it free play's seed, which is
+         * the only entry with no win condition and no starting city. */
+        g_ram[0x0c0d] = 0x0a; g_ram[0x0c0e] = 0x00;   /* event countdown */
+        g_ram[0x0b53] = 0xc7; g_ram[0x0b54] = 0x07;   /* year 1991 */
+        g_ram[0x0deb] = 0x00; g_ram[0x0dec] = 0x00;   /* city class */
+        g_ram[0x0ca5] = 0x00; g_ram[0x0ca6] = 0x00;
+        g_ram[0x0ba5] = 0x00; g_ram[0x0ba6] = 0x00;   /* population */
+        g_ram[0x0ba7] = 0x00; g_ram[0x0ba8] = 0x00;
+      }
+      break;
+    default: break;
+  }
+}
+
 /* Fire the scripted SC_DISASTER trigger once, at its frame. */
 static void sc_maybe_trigger_disaster(void) {
   if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
@@ -1312,6 +1366,7 @@ static bool run_one_frame(void) {
      * start" report: the same post-load dropout, unpatched.
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
+    if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
         (cpu->pc == 0xc8dd || cpu->pc == 0xce61)) apply_power_fix();
     /* LC_LZ5 decompressor instrumentation -- see the SC_DECOMP_TRACE comment
@@ -3388,6 +3443,10 @@ int main(int argc, char **argv) {
       if (v > 96) v = 96;
       s_ws_extra = v;
     } }
+  { const char *e = getenv("SC_NINTH");
+    if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_NINTH_SCROLL");
+    if (e && *e) s_ninth_scroll = (int)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_MAPGEN_TURBO");
     if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_mapgen_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
