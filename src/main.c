@@ -1408,6 +1408,16 @@ static void host_map_init(void) {
 /* Per frame, before any line renders. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
+  /* Keep the UI layers out of the widescreen margins.
+   *
+   * BG3 is a tilemap like BG2, so widening the picture tiles the toolbar and
+   * status bar sideways exactly as it did the map -- reported from play as
+   * "the UI seems repeated too". Clamping pins them to the authentic 256
+   * columns; the composite below then anchors that block to the left edge.
+   *
+   * BG2 is clamped too and costs nothing: it is the layer being replaced.
+   * Must be re-applied every frame, per the API contract. */
+  if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, 0x0F);
   memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
   memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
   PpuClearOverlayCaptures(g_ppu);
@@ -1463,12 +1473,23 @@ static void host_map_compose(void) {
         | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
         | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
         | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+    /* Anchor the UI to the upper-left rather than leaving it centred.
+     *
+     * With the layers clamped, the guest draws its UI into the authentic 256
+     * columns, which sit centred at x = s_ws_extra .. s_ws_extra+255 in a
+     * widened frame. Reading with that offset lands the block flush against
+     * the left edge, so the toolbar and status bar stay where they belong and
+     * the extra width goes entirely to map. */
+    const int ui_shift = s_ws_extra;
     for (int y = 0; y < kVideoHeight; y++) {
       uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
       const uint32_t *hud = (const uint32_t *)(s_hud_pixels + (size_t)y * s_video_pitch);
-      for (int x = 0; x < s_video_w; x++)
-        if (hud[x] != s_backdrop_argb && (hud[x] & 0x00FFFFFFu) != 0)
-          dst[x] = hud[x];
+      for (int x = 0; x < s_video_w; x++) {
+        int sxp = x + ui_shift;
+        if (sxp >= s_video_w) break;
+        uint32_t p = hud[sxp];
+        if (p != s_backdrop_argb && (p & 0x00FFFFFFu) != 0) dst[x] = p;
+      }
     }
   }
 }
