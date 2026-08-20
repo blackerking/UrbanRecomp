@@ -79,6 +79,12 @@ typedef SDL_Rect ScRect;
 #else
 uint8_t    g_ram[0x20000];
 #endif
+/* OUTSIDE the AOT guard, deliberately. Placed inside it, the plain build never
+ * saw the prototype, implicitly declared ScMapView_Render as returning `int`,
+ * and read all of EAX where the callee had only set AL -- so a function that
+ * returned false was observed as true, and the US-only gate silently passed on
+ * a German ROM. It compiled and linked without a word. */
+#include "simcity_mapview.h"
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -1310,6 +1316,41 @@ static bool run_one_frame(void) {
   return guard > 0;
 }
 
+/* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
+ * at whatever frame SC_DUMP_AT names.
+ *
+ * A verification hook, not a feature. tools/render_map.py was validated
+ * against real play first; dumping the C port the same way lets the two be
+ * diffed, so the port is checked against a known-good implementation rather
+ * than only against itself. Nothing here touches presentation yet. */
+static bool write_host_map_ppm(const char *path, int cols, int rows) {
+  const int w = cols * 8, h = rows * 8;
+  const int pitch = w * 4;
+  uint8_t *buf = (uint8_t *)malloc((size_t)pitch * h);
+  if (!buf) return false;
+  int sx = 0, sy = 0;
+  ScMapView_GetScroll(&sx, &sy);
+  if (!ScMapView_Render(buf, pitch, cols, rows, sx, sy)) {
+    fprintf(stderr, "host map: render refused (non-US ROM, or PPU/ROM not ready)\n");
+    free(buf); return false;
+  }
+  FILE *f = fopen(path, "wb");
+  if (!f) { free(buf); return false; }
+  fprintf(f, "P6\n%d %d\n255\n", w, h);
+  for (int y = 0; y < h; y++) {
+    const uint32_t *row = (const uint32_t *)(buf + (size_t)y * pitch);
+    for (int x = 0; x < w; x++) {
+      uint8_t rgb[3] = { (uint8_t)(row[x] >> 16), (uint8_t)(row[x] >> 8),
+                         (uint8_t)row[x] };
+      if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); free(buf); return false; }
+    }
+  }
+  fprintf(stderr, "host map: %dx%d from cell (%d,%d) -> %s\n",
+          w, h, sx, sy, path);
+  free(buf);
+  return fclose(f) == 0;
+}
+
 static bool write_ppm(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) return false;
@@ -2514,6 +2555,13 @@ static int run_qualification(uint64_t frames) {
       const char *dump_at = getenv("SC_DUMP_AT");
       const char *dump_path = getenv("SC_DUMP_PATH");
       if (dump_at && dump_path && f == strtoull(dump_at, NULL, 0)) {
+        { const char *hm = getenv("SC_HOST_MAP_DUMP");
+          if (hm && *hm) {
+            int hc = 32, hr = 28;
+            { const char *e = getenv("SC_HOST_MAP_CELLS");
+              if (e && *e) sscanf(e, "%d,%d", &hc, &hr); }
+            write_host_map_ppm(hm, hc, hr);
+          } }
         if (write_ppm(dump_path))
           fprintf(stderr, "dumped frame %llu to %s\n", (unsigned long long)f, dump_path);
         else
@@ -2868,6 +2916,7 @@ int main(int argc, char **argv) {
                      : region == 0x02 ? "Europe" : region == 0x06 ? "France"
                      : region == 0x09 ? "Germany" : "unknown";
     s_rom_is_us = (fp == 0xec01686au);
+    ScMapView_SetRomIsUs(s_rom_is_us);
     fprintf(stderr, "rom: %s  region=%s (%02x)  fnv=%08x%s\n",
             rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
   }
