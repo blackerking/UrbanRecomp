@@ -13,6 +13,27 @@ Deliberately offline first. The point is to prove the renderer reproduces what
 the guest draws BEFORE any of it goes near the host -- the framebuffer is the
 oracle, and this project has repeatedly paid for skipping that step.
 
+STATUS: the tile chain works -- the output is a legible map, confirmed from
+play ("clearly visible"). What is NOT yet right is agreement with the guest:
+sliding the render over the framebuffer for best alignment scores ~11% exact
+pixels on a real in-game frame (savestate_5, Las Vegas).
+
+Two false alarms already burned, both worth not repeating:
+
+  - The first comparison used savestate_3 believing it was Las Vegas. The user
+    had re-saved slots 1-4 that day, so it was parked on the DISASTER MENU --
+    the framebuffer held a menu, not a map, and 8.5% was measuring nothing.
+    Check $01df (screen) and $0040 (scenario) in the dump before comparing.
+  - A whole-screen exact-pixel score is a poor metric regardless: the guest
+    frame also carries the HUD, the cursor sprite and status text, none of
+    which this renders. Compare the map region only, or compare structure.
+
+Remaining candidates for the mismatch, none yet separated: whether $7E2440 is
+the right palette source in a given state (it doubles as a menu tilemap
+buffer), whether $01bd/$01bf are in cell units, and whether one map cell is
+really one 8x8 tile -- the scroll bounds imply a ~25x22 cell view while 256px
+is 32 tiles, and those do not reconcile.
+
 Usage:
     python tools/render_map.py <wram.bin> <ppu.bin> <rom.sfc> <out.png>
                                [--scroll-x N --scroll-y N --w N --h N]
