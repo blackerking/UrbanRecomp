@@ -209,3 +209,37 @@ fixed 256x224, so on a much larger canvas it either floats in the middle,
 stretches, or has to be repositioned. None of those is obviously right, and it
 is a design decision rather than a bug.
 
+## Where the host renderer stands
+
+Working, opt-in via `SC_HOST_MAP=1`:
+
+- Map drawn entirely host-side from `$7F0200` + VRAM CHR, at 60fps
+- Master brightness applied, so fades match the guest
+- HUD, sprites and **any** menu composited back from a second render pass that
+  captures every layer except BG2 -- self-correcting, no screen-mode flag needed
+- Zoom on `+`/`-`, 2..32 px per cell (8 native)
+- Widescreen margins carry real map, not a tilemap repeat
+- Non-map screens pillarbox instead of tiling
+
+### Known gaps
+
+**The cursor at non-native zoom.** Sprites come from the guest at a fixed 8 px
+per cell while the map scales, so anything other than zoom 8 has the cursor
+pointing at the wrong cell. Native zoom is exact.
+
+**The overlay export is unused.** `PpuBindOverlaySurface` /
+`PpuSetOverlayCapture` arm cleanly, report success, and export zero pixels;
+every condition on this side checked out (mode 1, hooks reached, bindings
+surviving reset, clear-before-draw order, matching y convention). The
+layer-mask two-pass route replaced it. Worth reporting upstream if someone
+confirms it independently -- it may be a real bug in the export path.
+
+**Region-locked.** The tile tables at `02:d6a9` are US addresses, so the
+renderer refuses on E/F/G/J. Those images run fine on the stock path.
+
+### Cost
+
+One extra PPU pass per visible line while enabled. The guest still computes
+everything; only the map is drawn differently, so every existing check remains
+valid and the default build is byte-identical to baseline.
+
