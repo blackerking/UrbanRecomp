@@ -759,6 +759,15 @@ static void handle_pos_stuff(void) {
       ppu_runLine(g_ppu, snes->vPos);
     }
     if (snes->vPos == 0) {
+      /* Clamp the BG layers out of the widescreen margins on EVERY screen,
+       * not only where the host map composes.
+       *
+       * Tied to the host map it only helped the city view, and a menu screen
+       * ($01df 0/1/2/4) still tiled its background sideways -- reported from
+       * play on a clean start, which sits at $01df == 4. The clamp belongs to
+       * widescreen itself; whether the map is being replaced is a separate
+       * question. Re-applied per frame, as the API requires. */
+      if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, 0x0F);
       host_map_arm_captures();
       snes->inVblank = false; snes->inNmi = false;
       /* Real "HDMA init": (re)latch each currently-enabled channel's table
@@ -1417,7 +1426,6 @@ static void host_map_arm_captures(void) {
    *
    * BG2 is clamped too and costs nothing: it is the layer being replaced.
    * Must be re-applied every frame, per the API contract. */
-  if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, 0x0F);
   memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
   memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
   PpuClearOverlayCaptures(g_ppu);
@@ -1440,7 +1448,30 @@ static void host_map_compose(void) {
    * states). Without this the map painted over the scenario select, the
    * disaster page and everything else -- reported from play as "menu broken",
    * and entirely my omission rather than a renderer fault. */
-  if (g_ram[0x01df] != 3) return;
+  if (g_ram[0x01df] != 3) {
+    /* Not the city view, so no host map -- but in widescreen the guest still
+     * tiles this screen's background sideways into the margins, and clamping
+     * the BG layers does not stop all of it (measured: 26 of 96 margin columns
+     * still repeated on a clean start, which sits at $01df == 4).
+     *
+     * Handle it deterministically instead: move the authentic 256 columns to
+     * the left edge -- matching where the UI is anchored in map view -- and
+     * fill what is left with the backdrop. Pillarboxed rather than repeated,
+     * and it cannot depend on which layer leaked. */
+    if (s_ws_extra > 0 && g_ppu) {
+      uint16_t bd = g_ppu->cgram[0];
+      uint32_t fill = 0xFF000000u
+          | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+          | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+          | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+      for (int y = 0; y < kVideoHeight; y++) {
+        uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+        memmove(row, row + s_ws_extra, (size_t)kVideoWidth * 4);
+        for (int x = kVideoWidth; x < s_video_w; x++) row[x] = fill;
+      }
+    }
+    return;
+  }
   { static int shown = 0;
     if (shown < 3) { shown++;
       int n3 = 0, no = 0;
