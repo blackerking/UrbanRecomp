@@ -913,6 +913,9 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * What it existed for survives as MAPGEN TURBO, which uses the same two
  * load-specific triggers but only inside the generation/decompression window,
  * where nothing is being listened to either. */
+static bool s_generating;
+static unsigned long s_gen_trigger_hits;
+static unsigned long s_gen_boost_frames;
 static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
 
 /* Guest frames per host frame while the map-generation / decompression loop is
@@ -1279,8 +1282,24 @@ static bool run_one_frame(void) {
     /* Unconditional now that AUTO TURBO is gone. This only opens the
      * generation/decompression window; whether anything speeds up is MAPGEN
      * TURBO's decision, and 1 means off. */
-    if ((cpu->k == 0x03 && cpu->pc == 0xd862) || (cpu->k == 0x00 && cpu->pc == 0x90dd))
+    /* Hold the boost for the WHOLE generation, not a fixed window after the
+     * trigger.
+     *
+     * 03:d862 is the PRNG seeding loop -- 1 to 32 iterations, over in an
+     * instant. The actual work is the two JSLs after it, 01:f1ed (terrain
+     * features) and 02:923f. Measured with a 20-frame holdoff: 4 trigger hits,
+     * 20 boosted frames, and the wait untouched, because the holdoff expired
+     * long before the generator finished.
+     *
+     * 03:d871 is where execution resumes once both JSLs have returned, so the
+     * pair bounds the generation exactly. The decompressor at 00:90dd keeps a
+     * plain holdoff -- it has no equivalent end marker and is short. */
+    if (cpu->k == 0x03 && cpu->pc == 0xd862) { s_gen_trigger_hits++; s_generating = true; }
+    if (cpu->k == 0x03 && cpu->pc == 0xd871) s_generating = false;
+    if (cpu->k == 0x00 && cpu->pc == 0x90dd) {
+      s_gen_trigger_hits++;
       s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
+    }
     /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
      * the map already unpacked and SRAM already restored. */
     if (s_power_fix && cpu->k == 0x03 && cpu->pc == 0xc8dd) apply_power_fix();
@@ -1384,6 +1403,7 @@ static bool run_one_frame(void) {
     if (s_addr_trace_last_ed == 0xff) { s_addr_trace_last_ed = g_ram[0x01ed]; s_addr_trace_armed = false; }
     else if (!s_addr_trace_armed && g_ram[0x01ed] != s_addr_trace_last_ed) s_addr_trace_armed = true;
   }
+  if (s_generating || s_gen_loop_active_frames > 0) s_gen_boost_frames++;
   if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
 }
@@ -2944,6 +2964,8 @@ static int run_qualification(uint64_t frames) {
             interp_tier_hit_count(), sites, clean, bail);
     fprintf(stderr, "\n"); }
 #endif
+  fprintf(stderr, "gen: trigger_hits=%lu boosted_frames=%lu turbo=%d\n",
+          s_gen_trigger_hits, s_gen_boost_frames, s_mapgen_turbo);
   fprintf(stderr,
           "qualify: %s frames=%llu master=%llu logic_changes=%llu "
           "logic_stall_max=%llu audio_samples=%u audio_active_frames=%llu "
@@ -3355,6 +3377,8 @@ int main(int argc, char **argv) {
       if (v > 96) v = 96;
       s_ws_extra = v;
     } }
+  { const char *e = getenv("SC_MAPGEN_TURBO");
+    if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_mapgen_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
     if (e && *e && *e != '0') s_host_map = true; }
   if (s_ws_extra > 0) {
@@ -3868,7 +3892,7 @@ int main(int argc, char **argv) {
      * the player is staring at; the point is to collapse it, and nothing is
      * being watched while the generator runs. Tab-held fast-forward keeps its
      * modest 6x, since that IS being watched. */
-    const bool generating = s_gen_loop_active_frames > 0;
+    const bool generating = s_generating || s_gen_loop_active_frames > 0;
     bool fast_forward = keys[SDL_SCANCODE_TAB] || generating;
     int frames_this_iter = generating ? s_mapgen_turbo
                          : fast_forward ? 6
