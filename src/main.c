@@ -1348,7 +1348,20 @@ static int s_ov_pitch;
 
 static void host_map_init(void) {
   if (!s_host_map || !g_ppu || s_ov_bg3) return;
-  s_ov_pitch = kVideoWidthMax * 4;
+  /* Pitch MUST match the render width, not the maximum allocation.
+   *
+   * PpuWriteOverlayRenderLine centres the authentic 256-wide capture inside
+   * whatever surface it is given:
+   *
+   *     width         = pitch / 4
+   *     texture_extra = max((width - 256) / 2, 0)
+   *     dst[x + texture_extra] = ...
+   *
+   * A 448-wide surface therefore receives the HUD at columns 96..351 while a
+   * composite reading from column 0 sees only the transparent left margin.
+   * That is exactly why both surfaces came back with zero non-transparent
+   * pixels while binding and arming reported success. */
+  s_ov_pitch = s_video_pitch;
   s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
