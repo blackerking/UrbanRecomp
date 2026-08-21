@@ -1418,11 +1418,18 @@ static void replay_free_tick(void) {
   if ((g_ram[0x3e] | (g_ram[0x3f] << 8)) != 3) return;
   if (s_replay_free == 1)
     fprintf(stderr, "[replay] free play engaged on scenario %d at frame %llu"
-            " ($3e 3->1, $0c0d %u->0)\n", g_ram[0x40],
+            " ($3e 3->2, $0c0d %u->0)\n", g_ram[0x40],
             (unsigned long long)s_frames,
             (unsigned)(g_ram[0x0c0d] | (g_ram[0x0c0e] << 8)));
   s_replay_free = 2;
-  g_ram[0x3e] = 1; g_ram[0x3f] = 0;
+  /* 2, not 1. $3e == 1 is the PRACTICE map, not free play generally:
+   * 03:b919 CMP #$0001 / BEQ $b967 jumps PAST the random-disaster
+   * threshold, and it also fires the Dr. Wright tutorial intro. Setting 1
+   * put a free replay into practice mode -- reported as the advice popup
+   * appearing on a freshly started free scenario. 2 is what ordinary
+   * free-play cities hold (save states 1/7/8/9) and still fails every
+   * == 3 scenario gate. */
+  g_ram[0x3e] = 2; g_ram[0x3f] = 0;
   g_ram[0x0c0d] = 0; g_ram[0x0c0e] = 0;   /* scripted-event countdown off */
 }
 

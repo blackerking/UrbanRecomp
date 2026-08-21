@@ -392,6 +392,60 @@ mirrors during the joypad-transposition work and may be describing a different
 pair; but for `$c9`/`$ca` specifically, the layout above is what actually
 behaved correctly in play.
 
+### `$3e = 1` is the practice map, not free play
+
+The first cut of the replay menu set `$003e = 1` and that was wrong. `03:b916`
+reads it as:
+
+```
+03:b916  LDA $003e ; CMP #$0001 ; BEQ $b967   ; ==1 jumps PAST the threshold
+03:b91e  LDA $0b57 ; ASL A ; TAY ; LDA $b969,Y
+```
+
+so `== 1` *skips* the difficulty-indexed random-disaster threshold rather than
+selecting it, and it also fires the Dr. Wright "let's practice our city
+building techniques" intro. That is practice mode. Reported from play as the
+advice popup appearing on a freshly started free scenario.
+
+Ordinary free-play cities hold **`$3e = 2`** (save states 1, 7, 8, 9). It fails
+every `== 3` scenario gate exactly as 1 does, without the practice behaviour,
+so that is what a free replay should use.
+
+Verified end to end from `savestate_4` by scripting B / Down / B on the
+selector:
+
+| pick | `$003e` | `$0040` |
+|---|---|---|
+| STANDARD | 3 (scenario, untouched) | 6 |
+| FREE | **2** | 6 (Las Vegas map intact) |
+
+### Open: the scenario briefing fax still shows on a FREE replay
+
+The briefing is fired by the load path and keyed on `$0040`, not on `$3e`, so
+it appears identically on STANDARD and FREE starts — captured both ways at
+frame 1100 and the two frames are the same fax. Suppressing it for a free
+replay needs the fax trigger located first; `$14 = 0x0d` looks like the
+message-screen state (`savestate_5` sits in it, and X moves it to `0x0b`) but
+that state is presumably shared with ordinary in-play advisor faxes, which a
+free city should still get.
+
+### Open: fax text drops the first character of every word
+
+Unrelated to the replay work — a **STANDARD** Las Vegas start shows it too.
+The briefing renders as
+
+> as egas, he orld's argest ambling ity, as everely amaged y udden ttack f
+> nidentified lying bjects.
+
+i.e. "Las Vegas, the world's largest gambling city, was severely damaged by a
+sudden attack of Unidentified Flying Objects" with each word's leading
+character missing. Not a typing animation: frames 1250 and 1500 are pixel
+identical, so the text is settled. Both capitals and lowercase are affected
+("objects" -> "bjects"), which points at the word-advance in the text renderer
+rather than a glyph or tile problem. Captured headless with `SC_HOST_MAP=0`,
+so the host map renderer is not involved. Needs confirming against live play
+before being treated as a recomp defect.
+
 ### `$42`, the completion mask
 
 `03:ded0` walks it one `LSR` per scenario over eight iterations, drawing a mark
