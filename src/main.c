@@ -1281,13 +1281,19 @@ static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column */
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
   switch (pc) {
-    case 0xddc1:   /* STA $79 has just set the max column -- widen it */
+    case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
+                    * Hooks fire BEFORE the opcode at pc, so this has to sit
+                    * on the instruction after the store, not on it. */
       g_ram[0x79] = 4;
       break;
-    case 0xde1a:   /* STA $40 has just set the scenario index */
+    case 0xde1c:   /* after 03:de1a STA $40, and also the target of the
+                    * 03:ddc7 branch taken when no direction is pressed, so
+                    * the index stays right on idle frames too */
       if (g_ram[0x52] == 4) g_ram[0x40] = 8;
       break;
-    case 0xde2f:   /* STA $22 has just set the smooth-scroll target */
+    case 0xde31:   /* after 03:de2f STA $22 -- and necessarily here rather
+                    * than on it, because for column 4 the 03:de2a BNE skips
+                    * that store completely and it never executes */
       if (g_ram[0x52] == 4) {
         g_ram[0x22] = (uint8_t)(s_ninth_scroll & 0xff);
         g_ram[0x23] = (uint8_t)((s_ninth_scroll >> 8) & 0xff);
@@ -1309,6 +1315,108 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * REPLAY MENU -- STANDARD / FREE when a beaten scenario is chosen.
+ *
+ * A finished scenario is worth replaying two ways: again as a scenario, or
+ * just as a city on that map. The ROM only offers the first. The second turns
+ * out to be a one-word change once the city is up, because $003e is the mode
+ * byte and every reader of it is in-game logic rather than the loader:
+ *
+ *   03:b863  == 3   scripted-disaster dispatcher   | scenario
+ *   03:c502  == 3   win/lose objective check       | only
+ *   03:e2f5  == 3   win-mark setter                |
+ *   03:b916  == 1   free play's random-disaster threshold  | free play
+ *   03:c3d5  == 1   two further simulation branches        | only
+ *   03:c476  == 1                                          |
+ *   03:cd96         save path: $3e -> SRAM $70006c
+ *
+ * Nothing on the map-load path looks at it -- the map is picked by $0040
+ * alone (03:ce2e) -- so a free replay loads the scenario exactly as always
+ * and only the rules differ. $3e = 1 is not a synthetic value either: it is
+ * what save states 0/2/3/4, ordinary free-play cities, actually hold.
+ *
+ * Because 03:cd96 writes $3e into SRAM, a free replay saved to a slot
+ * reloads as free play. That is the intent, but the choice does stick.
+ *
+ * Which scenarios are finished comes from $42, the completion mask the
+ * win-mark drawer at 03:ded0 walks one LSR per scenario, bit N = scenario N
+ * (03:e30a builds it, 03:e326 commits it to SRAM $700007). So the menu
+ * offers itself on exactly the entries that already show a mark.
+ */
+static bool s_replay_menu = true;   /* SC_REPLAY_MENU=0 to disable */
+static bool s_replay_open;
+static int  s_replay_sel;           /* 0 = STANDARD, 1 = FREE */
+static int  s_replay_free;          /* 0 off, 1 armed, 2 active */
+
+/* The grid index under the cursor, recomputed the way 03:de0e does rather
+ * than read back from $40: 03:ddc7 branches past the whole index computation
+ * when no direction is pressed, so $40 is stale on a confirm that follows no
+ * cursor movement -- which is precisely the common case. */
+static int replay_index_now(void) {
+  int col = g_ram[0x52], row = g_ram[0x54] & 1;
+  if (s_ninth_scenario && col == 4) return 8;
+  if (col == 3) return 6 + row;
+  return row * 3 + col;
+}
+
+static bool replay_finished(int idx) {
+  if (idx < 0 || idx > 7) return false;   /* the ninth is never "beaten" */
+  return (g_ram[0x42] & (1u << idx)) != 0;
+}
+
+/* Hooked at the selector's per-frame entry, ahead of both the direction read
+ * at 03:ddc3 and the confirm read at 03:de46, so blanking the new-press word
+ * here freezes the cursor as well as the confirm. A hook at the confirm alone
+ * would leave the selection moving underneath the open menu. */
+static void replay_menu_hook(unsigned bank, unsigned pc) {
+  if (bank != 0x03 || pc != 0xddb6) return;
+  uint8_t lo = g_ram[0xc9], hi = g_ram[0xca];  /* $c9 new-press, read 16-bit */
+  if (s_replay_open) {
+    g_ram[0xc9] = 0; g_ram[0xca] = 0;
+    if (hi & 0x08) s_replay_sel = 0;           /* Up   */
+    if (hi & 0x04) s_replay_sel = 1;           /* Down */
+    if (lo & 0x80) {                           /* A -- back out */
+      s_replay_open = false;
+    } else if (hi & 0x80) {                    /* B -- confirm */
+      s_replay_open = false;
+      s_replay_free = (s_replay_sel == 1) ? 1 : 0;
+      fprintf(stderr, "[replay] scenario %d: %s\n", replay_index_now(),
+              s_replay_free ? "FREE" : "STANDARD");
+      g_ram[0xca] = 0x80;                      /* hand the press to the ROM */
+    }
+    return;
+  }
+  /* Reaching the selector with a free replay still latched means the player
+   * has left that city, so drop it before it can colour the next start. */
+  if (s_replay_free == 2) s_replay_free = 0;
+  if ((hi & 0x80) && replay_finished(replay_index_now())) {
+    s_replay_open = true;
+    s_replay_sel = 0;
+    fprintf(stderr, "[replay] menu opened on beaten scenario %d ($42=%04x)\n",
+            replay_index_now(), g_ram[0x42] | (g_ram[0x43] << 8));
+    g_ram[0xc9] = 0; g_ram[0xca] = 0;          /* swallow the opening press */
+  }
+}
+
+/* Armed -> active on the frame the game declares scenario mode, rather than
+ * at a chosen store site: no store to $003e is reachable in banks 00-07 apart
+ * from the SRAM load at 03:ca57, so waiting for the value is the only route
+ * that does not depend on finding the writer. Stays active afterwards so a
+ * later rewrite cannot put the scenario rules back. */
+static void replay_free_tick(void) {
+  if (!s_replay_free) return;
+  if ((g_ram[0x3e] | (g_ram[0x3f] << 8)) != 3) return;
+  if (s_replay_free == 1)
+    fprintf(stderr, "[replay] free play engaged on scenario %d at frame %llu"
+            " ($3e 3->1, $0c0d %u->0)\n", g_ram[0x40],
+            (unsigned long long)s_frames,
+            (unsigned)(g_ram[0x0c0d] | (g_ram[0x0c0e] << 8)));
+  s_replay_free = 2;
+  g_ram[0x3e] = 1; g_ram[0x3f] = 0;
+  g_ram[0x0c0d] = 0; g_ram[0x0c0e] = 0;   /* scripted-event countdown off */
+}
+
 /* Fire the scripted SC_DISASTER trigger once, at its frame. */
 static void sc_maybe_trigger_disaster(void) {
   if (s_disaster_bit < 0 || s_frames < s_disaster_frame) return;
@@ -1324,6 +1432,7 @@ static bool run_one_frame(void) {
 #endif
   if (s_fast_ticks) { g_ram[0x01f3] = 0; g_ram[0x01f4] = 0; }
   sc_maybe_trigger_disaster();
+  replay_free_tick();
   sc_maybe_trigger_scenario_event();
   scenario_event_tick();
   service_disaster_menu8();
@@ -1367,6 +1476,7 @@ static bool run_one_frame(void) {
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
+    if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
         (cpu->pc == 0xc8dd || cpu->pc == 0xce61)) apply_power_fix();
     /* LC_LZ5 decompressor instrumentation -- see the SC_DECOMP_TRACE comment
@@ -2543,6 +2653,7 @@ static SettingDesc s_settings[] = {
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
+  { "REPLAY MENU",           kSettingBool, &s_replay_menu,         0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "MAPGEN TURBO",          kSettingCycle, &s_mapgen_turbo,        0,    NULL,
     kMapgenTurbos, (int)(sizeof(kMapgenTurbos) / sizeof(kMapgenTurbos[0])) },
@@ -2736,6 +2847,54 @@ static void render_settings_menu(SDL_Renderer *renderer) {
     draw_text(renderer, menu_x + pad, ty, px - 1, "0123456789");
   }
 
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
+/* The STANDARD / FREE box. Deliberately small and centred rather than styled
+ * like the ROM's own dialogs: this is a host overlay drawn after the frame is
+ * copied to the renderer, exactly like the settings menu above, so it shares
+ * that font and needs nothing from the guest's text system. */
+static void render_replay_menu(SDL_Renderer *renderer) {
+  int out_w = 0, out_h = 0;
+  SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+  int px = out_h / 120;
+  if (px > 4) px = 4;
+  if (px < 1) px = 1;
+  const int line_h = 6 * px, pad = 4 * px;
+  static const char *const kRows[2] = { "STANDARD", "FREE" };
+  static const char *const kTitle = "REPLAY SCENARIO";
+
+  int inner = text_width(px, kTitle);
+  for (int i = 0; i < 2; i++) {
+    int w = text_width(px, kRows[i]) + 4 * px;   /* rows are indented */
+    if (w > inner) inner = w;
+  }
+  const int menu_w = inner + pad * 2;
+  const int menu_h = pad * 2 + line_h * 5;
+  const int menu_x = (out_w - menu_w) / 2;
+  const int menu_y = (out_h - menu_h) / 2;
+
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 210);
+  ScRect bg = SC_RECT(menu_x, menu_y, menu_w, menu_h);
+  SDL_RenderFillRect(renderer, &bg);
+  SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+  SDL_RenderDrawRect(renderer, &bg);
+
+  int ty = menu_y + pad;
+  SDL_SetRenderDrawColor(renderer, 150, 150, 255, 255);
+  draw_text(renderer, menu_x + pad, ty, px, kTitle);
+  ty += line_h * 2;
+  for (int i = 0; i < 2; i++) {
+    bool sel = (i == s_replay_sel);
+    /* Same yellow-when-selected convention as the settings rows. */
+    SDL_SetRenderDrawColor(renderer, 255, 255, sel ? 0 : 255, 255);
+    draw_text(renderer, menu_x + pad + 4 * px, ty, px, kRows[i]);
+    ty += line_h;
+  }
+  ty += line_h - px;
+  SDL_SetRenderDrawColor(renderer, 170, 170, 170, 255);
+  draw_text(renderer, menu_x + pad, ty, px - 1, "B PICK   A BACK");
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
@@ -3445,6 +3604,15 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_REPLAY_MENU");
+    if (e && *e) s_replay_menu = (*e != '0'); }
+  /* SC_REPLAY_FREE=1 arms the free-play latch without going through the menu.
+   * The selector screen is unreachable from every save state, so this is the
+   * only way to exercise the half of the feature that changes the rules --
+   * and it doubles as a way to turn any scenario already in progress into a
+   * free-play city. */
+  { const char *e = getenv("SC_REPLAY_FREE");
+    if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
     if (e && *e) s_ninth_scroll = (int)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_MAPGEN_TURBO");
@@ -4136,6 +4304,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
                 (int)_lok, pitch, (int)s_video_pitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
+    if (s_replay_open) render_replay_menu(renderer);
 
     if (s_menu_preview && --s_menu_preview_countdown <= 0) {
       if (write_renderer_ppm(renderer, "menu_preview.ppm"))

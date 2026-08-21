@@ -293,6 +293,80 @@ iterations of `ASL $0c ; ROL $0e ; ROL $10 ; ROL $12` with a conditional
 direct page. It is one of the hottest routines in the game -- the simulation's
 arithmetic workhorse.
 
+## `$003e` — the game-mode byte, and free play on a beaten scenario
+
+`$003e` decides whether a running city is a *scenario* or ordinary free play.
+Measured across the ten save states:
+
+| value | meaning | states |
+|---|---|---|
+| `1` | free play | 0, 2, 3, 4 |
+| `2` | free play, restored from a save slot | 1, 7, 8, 9 |
+| `3` | **scenario** | 5, 6 (Las Vegas, `$0040 = 6`) |
+
+Exactly one store to it is reachable in banks 00-07 — `03:ca57`, in the SRAM
+load path, from `$70006c`. `03:cd96` is the matching save. Whatever sets it to
+3 on a fresh scenario start is not an ordinary `STA`, so host code that wants to
+change the mode should wait for the *value* rather than hook a site.
+
+Every reader is in-game simulation logic. **Nothing on the map-load path reads
+it** — the map is chosen by `$0040` alone (`03:ce2e`):
+
+| site | test | what it gates |
+|---|---|---|
+| `03:b863` | `== 3` | scripted-disaster dispatcher (`JSR $b96f` at `03:b86b`) |
+| `03:c502` | `== 3` | win/lose objective check, via `$0ccb` |
+| `03:e2f5` | `== 3` | win-mark setter (writes `$42`, commits SRAM `$700007`) |
+| `03:b916` | `== 1` | free play's own random-disaster threshold, by difficulty `$0b57` |
+| `03:c3d5` | `== 1` | simulation branch (`Y` offset into `03:c11a`) |
+| `03:c476` | `== 1` | simulation branch (guards the block at `03:c47e`) |
+
+So a scenario map can be played under free-play rules by loading it normally and
+then setting `$003e = 1`. That is not a synthetic value — it is what an ordinary
+free-play city holds.
+
+### Confirmed by execution
+
+From `savestate_5` (Las Vegas, `$3e = 3`, `$0040 = 6`, `$0c0d = 304`), forcing
+the mode to 1 over 300 frames:
+
+| site | scenario mode | forced to free |
+|---|---|---|
+| `03:b863` gate | EXECUTED | EXECUTED |
+| `03:b86b` `JSR $b96f` dispatcher | EXECUTED | **not executed** |
+
+The gate keeps running and the dispatch under it stops, which is the whole
+claim. `$0040` stays 6 throughout: the map is untouched, only the rules change.
+`03:c50b` (the win-check body) was not reached in **either** run within 300
+frames, so that arm is gated on the same byte but is not independently
+confirmed here.
+
+Because `03:cd96` writes `$3e` into SRAM, a free replay saved to a slot reloads
+as free play. That is intended, but the choice does stick to the save.
+
+### `$42`, the completion mask
+
+`03:ded0` walks it one `LSR` per scenario over eight iterations, drawing a mark
+from the coordinate tables at `03:df20`/`03:df30`, so **bit N = scenario N
+beaten**. `03:e30a` builds it and `03:e326` commits it to SRAM `$700007`; once
+the low bits are all set `03:e31c` also sets bit 15, which is what `03:ddbc`
+tests to unlock column 3. Save states 5 and 6 carry `$42 = 0x807f`.
+
+### Host hooks fire *before* the opcode at `pc`
+
+`run_one_frame()` tests `cpu->pc` and then calls `interp816_runOpcode()`, so a
+hook keyed to the address of a store runs **before** that store and is
+immediately overwritten by it. A hook that wants to override a written value
+must sit on the *following* instruction. This is not hypothetical: the first
+cut of the `SC_NINTH` hooks used `03:ddc1`/`03:de1a`/`03:de2f`, the three `STA`
+addresses themselves, and all three were clobbered. Corrected to `03:ddc3`,
+`03:de1c`, `03:de31`.
+
+`03:de2f` was doubly wrong: for column 4 the branch at `03:de2a` skips that
+store entirely, so the instruction never executes at all and a hook on it could
+never have fired. `03:de31` is on both paths. `03:cec8` was already correct by
+accident — it is the `RTS` ending the seed routine, so it is after the stores.
+
 ## Cartridge SRAM layout (`$700000`+)
 
 SRAM is **not** part of `g_ram` -- it lives in the cart model, so WRAM dumps do
