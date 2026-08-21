@@ -344,6 +344,54 @@ confirmed here.
 Because `03:cd96` writes `$3e` into SRAM, a free replay saved to a slot reloads
 as free play. That is intended, but the choice does stick to the save.
 
+### Verified live, and the fixture that made it possible
+
+`savestate_3` and `savestate_4` sit **on the scenario-select screen** (`03:ddb6`
+executes on load); `savestate_4` also carries `$42 = 0x807f`, so the win marks
+are set. These are the first states that reach the selector at all, and every
+claim below is measured from `savestate_4`.
+
+`SC_NINTH`, driving Right (`kPad_Right = 0x0080` — the runner uses **serial**
+pad order, so Right is `$0080` and A is `$0100`, not the 16-bit register order):
+
+| | column | `$0040` | `$22` scroll |
+|---|---|---|---|
+| off | clamps at 3 | 6 | `$50` |
+| on | **4** | **8** | **`$a0`** |
+
+Before the off-by-one correction this feature did nothing at all: `$79` stayed
+3 because `03:ddc1` fired ahead of its own `STA`.
+
+The replay menu was confirmed in play the same session:
+
+```
+[replay] selector reached, $42=0000 col=0 row=0 idx=0
+[unlock] scenario win marks $700007: 0000 -> 807f
+[replay] B on idx=6 finished=1 $42=807f
+[replay] menu opened on beaten scenario 6 ($42=807f)
+[replay] menu opened on beaten scenario 2 ($42=807f)
+[replay] scenario 2: FREE
+[replay] free play engaged on scenario 2 at frame 5150 ($3e 3->1)
+```
+
+### `$c9`/`$ca` bit layout, as measured
+
+Reaching FREE required Down then B and both registered, which pins the layout
+of the edge-detect high byte `$ca`: **bit 7 = B, bit 3 = Up, bit 2 = Down,
+bit 1 = Left, bit 0 = Right** — i.e. `$c9`/`$ca` hold the ordinary 16-bit
+joypad word (`$c9` low byte = A/X/L/R plus the four unconnected zero bits,
+`$ca` high byte = B/Y/Select/Start/Up/Down/Left/Right). The ROM agrees:
+`03:ddc3 LDA $ca; AND #$0f` tests directions, `AND #$0c` Up/Down, `AND #$03`
+Left/Right, and `03:de46 LDA $c9(16); AND #$8000` tests B.
+
+This **contradicts** the `$00ca` row in the WRAM table above, which says `$ca`'s
+low nibble is hardware-guaranteed zero and puts the direction bits in `$c9`.
+Those two rows appear to describe the bytes the other way round. Left in place
+rather than rewritten because that row was derived from the `$011b`/`$011c`
+mirrors during the joypad-transposition work and may be describing a different
+pair; but for `$c9`/`$ca` specifically, the layout above is what actually
+behaved correctly in play.
+
 ### `$42`, the completion mask
 
 `03:ded0` walks it one `LSR` per scenario over eight iterations, drawing a mark

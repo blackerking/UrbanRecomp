@@ -1372,6 +1372,11 @@ static bool replay_finished(int idx) {
 static void replay_menu_hook(unsigned bank, unsigned pc) {
   if (bank != 0x03 || pc != 0xddb6) return;
   uint8_t lo = g_ram[0xc9], hi = g_ram[0xca];  /* $c9 new-press, read 16-bit */
+  { static bool seen;
+    if (!seen) { seen = true;
+      fprintf(stderr, "[replay] selector reached, $42=%04x col=%u row=%u idx=%d\n",
+              g_ram[0x42] | (g_ram[0x43] << 8), g_ram[0x52], g_ram[0x54],
+              replay_index_now()); } }
   if (s_replay_open) {
     g_ram[0xc9] = 0; g_ram[0xca] = 0;
     if (hi & 0x08) s_replay_sel = 0;           /* Up   */
@@ -1390,6 +1395,10 @@ static void replay_menu_hook(unsigned bank, unsigned pc) {
   /* Reaching the selector with a free replay still latched means the player
    * has left that city, so drop it before it can colour the next start. */
   if (s_replay_free == 2) s_replay_free = 0;
+  if (hi & 0x80)
+    fprintf(stderr, "[replay] B on idx=%d finished=%d $42=%04x\n",
+            replay_index_now(), (int)replay_finished(replay_index_now()),
+            g_ram[0x42] | (g_ram[0x43] << 8));
   if ((hi & 0x80) && replay_finished(replay_index_now())) {
     s_replay_open = true;
     s_replay_sel = 0;
