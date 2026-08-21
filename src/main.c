@@ -710,6 +710,11 @@ static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
+/* Layers taken into the HUD pass. SC_HUD_MASK overrides it: bit0 BG1,
+ * bit1 BG2, bit2 BG3, bit3 BG4, bit4 OBJ. Adjustable because "every layer
+ * except BG2" also drags in whatever BG1 paints behind the toolbar, which
+ * then composites over the host map. */
+static uint8_t s_hud_mask = (uint8_t)~0x02;
 
 static void handle_pos_stuff(void) {
   Snes *snes = g_snes;
@@ -750,7 +755,7 @@ static void handle_pos_stuff(void) {
          * Self-correcting by construction, which is why it beats hunting for
          * a "menu is open" flag -- a search through the WRAM delta across the
          * B press turned up only transient direct-page scratch. */
-        g_snes_ppu_dbg_layer_mask = (uint8_t)~0x02;   /* all but BG2 */
+        g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
         PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, 0);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask = 0xff;
@@ -3627,6 +3632,8 @@ int main(int argc, char **argv) {
    * only way to exercise the half of the feature that changes the rules --
    * and it doubles as a way to turn any scenario already in progress into a
    * free-play city. */
+  { const char *e = getenv("SC_HUD_MASK");
+    if (e && *e) s_hud_mask = (uint8_t)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_REPLAY_FREE");
     if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
