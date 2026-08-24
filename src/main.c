@@ -653,6 +653,14 @@ typedef struct {
   uint16_t indirAddr;    /* current indirect data pointer (mode & 0x40 only) */
 } HdmaChanState;
 static HdmaChanState s_hdma[8];
+/* SC_HOST_HDMA=0 turns this host's own HDMA off.
+ *
+ * It exists because the runner's interpreter tier does not walk HDMA tables
+ * at all (upstream issue #15), so this host walks them itself. Upstream PR #16
+ * proposes doing it in the runner instead, and the only way to test that is to
+ * stand ours down and see whether the picture survives -- with both running,
+ * every channel would transfer twice. */
+static bool s_host_hdma = true;
 
 static void hdma_init_channel(HdmaChanState *c, const DmaChannel *dc) {
   if (!dc->hdmaActive) { c->active = false; return; }
@@ -785,7 +793,7 @@ static void handle_pos_stuff(void) {
        * flag, but exactly backwards for SimpleHdma_Init, which needs to see
        * whatever the game's own $420C write last set it to. */
       for (int i = 0; i < 8; i++)
-        hdma_init_channel(&s_hdma[i], &snes->dma->channel[i]);
+        if (s_host_hdma) hdma_init_channel(&s_hdma[i], &snes->dma->channel[i]);
     } else if (snes->vPos == 225) {
       startingVblank = !ppu_checkOverscan(g_ppu);
     } else if (snes->vPos == 240) {
@@ -806,7 +814,7 @@ static void handle_pos_stuff(void) {
        * above: this fires during the current line's hblank, so the values
        * it writes take effect starting with the *next* line's render, at
        * this loop's hPos==0 branch. */
-      for (int i = 0; i < 8; i++) hdma_do_line(&s_hdma[i]);
+      if (s_host_hdma) for (int i = 0; i < 8; i++) hdma_do_line(&s_hdma[i]);
     }
   }
 
@@ -4012,6 +4020,8 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_HOST_HDMA");
+    if (e && *e) s_host_hdma = (*e != '0'); }
   { const char *e = getenv("SC_REPLAY_MENU");
     if (e && *e) s_replay_menu = (*e != '0'); }
   /* SC_REPLAY_FREE=1 arms the free-play latch without going through the menu.
