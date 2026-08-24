@@ -469,6 +469,69 @@ store entirely, so the instruction never executes at all and a hook on it could
 never have fired. `03:de31` is on both paths. `03:cec8` was already correct by
 accident — it is the `RTS` ending the seed routine, so it is after the stores.
 
+## The ninth entry — SYLT
+
+### The map already exists
+
+`03:ce70` is a nine-entry struct-of-arrays and index 8 points at `$0dd131`,
+the last blob in the map region:
+
+| idx | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| ptr | `0d9f23` | `0ce30b` | `0c8f27` | `0cc5a2` | `0ca8e8` | `0d816e` | `0db987` | `0dcb15` | **`0dd131`** |
+
+Loaded through `SC_NINTH` it decompresses to a real 120x100 map: **36 distinct
+tiles**, 9831 cells of water against 1386 of the next tile, drawing as a sandy
+island with woodland patches, a north-eastern islet and a south-western
+sandbar. No roads, no buildings, nothing built anywhere. An undeveloped North
+Sea sand island — which is why it can be Sylt without inventing any terrain.
+
+The game treats it as a scenario: it comes up 1991 JAN, $20 000, population 0,
+with "5 years to complete scenario". The briefing it shows is free play's
+"Welcome to the world of SIMCITY" (index 8 falls off the eight-entry seed
+tables, so `SC_NINTH` supplies free play's values).
+
+Note index **7** is already the `Free` card, 1991 — the ninth is genuinely
+spare, not a duplicate of it.
+
+### Why the card has to be host-drawn
+
+The selector background is a fixed-width tilemap. Measured by scrolling and
+finding the last non-black column:
+
+| `$22` scroll | content ends at world x |
+|---|---|
+| `$50` (stock column 3) | 335 (fills the screen) |
+| `$60` | 351 |
+| `$70`, `$80`, `$a0` | **359** — everything past it is black |
+
+So the background stops at world x = 359 and column 3 already views to 335.
+That leaves **24 px of slack where a card needs about 70**. `SC_NINTH_SCROLL`
+defaulted to `$a0`, which simply scrolled into the black void; `$68` is the
+largest scroll with no black margin and is the default now.
+
+A ninth card therefore cannot come from the guest without extending that
+tilemap, which is a ROM change. `render_sylt_card()` paints it host-side
+instead, over the right edge, using the same overlay route as the replay menu.
+With the screen already full of cards it unavoidably overlaps the right edge of
+the Las Vegas card — there is no clear space at any scroll.
+
+### Still missing for a real scenario
+
+Sylt currently has a map, a card and free play's seed. It has no briefing text,
+no win condition (`$0ccb` objective index), and no disaster of its own, so the
+"5 years to complete scenario" timer counts against nothing.
+
+### `SC_RENDER_DUMP_AT` / `SC_RENDER_DUMP_PATH`
+
+`SC_DUMP_AT` captures `s_video_pixels`, which is the guest frame *before* any
+host overlay, so it cannot see the settings menu, the replay box or the Sylt
+card. `SC_RENDER_DUMP_AT` captures the renderer instead. It only works in a
+real windowed run — `--qualify` never reaches that loop, which is also why
+`SC_MENU_PREVIEW` has never worked under it — and it quits after the capture.
+Frame numbers are absolute, and `--load-state` restores the saved frame
+counter, so a state saved at frame 2919 needs targets past 2919, not past 0.
+
 ## Cartridge SRAM layout (`$700000`+)
 
 SRAM is **not** part of `g_ram` -- it lives in the cart model, so WRAM dumps do

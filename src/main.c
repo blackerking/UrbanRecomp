@@ -1281,7 +1281,9 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * value the host can simply overwrite the instant the ROM has written it,
  * which needs no free ROM space and leaves every byte of the image intact. */
 static bool s_ninth_scenario;
-static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column */
+static int  s_ninth_scroll = 0x68;   /* $22 target for the new column --
+                                      * the largest with no black margin;
+                                      * see render_sylt_card() */
 
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
@@ -1349,6 +1351,9 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
  * (03:e30a builds it, 03:e326 commits it to SRAM $700007). So the menu
  * offers itself on exactly the entries that already show a mark.
  */
+/* Last frame on which the selector's per-frame handler ran, so host
+ * overlays can tell they are on that screen without a $01df gate. */
+static uint64_t s_selector_frame = ~0ull;
 static bool s_replay_menu = true;   /* SC_REPLAY_MENU=0 to disable */
 static bool s_replay_open;
 static int  s_replay_sel;           /* 0 = STANDARD, 1 = FREE */
@@ -1497,6 +1502,7 @@ static bool run_one_frame(void) {
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
+    if (cpu->k == 0x03 && cpu->pc == 0xddb6) s_selector_frame = s_frames;
     if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
         (cpu->pc == 0xc8dd || cpu->pc == 0xce61)) apply_power_fix();
@@ -2868,6 +2874,71 @@ static void render_settings_menu(SDL_Renderer *renderer) {
     draw_text(renderer, menu_x + pad, ty, px - 1, "0123456789");
   }
 
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
+/* SYLT -- the ninth entry, drawn host-side because the guest cannot show it.
+ *
+ * The map is already in the ROM and unused: the pointer table at 03:ce70 has
+ * nine entries and index 8 points at $0dd131, which decompresses to a real
+ * 120x100 island -- sand with woodland, a northern islet and a south-western
+ * sandbar, no roads and no buildings anywhere. Nothing else in the game
+ * reaches it. An undeveloped North Sea sand island is a good enough Sylt.
+ *
+ * What is missing is the *card*. The selector's background tilemap is 360 px
+ * wide (measured: content ends at world x = 359 at every scroll tried) and
+ * column 3 already views 80..335, so there are 24 px of slack where a card
+ * needs about 70. Scrolling past that runs off the tilemap into black, which
+ * is what SC_NINTH_SCROLL = $a0 was doing. $68 is the largest scroll with no
+ * black margin, so that is the default now, and the card itself is painted
+ * over the right edge by the host -- the same overlay route the replay menu
+ * uses, and it needs no ROM surgery.
+ *
+ * Giving the ninth entry a real card *in the guest* would mean extending that
+ * tilemap, which is a ROM change and a separate decision.
+ */
+static void render_sylt_card(SDL_Renderer *renderer) {
+  int out_w = 0, out_h = 0;
+  SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
+  /* The guest's UI block is the authentic 256 columns anchored left, so the
+   * card is placed in those coordinates and scaled to the real window. */
+  const double sx = (double)out_w / (double)s_video_w;
+  const double sy = (double)out_h / (double)kVideoHeight;
+  const int cx = (int)(190 * sx), cy = (int)(56 * sy);
+  const int cw = (int)(62 * sx), ch = (int)(74 * sy);
+  int px = (int)(1 * sy); if (px < 1) px = 1; if (px > 3) px = 3;
+
+  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+  /* Polaroid body, matching the cream the ROM's own cards use. */
+  SDL_SetRenderDrawColor(renderer, 232, 224, 196, 255);
+  ScRect body = SC_RECT(cx, cy, cw, ch);
+  SDL_RenderFillRect(renderer, &body);
+  SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
+  SDL_RenderDrawRect(renderer, &body);
+
+  /* Thumbnail: sea, with the island roughly where it sits on the real map. */
+  const int iw = cw - (int)(8 * sx), ih = (int)(38 * sy);
+  const int ix = cx + (int)(4 * sx), iy = cy + (int)(4 * sy);
+  SDL_SetRenderDrawColor(renderer, 32, 64, 168, 255);
+  ScRect sea = SC_RECT(ix, iy, iw, ih);
+  SDL_RenderFillRect(renderer, &sea);
+  SDL_SetRenderDrawColor(renderer, 198, 168, 122, 255);
+  ScRect land = SC_RECT(ix + iw / 4, iy + ih / 4, iw / 2, ih / 2);
+  SDL_RenderFillRect(renderer, &land);
+  ScRect islet = SC_RECT(ix + iw * 5 / 8, iy + ih / 8, iw / 6, ih / 8);
+  SDL_RenderFillRect(renderer, &islet);
+  SDL_SetRenderDrawColor(renderer, 64, 152, 64, 255);
+  ScRect wood = SC_RECT(ix + iw * 3 / 8, iy + ih * 3 / 8, iw / 6, ih / 4);
+  SDL_RenderFillRect(renderer, &wood);
+
+  int ty = cy + (int)(46 * sy);
+  SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
+  draw_text(renderer, cx + (cw - text_width(px, "SYLT")) / 2, ty, px, "SYLT");
+  ty += 7 * px;
+  draw_text(renderer, cx + (cw - text_width(px, "NORTH SEA")) / 2, ty, px, "NORTH SEA");
+  ty += 8 * px;
+  SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
+  draw_text(renderer, cx + (cw - text_width(px, "1991")) / 2, ty, px, "1991");
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
@@ -4327,8 +4398,29 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
                 (int)_lok, pitch, (int)s_video_pitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
+    if (s_ninth_scenario && g_ram[0x52] == 4 &&
+        s_frames - s_selector_frame < 4) render_sylt_card(renderer);
     if (s_replay_open) render_replay_menu(renderer);
 
+    /* SC_RENDER_DUMP_AT=<frame> + SC_RENDER_DUMP_PATH: capture the RENDERER,
+     * overlays included. SC_DUMP_AT captures s_video_pixels, which is the
+     * guest frame before any host overlay is drawn on top of it, so it cannot
+     * see the settings menu, the replay box or the Sylt card at all. */
+    { static long long at = -2; static const char *path;
+      if (at == -2) { const char *e = getenv("SC_RENDER_DUMP_AT");
+        at = e ? atoll(e) : -1;
+        path = getenv("SC_RENDER_DUMP_PATH");
+        if (!path) path = "render_dump.ppm"; }
+      if (at >= 0 && (long long)s_frames >= at) {
+        at = -1;
+        /* One-shot: dump and quit, like SC_MENU_PREVIEW. --qualify never
+         * reaches this loop at all, so a capture of any host overlay has to
+         * come from a real windowed run, and it should not outstay it. */
+        quit = true;
+        if (write_renderer_ppm(renderer, path))
+          fprintf(stderr, "[SC_RENDER_DUMP] wrote %s at frame %llu\n", path,
+                  (unsigned long long)s_frames);
+      } }
     if (s_menu_preview && --s_menu_preview_countdown <= 0) {
       if (write_renderer_ppm(renderer, "menu_preview.ppm"))
         fprintf(stderr, "[SC_MENU_PREVIEW] dumped menu_preview.ppm\n");
