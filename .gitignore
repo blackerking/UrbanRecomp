@@ -81,3 +81,12 @@ session_sram.bin
 # (the exit_mx_at/entry_mx_at directives in recomp/ and the numbers in
 # README.md). Regenerate with SC_MX_BITMAP=<path> on any run.
 mx_*.bin
+
+# Hand-drawn card artwork for the ninth scenario entry, and what
+# tools/make_sylt_card.py derives from it. Kept out for the same reason as
+# everything else here: the repo carries code and findings, not assets. The
+# host loads sylt_card.bin at runtime and falls back to a drawn placeholder
+# when it is missing, so a checkout without this still builds and still shows
+# a ninth entry. Regenerate with:
+#   python tools/make_sylt_card.py sylt_graphics/<your card>.jpg
+sylt_graphics/

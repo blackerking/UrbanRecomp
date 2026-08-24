@@ -2931,6 +2931,54 @@ static void render_settings_menu(SDL_Renderer *renderer) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
+/* The Sylt thumbnail, loaded at runtime rather than compiled in.
+ *
+ * The repo is deliberately asset-free, so the artwork is not a C array in this
+ * file: tools/make_sylt_card.py turns a drawn card into sylt_card.bin next to
+ * the source image, and this reads it if it is there. Absent, the card falls
+ * back to the drawn placeholder, so a checkout without the asset still builds
+ * and still shows a ninth entry.
+ *
+ * Only the thumbnail comes from the file. The caption is drawn in the host's
+ * own font below, so the name and year stay editable without regenerating it. */
+static uint32_t *s_sylt_pix;
+static int s_sylt_w, s_sylt_h;
+
+static void load_sylt_card(void) {
+  const char *path = getenv("SC_SYLT_CARD");
+  if (!path) path = "sylt_graphics/sylt_card.bin";
+  FILE *f = fopen(path, "rb");
+  if (!f) return;                       /* absent is not an error */
+  uint16_t hdr[4];
+  if (fread(hdr, sizeof hdr, 1, f) != 1) { fclose(f); return; }
+  const int w = hdr[0], h = hdr[1], npal = hdr[2];
+  if (w <= 0 || h <= 0 || w > 256 || h > 256 || npal <= 0 || npal > 256) {
+    fprintf(stderr, "[sylt] %s: implausible header %dx%d/%d, ignored", path,
+            w, h, npal);
+    fputc('\n', stderr);
+    fclose(f);
+    return;
+  }
+  uint8_t pal[256 * 3], *idx = (uint8_t *)malloc((size_t)w * h);
+  if (!idx) { fclose(f); return; }
+  if (fread(pal, 3, (size_t)npal, f) != (size_t)npal ||
+      fread(idx, 1, (size_t)w * h, f) != (size_t)w * h) {
+    free(idx); fclose(f); return;
+  }
+  fclose(f);
+  s_sylt_pix = (uint32_t *)malloc((size_t)w * h * 4);
+  if (!s_sylt_pix) { free(idx); return; }
+  for (int i = 0; i < w * h; i++) {
+    const unsigned c = idx[i] < npal ? idx[i] : 0;
+    s_sylt_pix[i] = 0xFF000000u | ((uint32_t)pal[c * 3] << 16)
+                  | ((uint32_t)pal[c * 3 + 1] << 8) | (uint32_t)pal[c * 3 + 2];
+  }
+  free(idx);
+  s_sylt_w = w; s_sylt_h = h;
+  fprintf(stderr, "[sylt] loaded %s (%dx%d, %d colours)", path, w, h, npal);
+  fputc('\n', stderr);
+}
+
 /* SYLT -- the ninth entry, drawn host-side because the guest cannot show it.
  *
  * The map is already in the ROM and unused: the pointer table at 03:ce70 has
@@ -2958,8 +3006,8 @@ static void render_sylt_card(SDL_Renderer *renderer) {
    * card is placed in those coordinates and scaled to the real window. */
   const double sx = (double)out_w / (double)s_video_w;
   const double sy = (double)out_h / (double)kVideoHeight;
-  const int cx = (int)(172 * sx), cy = (int)(56 * sy);
-  const int cw = (int)(62 * sx), ch = (int)(74 * sy);
+  const int cx = (int)(172 * sx), cy = (int)(44 * sy);
+  const int cw = (int)(64 * sx), ch = (int)(86 * sy);
   int px = (int)(1 * sy); if (px < 1) px = 1; if (px > 3) px = 3;
 
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -2970,29 +3018,48 @@ static void render_sylt_card(SDL_Renderer *renderer) {
   SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
   SDL_RenderDrawRect(renderer, &body);
 
-  /* Thumbnail: sea, with the island roughly where it sits on the real map. */
-  const int iw = cw - (int)(8 * sx), ih = (int)(38 * sy);
-  const int ix = cx + (int)(4 * sx), iy = cy + (int)(4 * sy);
-  SDL_SetRenderDrawColor(renderer, 32, 64, 168, 255);
-  ScRect sea = SC_RECT(ix, iy, iw, ih);
-  SDL_RenderFillRect(renderer, &sea);
-  SDL_SetRenderDrawColor(renderer, 198, 168, 122, 255);
-  ScRect land = SC_RECT(ix + iw / 4, iy + ih / 4, iw / 2, ih / 2);
-  SDL_RenderFillRect(renderer, &land);
-  ScRect islet = SC_RECT(ix + iw * 5 / 8, iy + ih / 8, iw / 6, ih / 8);
-  SDL_RenderFillRect(renderer, &islet);
-  SDL_SetRenderDrawColor(renderer, 64, 152, 64, 255);
-  ScRect wood = SC_RECT(ix + iw * 3 / 8, iy + ih * 3 / 8, iw / 6, ih / 4);
-  SDL_RenderFillRect(renderer, &wood);
+  /* Thumbnail. 48x40 is the size the ROM's own card art uses, measured off
+   * the selector, so the drawn art drops straight in at the same footprint. */
+  const int iw = (int)(48 * sx), ih = (int)(40 * sy);
+  const int ix = cx + (int)(8 * sx), iy = cy + (int)(5 * sy);
+  ScRect frame = SC_RECT(ix, iy, iw, ih);
+  static SDL_Texture *tex;
+  if (!tex && s_sylt_pix) {
+    tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                            SDL_TEXTUREACCESS_STATIC, s_sylt_w, s_sylt_h);
+    if (tex) {
+      SDL_UpdateTexture(tex, NULL, s_sylt_pix, s_sylt_w * 4);
+      /* Nearest, or scaling the 48x40 art to the window blurs pixel art. */
+      snesrecomp_sdl_set_texture_linear(tex, false);
+    }
+  }
+  if (tex) {
+    SDL_Rect dst = { ix, iy, iw, ih };
+    snesrecomp_sdl_render_texture(renderer, tex, NULL, &dst);
+  } else {
+    /* No asset present -- a plain sea-and-island stand-in, so the ninth entry
+     * still reads as an entry on a checkout without the artwork. */
+    SDL_SetRenderDrawColor(renderer, 32, 64, 168, 255);
+    SDL_RenderFillRect(renderer, &frame);
+    SDL_SetRenderDrawColor(renderer, 198, 168, 122, 255);
+    ScRect land = SC_RECT(ix + iw / 4, iy + ih / 4, iw / 2, ih / 2);
+    SDL_RenderFillRect(renderer, &land);
+  }
 
-  int ty = cy + (int)(46 * sy);
+  /* Caption in the host font, so the name and year stay editable without
+   * regenerating the asset. Two lines for the disaster, the way the ROM wraps
+   * "Coastal Flooding" on the Rio card. */
+  int ty = iy + ih + (int)(4 * sy);
   SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
   draw_text(renderer, cx + (cw - text_width(px, "SYLT")) / 2, ty, px, "SYLT");
   ty += 7 * px;
-  draw_text(renderer, cx + (cw - text_width(px, "NORTH SEA")) / 2, ty, px, "NORTH SEA");
-  ty += 8 * px;
+  SDL_SetRenderDrawColor(renderer, 90, 90, 90, 255);
+  draw_text(renderer, cx + (cw - text_width(px, "COASTAL")) / 2, ty, px, "COASTAL");
+  ty += 6 * px;
+  draw_text(renderer, cx + (cw - text_width(px, "FLOODING")) / 2, ty, px, "FLOODING");
+  ty += 7 * px;
   SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
-  draw_text(renderer, cx + (cw - text_width(px, "1991")) / 2, ty, px, "1991");
+  draw_text(renderer, cx + (cw - text_width(px, "2047")) / 2, ty, px, "2047");
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
@@ -3759,6 +3826,7 @@ int main(int argc, char **argv) {
    * free-play city. */
   { const char *e = getenv("SC_HUD_MASK");
     if (e && *e) s_hud_mask = (uint8_t)strtol(e, NULL, 0); }
+  load_sylt_card();
   { const char *e = getenv("SC_REPLAY_FREE");
     if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
