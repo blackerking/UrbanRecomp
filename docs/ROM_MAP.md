@@ -542,6 +542,48 @@ screen's backdrop is black and the two tests coincide there. It should differ
 during a fade, which is the case it was written for and the one still worth
 checking in play.
 
+### The card as real tiles
+
+The ninth card is drawn by the PPU as part of BG1. Everything below was
+measured off the live screen with `SC_SELECTOR_PPU=1`, not assumed.
+
+| | |
+|---|---|
+| layer | mode 0, **BG1 the only layer on the main screen**; tilemap `$3000`, `wide=1` (64 columns), character base `$0000` |
+| cards | 8 columns x 9 rows of body at columns 12/22/32 — ten apart, so the fifth lands on **column 42** — rows 5..13, drop shadow of tile `$0010` down the right edge and along the bottom |
+| palette | **2**: black / `#94948b` / `#eeeecd` / `#73736a`, exactly the range the shipped card art uses |
+| free CHR | tiles `$24b..$2d5` (139) and `$2e0..$3ff` (288) are blank in VRAM **and** unreferenced by the tilemap — 427 slots against the 72 a card needs |
+
+Because BG1 is 2bpp, a tile has four colours and picks one of eight palettes.
+Palette 2 already spans black to cream, so a greyscale drawing quantises into
+it directly and needs no per-tile palette assignment.
+
+### Scrolling constrains where the card can sit
+
+The tilemap wraps at 64 columns (512 px), so any scroll past 256 would bring
+column 0 back around on the right. The ninth column's `$a0` (160) shows columns
+20..51, and the stock column-3 `$50` (80) shows 10..41. A card at columns 42..49
+is therefore fully visible on the ninth column and entirely off-screen on the
+stock one, which is the behaviour wanted, and it lands on the ROM's own
+ten-column grid rather than an arbitrary offset.
+
+### Why the whole card comes from the artwork
+
+Card names on the shipped cards are **pre-rendered word strips** living in
+VRAM — "San Francisco", "Earthquake", "Bern", "Traffic", "Coastal",
+"Flooding" and so on — placed as sprites rather than written into the tilemap
+(rows 11..12 of a card are blank cream). There is no "Sylt" strip, and the
+strips are whole words rather than glyphs, so one cannot be composed from them
+either. Only the year is BG: digits are tiles `$0a0 + d` at palette 2, which is
+how "2096" decodes as `08a2 08a0 08a9 08a6`.
+
+So the drawn card supplies its own caption, and the full 64x72 block is
+converted rather than just the thumbnail.
+
+**Known gap:** the coloured pin above each shipped card is a sprite too, so the
+ninth card has none. Cosmetic, and it would need a free OAM slot plus the
+sprite's own tile.
+
 ### Still missing for a real scenario
 
 Sylt currently has a map, a card and free play's seed. It has no briefing text,

@@ -709,6 +709,7 @@ static void hdma_do_line(HdmaChanState *c) {
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static void selector_extend_tilemap(void);
+static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
@@ -1302,6 +1303,7 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
         g_ram[0x54] = 0;
       }
       selector_extend_tilemap();
+      sylt_place_card();
       break;
     case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
                     * Hooks fire BEFORE the opcode at pc, so this has to sit
@@ -2963,18 +2965,41 @@ static void render_settings_menu(SDL_Renderer *renderer) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
-/* The Sylt thumbnail, loaded at runtime rather than compiled in.
+/* The Sylt card, as real BG1 tiles.
  *
- * The repo is deliberately asset-free, so the artwork is not a C array in this
- * file: tools/make_sylt_card.py turns a drawn card into sylt_card.bin next to
- * the source image, and this reads it if it is there. Absent, the card falls
- * back to the drawn placeholder, so a checkout without the asset still builds
- * and still shows a ninth entry.
+ * Everything here was measured off the live selector rather than assumed:
  *
- * Only the thumbnail comes from the file. The caption is drawn in the host's
- * own font below, so the name and year stay editable without regenerating it. */
-static uint32_t *s_sylt_pix;
-static int s_sylt_w, s_sylt_h;
+ *   layer      mode 0, BG1 the only layer on the main screen,
+ *              tilemap $3000, wide=1 (64 columns), character base $0000
+ *   cards      8 columns x 9 rows of body, at columns 12/22/32 -- ten apart,
+ *              so the fifth lands on column 42 -- rows 5..13, with a drop
+ *              shadow of tile $0010 down the right edge and along the bottom
+ *   palette    2, whose entries are black / #94948b / #eeeecd / #73736a.
+ *              That is the exact range the shipped card art uses, so a
+ *              greyscale drawing needs no per-tile palette juggling
+ *   free CHR   tiles $24b..$2d5 and $2e0..$3ff are blank in VRAM AND
+ *              unreferenced by the tilemap -- 427 slots, against the 72 a
+ *              card needs
+ *
+ * The card sits off-screen at the stock column-3 scroll ($50 shows columns
+ * 10..41) and fully on-screen at the ninth column's $a0 (columns 20..51), so
+ * it can only appear when it should. The tilemap wraps at 64 columns, which
+ * caps any scroll at 256 before column 0 would reappear on the right; $a0 is
+ * well inside that.
+ *
+ * Card names on the shipped cards are pre-rendered word strips placed as
+ * sprites, and there is no "Sylt" strip to borrow -- the strips are whole
+ * words, not glyphs, so one cannot be composed either. The drawn card carries
+ * its own caption instead, which is why the whole 64x72 block comes from the
+ * artwork rather than just the thumbnail. */
+#define SC_SYLT_TILE_BASE 0x2e0u   /* start of the 288-slot free run */
+#define SC_SYLT_COL 42
+#define SC_SYLT_ROW 5
+#define SC_SYLT_PAL 2u
+#define SC_SYLT_SHADOW 0x0010u
+
+static uint16_t *s_sylt_tiles;      /* tiles_w * tiles_h * 8 words */
+static int s_sylt_tw, s_sylt_th;
 
 static void load_sylt_card(void) {
   const char *path = getenv("SC_SYLT_CARD");
@@ -2983,116 +3008,70 @@ static void load_sylt_card(void) {
   if (!f) return;                       /* absent is not an error */
   uint16_t hdr[4];
   if (fread(hdr, sizeof hdr, 1, f) != 1) { fclose(f); return; }
-  const int w = hdr[0], h = hdr[1], npal = hdr[2];
-  if (w <= 0 || h <= 0 || w > 256 || h > 256 || npal <= 0 || npal > 256) {
-    fprintf(stderr, "[sylt] %s: implausible header %dx%d/%d, ignored", path,
-            w, h, npal);
+  const int tw = hdr[0], th = hdr[1];
+  if (tw <= 0 || th <= 0 || tw > 16 || th > 16) {
+    fprintf(stderr, "[sylt] %s: implausible size %dx%d tiles, ignored", path, tw, th);
     fputc('\n', stderr);
     fclose(f);
     return;
   }
-  uint8_t pal[256 * 3], *idx = (uint8_t *)malloc((size_t)w * h);
-  if (!idx) { fclose(f); return; }
-  if (fread(pal, 3, (size_t)npal, f) != (size_t)npal ||
-      fread(idx, 1, (size_t)w * h, f) != (size_t)w * h) {
-    free(idx); fclose(f); return;
+  const size_t words = (size_t)tw * th * 8u;
+  s_sylt_tiles = (uint16_t *)malloc(words * sizeof(uint16_t));
+  if (!s_sylt_tiles) { fclose(f); return; }
+  for (size_t i = 0; i < words; i++) {
+    int lo = fgetc(f), hi = fgetc(f);
+    if (lo < 0 || hi < 0) { free(s_sylt_tiles); s_sylt_tiles = NULL; fclose(f); return; }
+    s_sylt_tiles[i] = (uint16_t)(lo | (hi << 8));
   }
   fclose(f);
-  s_sylt_pix = (uint32_t *)malloc((size_t)w * h * 4);
-  if (!s_sylt_pix) { free(idx); return; }
-  for (int i = 0; i < w * h; i++) {
-    const unsigned c = idx[i] < npal ? idx[i] : 0;
-    s_sylt_pix[i] = 0xFF000000u | ((uint32_t)pal[c * 3] << 16)
-                  | ((uint32_t)pal[c * 3 + 1] << 8) | (uint32_t)pal[c * 3 + 2];
-  }
-  free(idx);
-  s_sylt_w = w; s_sylt_h = h;
-  fprintf(stderr, "[sylt] loaded %s (%dx%d, %d colours)", path, w, h, npal);
+  s_sylt_tw = tw; s_sylt_th = th;
+  fprintf(stderr, "[sylt] loaded %s (%dx%d tiles -> CHR $%03x..$%03x)", path,
+          tw, th, SC_SYLT_TILE_BASE, SC_SYLT_TILE_BASE + tw * th - 1);
   fputc('\n', stderr);
 }
 
-/* SYLT -- the ninth entry, drawn host-side because the guest cannot show it.
- *
- * The map is already in the ROM and unused: the pointer table at 03:ce70 has
- * nine entries and index 8 points at $0dd131, which decompresses to a real
- * 120x100 island -- sand with woodland, a northern islet and a south-western
- * sandbar, no roads and no buildings anywhere. Nothing else in the game
- * reaches it. An undeveloped North Sea sand island is a good enough Sylt.
- *
- * What is missing is the *card*. The selector's background tilemap is 360 px
- * wide (measured: content ends at world x = 359 at every scroll tried) and
- * column 3 already views 80..335, so there are 24 px of slack where a card
- * needs about 70. Scrolling past that runs off the tilemap into black, which
- * is what SC_NINTH_SCROLL = $a0 was doing. $68 is the largest scroll with no
- * black margin, so that is the default now, and the card itself is painted
- * over the right edge by the host -- the same overlay route the replay menu
- * uses, and it needs no ROM surgery.
- *
- * Giving the ninth entry a real card *in the guest* would mean extending that
- * tilemap, which is a ROM change and a separate decision.
- */
-static void render_sylt_card(SDL_Renderer *renderer) {
-  int out_w = 0, out_h = 0;
-  SDL_GetRendererOutputSize(renderer, &out_w, &out_h);
-  /* The guest's UI block is the authentic 256 columns anchored left, so the
-   * card is placed in those coordinates and scaled to the real window. */
-  const double sx = (double)out_w / (double)s_video_w;
-  const double sy = (double)out_h / (double)kVideoHeight;
-  const int cx = (int)(172 * sx), cy = (int)(44 * sy);
-  const int cw = (int)(64 * sx), ch = (int)(86 * sy);
-  int px = (int)(1 * sy); if (px < 1) px = 1; if (px > 3) px = 3;
+/* Character data goes in once; the tilemap is rewritten every frame, because
+ * the screen's own setup DMA lands before this and would put the blanks back. */
+static void sylt_place_card(void) {
+  if (!s_sylt_tiles || !g_ppu) return;
+  const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
 
-  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-  /* Polaroid body, matching the cream the ROM's own cards use. */
-  SDL_SetRenderDrawColor(renderer, 232, 224, 196, 255);
-  ScRect body = SC_RECT(cx, cy, cw, ch);
-  SDL_RenderFillRect(renderer, &body);
-  SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
-  SDL_RenderDrawRect(renderer, &body);
-
-  /* Thumbnail. 48x40 is the size the ROM's own card art uses, measured off
-   * the selector, so the drawn art drops straight in at the same footprint. */
-  const int iw = (int)(48 * sx), ih = (int)(40 * sy);
-  const int ix = cx + (int)(8 * sx), iy = cy + (int)(5 * sy);
-  ScRect frame = SC_RECT(ix, iy, iw, ih);
-  static SDL_Texture *tex;
-  if (!tex && s_sylt_pix) {
-    tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-                            SDL_TEXTUREACCESS_STATIC, s_sylt_w, s_sylt_h);
-    if (tex) {
-      SDL_UpdateTexture(tex, NULL, s_sylt_pix, s_sylt_w * 4);
-      /* Nearest, or scaling the 48x40 art to the window blurs pixel art. */
-      snesrecomp_sdl_set_texture_linear(tex, false);
+  static bool chr_done;
+  if (!chr_done) {
+    chr_done = true;
+    for (int i = 0; i < s_sylt_tw * s_sylt_th; i++) {
+      const unsigned dst = (SC_SYLT_TILE_BASE + (unsigned)i) * 8u;
+      if (dst + 8u > 0x8000u) break;
+      for (int k = 0; k < 8; k++)
+        g_ppu->vram[dst + k] = s_sylt_tiles[i * 8 + k];
     }
   }
-  if (tex) {
-    SDL_Rect dst = { ix, iy, iw, ih };
-    snesrecomp_sdl_render_texture(renderer, tex, NULL, &dst);
-  } else {
-    /* No asset present -- a plain sea-and-island stand-in, so the ninth entry
-     * still reads as an entry on a checkout without the artwork. */
-    SDL_SetRenderDrawColor(renderer, 32, 64, 168, 255);
-    SDL_RenderFillRect(renderer, &frame);
-    SDL_SetRenderDrawColor(renderer, 198, 168, 122, 255);
-    ScRect land = SC_RECT(ix + iw / 4, iy + ih / 4, iw / 2, ih / 2);
-    SDL_RenderFillRect(renderer, &land);
-  }
 
-  /* Caption in the host font, so the name and year stay editable without
-   * regenerating the asset. Two lines for the disaster, the way the ROM wraps
-   * "Coastal Flooding" on the Rio card. */
-  int ty = iy + ih + (int)(4 * sy);
-  SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
-  draw_text(renderer, cx + (cw - text_width(px, "SYLT")) / 2, ty, px, "SYLT");
-  ty += 7 * px;
-  SDL_SetRenderDrawColor(renderer, 90, 90, 90, 255);
-  draw_text(renderer, cx + (cw - text_width(px, "COASTAL")) / 2, ty, px, "COASTAL");
-  ty += 6 * px;
-  draw_text(renderer, cx + (cw - text_width(px, "FLOODING")) / 2, ty, px, "FLOODING");
-  ty += 7 * px;
-  SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
-  draw_text(renderer, cx + (cw - text_width(px, "2047")) / 2, ty, px, "2047");
-  SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+  for (int ty = 0; ty < s_sylt_th; ty++)
+    for (int tx = 0; tx < s_sylt_tw; tx++) {
+      const int col = SC_SYLT_COL + tx, row = SC_SYLT_ROW + ty;
+      if (col > 63 || row > 31) continue;
+      const unsigned idx = map + (col < 32 ? 0u : 0x400u)
+                         + (unsigned)row * 32u + (unsigned)(col & 31);
+      if (idx >= 0x8000u) continue;
+      g_ppu->vram[idx] = (uint16_t)((SC_SYLT_PAL << 10)
+                       | (SC_SYLT_TILE_BASE + (unsigned)(ty * s_sylt_tw + tx)));
+    }
+
+  /* The same drop shadow the other cards carry: down the right edge, then
+   * along the bottom. Without it the ninth card floats where the rest sit. */
+  for (int ty = 1; ty <= s_sylt_th; ty++) {
+    const int col = SC_SYLT_COL + s_sylt_tw, row = SC_SYLT_ROW + ty;
+    if (col > 63 || row > 31) continue;
+    g_ppu->vram[map + (col < 32 ? 0u : 0x400u) + (unsigned)row * 32u
+                + (unsigned)(col & 31)] = SC_SYLT_SHADOW;
+  }
+  for (int tx = 1; tx <= s_sylt_tw; tx++) {
+    const int col = SC_SYLT_COL + tx, row = SC_SYLT_ROW + s_sylt_th;
+    if (col > 63 || row > 31) continue;
+    g_ppu->vram[map + (col < 32 ? 0u : 0x400u) + (unsigned)row * 32u
+                + (unsigned)(col & 31)] = SC_SYLT_SHADOW;
+  }
 }
 
 /* The Sylt briefing, as a real tilemap handed to the ROM's own fax renderer.
@@ -4631,8 +4610,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[sdl] lock=%d pitch=%d expect=%d copy=%d err=%s\n",
                 (int)_lok, pitch, (int)s_video_pitch, (int)_cok, SDL_GetError()); } }
     if (s_menu_open) render_settings_menu(renderer);
-    if (s_ninth_scenario && g_ram[0x52] == 4 &&
-        s_frames - s_selector_frame < 4) render_sylt_card(renderer);
     if (s_replay_open) render_replay_menu(renderer);
 
     /* SC_RENDER_DUMP_AT=<frame> + SC_RENDER_DUMP_PATH: capture the RENDERER,
