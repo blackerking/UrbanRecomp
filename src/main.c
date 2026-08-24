@@ -596,6 +596,7 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
 static bool s_ws_obj_clip = true;     /* SC_WS_OBJ_CLIP=0 to let sprites into the margins */
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
+static bool s_ws_pillarbox;           /* this frame renders 256 centred, margins blacked */
 static uint8_t *s_ws_scratch;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
@@ -607,6 +608,7 @@ static uint8_t *s_ws_scratch;
  * are ALL dead on it. Grep ppu_legacy.c: zero references. That is why
  * SC_WS_CLAMP measurably did nothing. */
 static uint32_t s_render_flags = 0;
+static bool s_force_legacy;           /* SC_NEW_RENDERER=0 pins the legacy path */
 static int s_video_pitch = kVideoPitch;
 static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
 
@@ -849,6 +851,45 @@ static void handle_pos_stuff(void) {
        * play on a clean start, which sits at $01df == 4. The clamp belongs to
        * widescreen itself; whether the map is being replaced is a separate
        * question. Re-applied per frame, as the API requires. */
+      /* Pick the renderer by BG MODE, every frame.
+       *
+       * The widescreen layer policies only exist on the new renderer, but the
+       * new renderer does not draw mode 0 -- measured at AUTHENTIC width, so
+       * this is not a widescreen problem:
+       *
+       *   savestate_1 title      mode 1   identical, 42060 non-black both
+       *   savestate_8 gameplay   mode 1   identical, 54352 both
+       *   savestate_3 scenario   mode 0   legacy 53264 vs new 863
+       *   savestate_6 fax        mode 0   legacy 57130 vs new 176
+       *
+       * An earlier commit called the switch free on the strength of three
+       * save states that all happened to be mode 1. They were not a sample.
+       *
+       * So: mode 0 keeps the legacy renderer and loses the policies, which
+       * costs nothing on the two screens that use it -- the scenario selector's
+       * BG1 is genuinely 64 columns, so widening it unclamped is correct. */
+      if (g_ppu && s_ws_extra > 0) {
+        const bool mode0 = PPU_mode(g_ppu) == 0;
+        s_render_flags = (!mode0 && !s_force_legacy) ? 1u : 0u;
+        /* Mode 0 has no working clamp, so a 32-column layer WILL tile. The fax
+         * showed three copies of the briefing side by side. The runner has a
+         * purpose-built answer: PpuSetExtraSpaceCentered renders only the
+         * authentic 256 and keeps the centring budget, leaving the caller to
+         * black the margins -- "used for bounded screens where there is no
+         * valid BG past 256 to show", which is exactly this case.
+         *
+         * So on mode 0, widen only if EVERY enabled background is 64 columns.
+         * The scenario selector qualifies (BG1 alone, 64 wide) and gets the
+         * full picture; the fax does not (BG1/2/3 all 32) and gets pillarbox
+         * instead of tiling. */
+        bool all_wide = true;
+        for (int L = 0; L < 4; L++)
+          if (((g_ppu->screenEnabled[0] >> L) & 1) && !PPU_bgTilemapWider(g_ppu, L))
+            all_wide = false;
+        s_ws_pillarbox = mode0 && !all_wide;
+        if (s_ws_pillarbox) PpuSetExtraSpaceCentered(g_ppu, (uint8_t)s_ws_extra);
+        else                PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
+      }
       widen_menu_bg();
       /* BG3 is hard-clamped independent of wsLayerClamp:
        *
@@ -944,6 +985,13 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
+      if (s_ws_pillarbox && s_ws_extra > 0)
+        /* PpuSetExtraSpaceCentered leaves the margins to the caller. */
+        for (int y = 0; y < kVideoHeight; y++) {
+          uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          for (int x = 0; x < s_ws_extra; x++) row[x] = 0;
+          for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) row[x] = 0;
+        }
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
       snes->inNmi = true;
@@ -4233,7 +4281,7 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_WS_OAM");
     if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");
-    if (e && *e && *e != '0') s_render_flags = 1; }
+    if (e && *e) { s_force_legacy = (*e == '0'); if (!s_force_legacy) s_render_flags = 1; } }
   { const char *e = getenv("SC_WS_CLAMP");
     if (e && *e) { s_ws_clamp = (uint8_t)strtol(e, NULL, 0); s_ws_clamp_auto = false; } }
   { const char *e = getenv("SC_HOST_HDMA");
@@ -4262,16 +4310,7 @@ int main(int argc, char **argv) {
     s_video_pitch = s_video_w * 4;
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
     s_ws_scratch = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
-    /* Widescreen implies the new renderer, because the layer policies only
-     * exist there -- ppu_draw_whole_line_legacy never calls PpuWindows_*, so
-     * wsLayerClamp and friends are silently dead on it. Measured: clamp-all
-     * and clamp-none give the identical 13065 margin pixels on legacy, and
-     * 0 vs 6956 on the new one.
-     *
-     * Safe to switch: at authentic width the two renderers are pixel-identical
-     * on the title, the gameplay HUD and the tax menu, and --qualify is
-     * unchanged. SC_NEW_RENDERER forces it either way. */
-    if (s_ws_extra > 0 && !getenv("SC_NEW_RENDERER")) s_render_flags = 1;
+    /* The per-frame choice above owns this now -- see the mode note there. */
     fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
             s_ws_extra, s_video_w, kVideoHeight);
   }
