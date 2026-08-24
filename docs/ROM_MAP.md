@@ -609,6 +609,23 @@ same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
 The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
 is never marked beaten so nothing reads past them.
 
+### Open: the selector comes back half-loaded from a scenario
+
+Starting a scenario and backing out to the selector leaves the screen's
+graphics corrupted: thumbnails garbled, "LasVegas" reading "to.asVegas", "UFO"
+reading "MtC", "Monster Attack" and "Traffic" mangled, and the selection border
+drawn in blue as well as green. Reported from play as "the sprites are not
+loaded".
+
+**Not caused by the ninth entry.** Captured from `savestate_4` by entering Las
+Vegas and backing out, with `SC_NINTH` off and on: the two frames differ by
+**0 of 516096 pixels**. It reproduces with the feature disabled entirely.
+
+Distinct from the ninth card coming back black, which WAS a ninth-entry bug —
+the card's character data was uploaded once behind a static flag, and the
+screen's re-entry reloads VRAM over it. Both symptoms appeared together in the
+same report, which is why the control mattered.
+
 ### Still missing for a real scenario
 
 Sylt currently has a map, a card and free play's seed. It has no briefing text,

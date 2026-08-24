@@ -1327,7 +1327,15 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
     case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
                     * Hooks fire BEFORE the opcode at pc, so this has to sit
                     * on the instruction after the store, not on it. */
-      g_ram[0x79] = 4;
+      /* Only once the ROM has unlocked column 3 itself.
+       *
+       * 03:ddba loads 2 and increments it to 3 when bit 15 of $42 is set --
+       * the "every scenario beaten" flag 03:e31c writes. Forcing 4 flat
+       * overrode that gate, so on a fresh save with nothing won the player
+       * could still scroll to columns 3 and 4. Reported from play. Widening
+       * only the already-widened value keeps the ninth entry behind exactly
+       * the same condition the eighth is. */
+      if (g_ram[0x79] == 3) g_ram[0x79] = 4;
       break;
     case 0xde1c:   /* after 03:de1a STA $40, and also the target of the
                     * 03:ddc7 branch taken when no direction is pressed, so
@@ -3049,21 +3057,22 @@ static void load_sylt_card(void) {
   fputc('\n', stderr);
 }
 
-/* Character data goes in once; the tilemap is rewritten every frame, because
- * the screen's own setup DMA lands before this and would put the blanks back. */
+/* BOTH the character data and the tilemap are rewritten every frame.
+ *
+ * The character data was uploaded once behind a static flag, and that was
+ * wrong: leaving the selector and coming back re-runs the screen's own setup,
+ * which reloads VRAM and wipes the tiles at $2e0 while the tilemap entries
+ * still point at them -- so the card came back pitch black. Reported from play
+ * on returning from the fax. 72 tiles is 576 words a frame, which is nothing. */
 static void sylt_place_card(void) {
   if (!s_sylt_tiles || !g_ppu) return;
   const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
 
-  static bool chr_done;
-  if (!chr_done) {
-    chr_done = true;
-    for (int i = 0; i < s_sylt_tw * s_sylt_th; i++) {
-      const unsigned dst = (SC_SYLT_TILE_BASE + (unsigned)i) * 8u;
-      if (dst + 8u > 0x8000u) break;
-      for (int k = 0; k < 8; k++)
-        g_ppu->vram[dst + k] = s_sylt_tiles[i * 8 + k];
-    }
+  for (int i = 0; i < s_sylt_tw * s_sylt_th; i++) {
+    const unsigned dst = (SC_SYLT_TILE_BASE + (unsigned)i) * 8u;
+    if (dst + 8u > 0x8000u) break;
+    for (int k = 0; k < 8; k++)
+      g_ppu->vram[dst + k] = s_sylt_tiles[i * 8 + k];
   }
 
   for (int ty = 0; ty < s_sylt_th; ty++)
