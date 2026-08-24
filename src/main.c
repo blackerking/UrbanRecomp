@@ -591,6 +591,10 @@ static int s_video_w = kVideoWidth;    /* active render width */
  * margins empty on screens whose background would happily tile. SC_WS_CLAMP
  * overrides it so a screen can be widened one layer at a time. */
 static uint8_t s_ws_clamp = 0x0F;
+static bool s_ws_clamp_auto = true;   /* derive it per frame; SC_WS_CLAMP pins it */
+static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode */
+static bool s_ws_obj_clip = true;     /* SC_WS_OBJ_CLIP=0 to let sprites into the margins */
+static uint8_t *s_ws_scratch;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
  *
@@ -801,7 +805,36 @@ static void handle_pos_stuff(void) {
         if (mask == -1) { const char *e = getenv("SC_LAYER_MASK");
           mask = e && *e ? (int)strtol(e, NULL, 0) : 0xff; }
         g_snes_ppu_dbg_layer_mask = (uint8_t)mask; }
+      /* Keep sprites out of the widescreen margins.
+       *
+       * PpuWidescreenLayerExtra() only consults wsLayerClamp for layer < 4, so
+       * OBJ reaches the margins however the backgrounds are clamped -- measured
+       * on the title, BG2 and BG3 clamp to zero margin pixels while OBJ still
+       * puts 1623 there. What shows up is the off-screen half of sprites the
+       * hardware clips at the screen edge: the SIMCITY billboard and the row of
+       * blinking lights along the bottom, reported from play as a blinking
+       * rope. The strict OAM decode does not help -- that governs the right
+       * band [256, 256+extraRight), and these are all on the left.
+       *
+       * So the line is rendered a second time with OBJ masked off, and the
+       * margin columns are taken from that. The authentic 256 keep every
+       * sprite. Same two-pass shape the host-map HUD capture uses. */
+      if (s_ws_extra > 0 && s_ws_obj_clip && s_ws_scratch) {
+        g_snes_ppu_dbg_layer_mask &= (uint8_t)~0x10;
+        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask |= 0x10;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
       ppu_runLine(g_ppu, snes->vPos);
+      if (s_ws_extra > 0 && s_ws_obj_clip && s_ws_scratch && snes->vPos > 0 &&
+          snes->vPos <= kVideoHeight) {
+        const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
+        uint32_t *dst = (uint32_t *)(s_video_pixels + row);
+        const uint32_t *src = (const uint32_t *)(s_ws_scratch + row);
+        for (int x = 0; x < s_ws_extra; x++) dst[x] = src[x];
+        for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) dst[x] = src[x];
+      }
       g_snes_ppu_dbg_layer_mask = 0xff;
     }
     if (snes->vPos == 0) {
@@ -813,7 +846,45 @@ static void handle_pos_stuff(void) {
        * play on a clean start, which sits at $01df == 4. The clamp belongs to
        * widescreen itself; whether the map is being replaced is a separate
        * question. Re-applied per frame, as the API requires. */
-      if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, s_ws_clamp);
+      if (s_ws_extra > 0) {
+        /* Clamp exactly the layers that CANNOT be widened, derived from the
+         * live registers rather than a per-screen table.
+         *
+         * A BG tilemap is 32 or 64 columns; 32 is 256 px, so widening one
+         * always wraps and the picture tiles sideways -- reported from play as
+         * the title's foreground repeating. 64 columns covers 512 px, more
+         * than the 448 the maximum widescreen renders, so those carry real
+         * content all the way out.
+         *
+         * Surveyed across the screens: only the title's BG1 ($6000) and the
+         * scenario selector's BG1 ($3000) are 64 wide. Everything else -- main
+         * menu, map select, name entry, gameplay HUD, tax -- is entirely
+         * 32-column layers, and clamping them shows backdrop in the margins
+         * instead of a wrapped copy.
+         *
+         * SC_WS_CLAMP overrides with a fixed mask when experimenting. */
+        uint8_t clamp = s_ws_clamp_auto ? 0 : s_ws_clamp;
+        if (s_ws_clamp_auto)
+          for (int L = 0; L < 4; L++)
+            if (!PPU_bgTilemapWider(g_ppu, L)) clamp |= (uint8_t)(1u << L);
+        PpuSetWidescreenLayerClamp(g_ppu, clamp);
+        /* Sprites are NOT covered by that mask -- PpuWidescreenLayerExtra()
+         * only consults it for layer < 4 -- so they reach the margins however
+         * the BGs are clamped. Measured on the title: BG2 and BG3 clamp to 0
+         * margin pixels while OBJ still puts 1623 there.
+         *
+         * Most of those are not real. A raw OAM X in [256, 256+extraRight) is
+         * ambiguous: either a sprite the widescreen host meant to place in the
+         * right margin, or one the game parked off-screen-LEFT at x-512, which
+         * hardware never shows. The runner's default keeps the positive decode
+         * for both, so parked sprites ghost in -- reported from play as a
+         * small blinking rope along the bottom of the title.
+         *
+         * Passing NULL hints turns on the strict decode with nothing marked,
+         * so every ambiguous slot wraps negative exactly as hardware does.
+         * SC_WS_OAM=0 restores the permissive decode. */
+        if (s_ws_oam_strict) PpuWsSetOamRightHints(g_ppu, NULL);
+      }
       /* SC_PPU_LAYOUT=1: one line per screen, printed when $14 changes.
        * Widening a screen means knowing which BG carries its background and
        * whether that tilemap has anything in the columns the extra width
@@ -4081,10 +4152,14 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_WS_OBJ_CLIP");
+    if (e && *e) s_ws_obj_clip = (*e != '0'); }
+  { const char *e = getenv("SC_WS_OAM");
+    if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");
     if (e && *e && *e != '0') s_render_flags = 1; }
   { const char *e = getenv("SC_WS_CLAMP");
-    if (e && *e) s_ws_clamp = (uint8_t)strtol(e, NULL, 0); }
+    if (e && *e) { s_ws_clamp = (uint8_t)strtol(e, NULL, 0); s_ws_clamp_auto = false; } }
   { const char *e = getenv("SC_HOST_HDMA");
     if (e && *e) s_host_hdma = (*e != '0'); }
   { const char *e = getenv("SC_REPLAY_MENU");
@@ -4110,6 +4185,7 @@ int main(int argc, char **argv) {
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
+    s_ws_scratch = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
     /* Widescreen implies the new renderer, because the layer policies only
      * exist there -- ppu_draw_whole_line_legacy never calls PpuWindows_*, so
      * wsLayerClamp and friends are silently dead on it. Measured: clamp-all

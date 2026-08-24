@@ -1,6 +1,6 @@
 # Widescreen layer policies are silently dead on the legacy renderer
 
-**Status: NOT FILED.** Draft only.
+**FILED: https://github.com/mstan/snesrecomp/issues/25**
 
 `origin/main` @ `fe6045c`.
 
