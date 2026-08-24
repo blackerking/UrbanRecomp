@@ -591,6 +591,16 @@ static int s_video_w = kVideoWidth;    /* active render width */
  * margins empty on screens whose background would happily tile. SC_WS_CLAMP
  * overrides it so a screen can be widened one layer at a time. */
 static uint8_t s_ws_clamp = 0x0F;
+/* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
+ * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
+ *
+ * This matters for widescreen. The legacy renderer walks
+ * -extraLeftCur .. 256+extraRightCur one pixel at a time and never calls
+ * PpuWindows_Clear/_Calc, so it never consults PpuWidescreenLayerExtra() --
+ * which means wsLayerClamp, wsLayerMirror, wsLayerRepeat and the clamp bands
+ * are ALL dead on it. Grep ppu_legacy.c: zero references. That is why
+ * SC_WS_CLAMP measurably did nothing. */
+static uint32_t s_render_flags = 0;
 static int s_video_pitch = kVideoPitch;
 static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
 
@@ -772,12 +782,27 @@ static void handle_pos_stuff(void) {
          * a "menu is open" flag -- a search through the WRAM delta across the
          * B press turned up only transient direct-page scratch. */
         g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
-        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, 0);
+        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, s_render_flags);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask = 0xff;
-        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, 0);
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
+      if (getenv("SC_WS_DIAG") && snes->vPos == 100) { static int n;
+        if (n < 3) { n++;
+          fprintf(stderr, "[wsdiag] clamp=%02x widenMask=%02x extraL=%u extraR=%u budget=%u\n",
+                  g_ppu->wsLayerClamp, g_ppu->wsLayerWidenMask,
+                  g_ppu->extraLeftCur, g_ppu->extraRightCur,
+                  g_ppu->extraLeftRight); } }
+      /* SC_LAYER_MASK=<bits>: restrict the MAIN render pass. bit0 BG1,
+       * bit1 BG2, bit2 BG3, bit3 BG4, bit4 OBJ. Diagnostic only -- it answers
+       * "which layer actually puts those pixels there", which the widescreen
+       * clamp cannot, because that mask only covers BG1..BG4. */
+      { static int mask = -1;
+        if (mask == -1) { const char *e = getenv("SC_LAYER_MASK");
+          mask = e && *e ? (int)strtol(e, NULL, 0) : 0xff; }
+        g_snes_ppu_dbg_layer_mask = (uint8_t)mask; }
       ppu_runLine(g_ppu, snes->vPos);
+      g_snes_ppu_dbg_layer_mask = 0xff;
     }
     if (snes->vPos == 0) {
       /* Clamp the BG layers out of the widescreen margins on EVERY screen,
@@ -4056,6 +4081,8 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_NEW_RENDERER");
+    if (e && *e && *e != '0') s_render_flags = 1; }
   { const char *e = getenv("SC_WS_CLAMP");
     if (e && *e) s_ws_clamp = (uint8_t)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_HOST_HDMA");
@@ -4083,10 +4110,20 @@ int main(int argc, char **argv) {
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
+    /* Widescreen implies the new renderer, because the layer policies only
+     * exist there -- ppu_draw_whole_line_legacy never calls PpuWindows_*, so
+     * wsLayerClamp and friends are silently dead on it. Measured: clamp-all
+     * and clamp-none give the identical 13065 margin pixels on legacy, and
+     * 0 vs 6956 on the new one.
+     *
+     * Safe to switch: at authentic width the two renderers are pixel-identical
+     * on the title, the gameplay HUD and the tax menu, and --qualify is
+     * unchanged. SC_NEW_RENDERER forces it either way. */
+    if (s_ws_extra > 0 && !getenv("SC_NEW_RENDERER")) s_render_flags = 1;
     fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
             s_ws_extra, s_video_w, kVideoHeight);
   }
-  PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, 0);
+  PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
   host_map_init();
 
   g_cpu = interp816_init(NULL, bus_read, bus_write);
