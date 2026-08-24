@@ -709,6 +709,7 @@ static void hdma_do_line(HdmaChanState *c) {
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static void selector_extend_wood(void);
+static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
 /* Layers taken into the HUD pass. SC_HUD_MASK overrides it: bit0 BG1,
@@ -1356,6 +1357,7 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
 /* Last frame on which the selector's per-frame handler ran, so host
  * overlays can tell they are on that screen without a $01df gate. */
 static uint64_t s_selector_frame = ~0ull;
+static uint32_t s_sylt_decomp_src;
 static bool s_replay_menu = true;   /* SC_REPLAY_MENU=0 to disable */
 static bool s_replay_open;
 static int  s_replay_sel;           /* 0 = STANDARD, 1 = FREE */
@@ -1505,6 +1507,17 @@ static bool run_one_frame(void) {
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
     if (cpu->k == 0x03 && cpu->pc == 0xddb6) s_selector_frame = s_frames;
+    /* 0b:fbe7 is the free-play welcome block the ROM hands index 8. Keyed
+     * on the source, so if it ever selects a different one this simply
+     * does not fire rather than corrupting whatever did load. */
+    if (s_ninth_scenario && cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb)
+        s_sylt_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
+                            ((uint32_t)g_ram[0x0a] << 8);
+      else if (cpu->pc == 0x9106 && s_sylt_decomp_src == 0x0bfbe7u &&
+               (g_ram[0x40] | (g_ram[0x41] << 8)) == 8)
+        sylt_write_brief_tilemap();
+    }
     if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
         (cpu->pc == 0xc8dd || cpu->pc == 0xce61)) apply_power_fix();
@@ -2803,6 +2816,12 @@ static const FontGlyph kFont[] = {
   {'S', {15,16,14,1,30}},  {'T', {31,4,4,4,4}},     {'U', {17,17,17,17,14}},
   {'V', {17,17,17,10,4}},  {'W', {17,17,21,27,17}}, {'X', {17,10,4,10,17}},
   {'Y', {17,10,4,4,4}},    {'Z', {31,2,4,8,31}},
+  /* Punctuation, added for the Sylt briefing -- without these the fax read
+   * "SYLT  GERMANY" and "DUNES  STORM SURGES", because font_glyph_rows()
+   * falls back to blank for anything it does not carry. */
+  {'.', {0,0,0,0,4}},      {',', {0,0,0,4,8}},     {'-', {0,0,14,0,0}},
+  {'!', {4,4,4,0,4}},      {'?', {14,17,2,0,4}},   {':', {0,4,0,4,0}},
+  {'\'', {4,4,0,0,0}},    {'/', {1,2,4,8,16}},
 };
 #define kFontCount (sizeof(kFont) / sizeof(kFont[0]))
 
@@ -3061,6 +3080,81 @@ static void render_sylt_card(SDL_Renderer *renderer) {
   SDL_SetRenderDrawColor(renderer, 90, 70, 45, 255);
   draw_text(renderer, cx + (cw - text_width(px, "2047")) / 2, ty, px, "2047");
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+}
+
+/* The Sylt briefing, as a real tilemap handed to the ROM's own fax renderer.
+ *
+ * Index 8 falls off the eight-entry seed tables, so the ROM decompresses the
+ * free-play welcome (group-1 block 6, file 0x05FBE7) for it -- the wrong text
+ * for a scenario. Rather than paint over the fax, this overwrites the block
+ * after it lands in WRAM, so the game types it out, fades it and dismisses it
+ * exactly like the other eight briefings. Nothing is patched in the ROM.
+ *
+ * Each briefing is a 32x64 tilemap of 16-bit entries at $7E8000, decompressed
+ * by 00:90eb. The character encoding was read off the shipped blocks -- the
+ * Las Vegas title row decodes as "Las Vegas, U.S.A. 2096" against it:
+ *
+ *   title font   upper $000 + (c-'A')   lower $030 + (c-'a')
+ *   body font    upper $690 + (c-'A')   lower $6C0 + (c-'a')
+ *                -- bit 10 is the palette select. Dropping it renders the
+ *                body in the title's red; the shipped blocks set it.
+ *   ','  base+$1C     '.'  base+$1D     apostrophe base+$1E
+ *   digits  base+$20 + d                blank  $3FF
+ *
+ * KNOWN: the fax renderer drops the first character of every word, so this
+ * will show as "ylt, ermany 047" exactly as the shipped briefings show as
+ * "as egas, .S.A. 096". The stored tilemaps are complete -- decoding block 7
+ * gives "Las Vegas, the world's largest gambling city," in full -- so that is
+ * a display bug, not a data one, and it is not this feature's to fix. */
+#define SC_BRIEF_COLS 32
+#define SC_BRIEF_ROWS 64
+#define SC_BRIEF_BLANK 0x3FFu
+
+static void brief_put(uint8_t *dst, int row, int col, const char *s,
+                      unsigned up, unsigned lo) {
+  for (; *s; s++, col++) {
+    if (col < 0 || col >= SC_BRIEF_COLS) continue;
+    unsigned t = SC_BRIEF_BLANK;
+    const char c = *s;
+    if (c >= 'A' && c <= 'Z')      t = up + (unsigned)(c - 'A');
+    else if (c >= 'a' && c <= 'z') t = lo + (unsigned)(c - 'a');
+    else if (c >= '0' && c <= '9') t = up + 0x20u + (unsigned)(c - '0');
+    else if (c == ',')             t = up + 0x1Cu;
+    else if (c == '.')             t = up + 0x1Du;
+    else if (c == 39)              t = up + 0x1Eu;   /* apostrophe, unescaped */
+    /* space, and anything with no glyph, stays blank */
+    const size_t i = (size_t)(row * SC_BRIEF_COLS + col) * 2u;
+    dst[i]     = (uint8_t)(t & 0xffu);
+    dst[i + 1] = (uint8_t)(t >> 8);
+  }
+}
+
+/* Laid out on the same rows the shipped briefings use: title on row 2, body
+ * from row 4, both indented four columns. */
+static const char *const kSyltBody[] = {
+  "The North Sea has taken the",
+  "dunes. Storm surges break",
+  "over the marsh at every",
+  "spring tide, and the ferry",
+  "harbour floods twice a year.",
+  "The islanders have voted to",
+  "build rather than leave.",
+  "",
+  "Raise a working town on the",
+  "sand within 5 years.",
+};
+
+static void sylt_write_brief_tilemap(void) {
+  uint8_t *dst = &g_ram[0x8000];          /* $7E8000 */
+  for (int i = 0; i < SC_BRIEF_COLS * SC_BRIEF_ROWS; i++) {
+    dst[i * 2]     = (uint8_t)(SC_BRIEF_BLANK & 0xffu);
+    dst[i * 2 + 1] = (uint8_t)(SC_BRIEF_BLANK >> 8);
+  }
+  brief_put(dst, 2, 5, "Sylt, Germany 2047", 0x000u, 0x030u);
+  for (int i = 0; i < (int)(sizeof(kSyltBody) / sizeof(kSyltBody[0])); i++)
+    brief_put(dst, 4 + i, 4, kSyltBody[i], 0x690u, 0x6C0u);
+  fprintf(stderr, "[sylt] briefing tilemap written to $7E8000");
+  fputc('\n', stderr);
 }
 
 /* The STANDARD / FREE box. Deliberately small and centred rather than styled
