@@ -2,8 +2,12 @@
 
 ## The map
 
-`Sim City Sylt.ips` and the `sylt_map.bin` extracted from it are a third-party
-work, **used with the written permission of the map's author**.
+**Sylt map by lytron**, released 25 October 2014.
+
+`Sim City Sylt.ips` and the `sylt_map.bin` extracted from it are lytron's work,
+included here **with the author's written permission**. Please keep this credit
+with the files; if you fork this repo and do not have that permission yourself,
+remove them and regenerate from your own copy of the patch.
 
 The patch as shipped repoints scenario index 5 — Rio — at a new map, so
 applying it plainly *replaces* Rio. This project does not apply it. Instead

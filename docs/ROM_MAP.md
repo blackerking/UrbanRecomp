@@ -628,7 +628,10 @@ same report, which is why the control mattered.
 
 ### The real Sylt map, without patching the ROM
 
-The map arrives as an IPS that drops a compressed map at `$108000` and repoints
+The map is **by lytron**, released 25 October 2014, included with the
+author's written permission — see `sylt_graphics/PROVENANCE.md`.
+
+It arrives as an IPS that drops a compressed map at `$108000` and repoints
 scenario index **5 — Rio** — at it, so applying it plainly replaces Rio. A
 companion patch exists to relocate Rio first. Neither is applied, for two
 reasons.
