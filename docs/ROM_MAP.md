@@ -429,45 +429,28 @@ message-screen state (`savestate_5` sits in it, and X moves it to `0x0b`) but
 that state is presumably shared with ordinary in-play advisor faxes, which a
 free city should still get.
 
-### Open: fax text drops the first character of every word
+### Fax text dropping the first character of every word — a save-state artifact
 
-Unrelated to the replay work — a **STANDARD** Las Vegas start shows it too.
-The briefing renders as
+Captured from `savestate_4` with scripted input, every scenario briefing renders
+with the first character of each word missing:
 
 > as egas, he orld's argest ambling ity, as everely amaged y udden ttack f
 > nidentified lying bjects.
 
-i.e. "Las Vegas, the world's largest gambling city, was severely damaged by a
-sudden attack of Unidentified Flying Objects" with each word's leading
-character missing. Not a typing animation: frames 1250 and 1500 are pixel
-identical, so the text is settled. Both capitals and lowercase are affected
-("objects" -> "bjects"), which points at the word-advance in the text renderer
-rather than a glyph or tile problem. Captured headless with `SC_HOST_MAP=0`,
-so the host map renderer is not involved. Needs confirming against live play
-before being treated as a recomp defect.
+The stored data is **not** at fault — decoding the shipped tilemaps gives "Las
+Vegas, the world's largest gambling city," complete — and it is not the typing
+animation either, since frames 1250/1500 and 5200/7000 are pixel identical.
 
-### `$42`, the completion mask
+It is also **not** what the player sees. Playing in from a fresh boot, the Sylt
+briefing renders every character ("The North Sea has taken the dunes. Storm
+surges break..."), reported and screenshotted from play. Every reproduction of
+the fault instead loads `savestate_4` and drives the selector with `--input`.
 
-`03:ded0` walks it one `LSR` per scenario over eight iterations, drawing a mark
-from the coordinate tables at `03:df20`/`03:df30`, so **bit N = scenario N
-beaten**. `03:e30a` builds it and `03:e326` commits it to SRAM `$700007`; once
-the low bits are all set `03:e31c` also sets bit 15, which is what `03:ddbc`
-tests to unlock column 3. Save states 5 and 6 carry `$42 = 0x807f`.
-
-### Host hooks fire *before* the opcode at `pc`
-
-`run_one_frame()` tests `cpu->pc` and then calls `interp816_runOpcode()`, so a
-hook keyed to the address of a store runs **before** that store and is
-immediately overwritten by it. A hook that wants to override a written value
-must sit on the *following* instruction. This is not hypothetical: the first
-cut of the `SC_NINTH` hooks used `03:ddc1`/`03:de1a`/`03:de2f`, the three `STA`
-addresses themselves, and all three were clobbered. Corrected to `03:ddc3`,
-`03:de1c`, `03:de31`.
-
-`03:de2f` was doubly wrong: for column 4 the branch at `03:de2a` skips that
-store entirely, so the instruction never executes at all and a hook on it could
-never have fired. `03:de31` is on both paths. `03:cec8` was already correct by
-accident — it is the `RTS` ending the seed routine, so it is after the stores.
+So this is an artifact of the save-state path, not a defect in the fax
+renderer. Recorded because it will keep reappearing in captures taken that way
+and should not be mistaken for a product bug a third time: an earlier note here
+called it a confirmed display bug on the strength of a windowed run, but that
+run loaded `savestate_4` as well, so it never tested the thing it claimed to.
 
 ## The ninth entry — SYLT
 

@@ -1291,6 +1291,18 @@ static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
   switch (pc) {
+    case 0xddb6:   /* selector entry, before anything reads the cursor.
+                    * Coming back from a scenario the ROM re-derives $52/$54
+                    * from $0040, and it has no case for index 8: measured,
+                    * the cursor came back as col=0 row=226 where a stock
+                    * column 3 came back as col=3 row=0. Pin it instead, which
+                    * also puts the cursor back on the ninth entry rather than
+                    * anywhere else. */
+      if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8) {
+        g_ram[0x52] = 4;
+        g_ram[0x54] = 0;
+      }
+      break;
     case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
                     * Hooks fire BEFORE the opcode at pc, so this has to sit
                     * on the instruction after the store, not on it. */
@@ -1299,7 +1311,14 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
     case 0xde1c:   /* after 03:de1a STA $40, and also the target of the
                     * 03:ddc7 branch taken when no direction is pressed, so
                     * the index stays right on idle frames too */
-      if (g_ram[0x52] == 4) g_ram[0x40] = 8;
+      if (g_ram[0x52] == 4) {
+        g_ram[0x40] = 8;
+        g_ram[0x41] = 0;
+        /* One row only. Without this, Down on the ninth column runs 03:de0e's
+         * row*3+col and lands on 7 -- the Free card -- while the cursor
+         * sprite sits on an empty second row that has no card at all. */
+        g_ram[0x54] = 0;
+      }
       break;
     case 0xde31:   /* after 03:de2f STA $22 -- and necessarily here rather
                     * than on it, because for column 4 the 03:de2a BNE skips
@@ -1645,9 +1664,11 @@ static bool run_one_frame(void) {
  * Only runs on the selector, and only with SC_NINTH on -- without the ninth
  * column the stock scroll never exposes the margin in the first place. */
 #define SC_WOOD_SRC 16
+static uint32_t s_wood_strip[SC_WOOD_SRC * kVideoHeight];
+static bool s_wood_have;
 static void selector_extend_wood(void) {
   if (!s_ninth_scenario || !g_ppu) return;
-  if (s_frames - s_selector_frame >= 4) return;
+  if (s_frames - s_selector_frame >= 4) { s_wood_have = false; return; }
 
   uint16_t bd = g_ppu->cgram[0];
   const uint32_t backdrop = 0xFF000000u
@@ -1655,7 +1676,15 @@ static void selector_extend_wood(void) {
       | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
       | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
 
-  for (int y = 0; y < kVideoHeight; y++) {
+  /* The source columns are SCREEN coordinates, so while the view is scrolling
+   * they hold different wood every frame and the filled margin crawls -- seen
+   * in play as the background beside Sylt animating. Capture the strip only
+   * once the scroll has settled ($16 == $22, the compare 03:de33 itself
+   * makes) and reuse it while the view moves, so the margin holds still. */
+  const bool settled = (g_ram[0x16] | (g_ram[0x17] << 8)) ==
+                       (g_ram[0x22] | (g_ram[0x23] << 8));
+
+  for (int y = 0; y < kVideoHeight; y++) {
     uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
     /* Right-hand run of untouched backdrop = the uncovered margin. */
     int x = s_video_w - 1;
@@ -1665,11 +1694,15 @@ static void selector_extend_wood(void) {
     const int first = x + 1;
     if (first >= s_video_w) continue;          /* nothing uncovered */
     if (first <= SC_WOOD_SRC) continue;        /* no source to copy from */
+    uint32_t *strip = &s_wood_strip[(size_t)y * SC_WOOD_SRC];
+    if (settled || !s_wood_have)
+      for (int k = 0; k < SC_WOOD_SRC; k++) strip[k] = row[k];
     for (int dx = first; dx < s_video_w; dx++) {
-      int k = (dx - first) % (SC_WOOD_SRC * 2);
-      row[dx] = row[k < SC_WOOD_SRC ? k : (SC_WOOD_SRC * 2 - 1 - k)];
+      const int k = (dx - first) % (SC_WOOD_SRC * 2);
+      row[dx] = strip[k < SC_WOOD_SRC ? k : (SC_WOOD_SRC * 2 - 1 - k)];
     }
   }
+  s_wood_have = true;
 }
 
 /* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
@@ -3131,17 +3164,21 @@ static void brief_put(uint8_t *dst, int row, int col, const char *s,
 
 /* Laid out on the same rows the shipped briefings use: title on row 2, body
  * from row 4, both indented four columns. */
+/* 24 columns is the ROM's own limit: decoding the nine shipped blocks, text
+ * occupies columns 4..27 and never runs past it. The first cut went to 28 and
+ * spilled off the right edge of the paper. */
 static const char *const kSyltBody[] = {
-  "The North Sea has taken the",
-  "dunes. Storm surges break",
-  "over the marsh at every",
-  "spring tide, and the ferry",
-  "harbour floods twice a year.",
-  "The islanders have voted to",
+  "The North Sea has taken",
+  "the dunes. Storm surges",
+  "break over the marsh at",
+  "every spring tide, and",
+  "the ferry harbour floods",
+  "twice a year. The",
+  "islanders have voted to",
   "build rather than leave.",
   "",
-  "Raise a working town on the",
-  "sand within 5 years.",
+  "Raise a working town on",
+  "the sand within 5 years.",
 };
 
 static void sylt_write_brief_tilemap(void) {
