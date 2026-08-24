@@ -593,7 +593,14 @@ static int s_video_w = kVideoWidth;    /* active render width */
 static uint8_t s_ws_clamp = 0x0F;
 static bool s_ws_clamp_auto = true;   /* derive it per frame; SC_WS_CLAMP pins it */
 static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode */
-static bool s_ws_obj_clip = true;     /* SC_WS_OBJ_CLIP=0 to let sprites into the margins */
+/* OFF by default. Clipping sprites out of the margins was added to stop the
+ * title's light row leaking, but it cannot tell a leaked sprite from a wanted
+ * one: on the scenario selector any card that sits in a margin loses its red
+ * win mark AND the green selection cursor, because the ROM places those as
+ * sprites at coordinates that fall outside the authentic 256. Reported from
+ * play. Losing game state off the screen is worse than a cosmetic leak, so the
+ * default now favours showing everything. SC_WS_OBJ_CLIP=1 restores it. */
+static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
 static bool s_ws_pillarbox;           /* this frame renders 256 centred, margins blacked */
