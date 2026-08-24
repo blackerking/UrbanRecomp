@@ -82,7 +82,11 @@ def main():
     for y in range(TILES_H * 8):
         for x in range(TILES_W * 8):
             prev.putpixel((x, y), PAL[idx[y][x]])
-    pv = os.path.join(os.path.dirname(src) or ".", "sylt_card_preview.png")
+    # Named after the source, NOT a fixed name: the preview is itself a
+    # perfectly good source to re-import from once it has been touched up by
+    # hand, and writing back over it would destroy the edit.
+    stem = os.path.splitext(os.path.basename(src))[0]
+    pv = os.path.join(os.path.dirname(src) or ".", stem + "_check.png")
     prev.resize((TILES_W * 8 * 6, TILES_H * 8 * 6), Image.NEAREST).save(pv)
     print("preview -> %s" % pv)
 

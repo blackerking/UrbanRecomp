@@ -7,8 +7,12 @@
 *.rom
 
 # Third-party ROM patches (not this project's work -- reference-only,
-# never redistributed from this repo)
+# never redistributed from this repo). The Sylt map patch is the one
+# exception: its author gave written permission, and it carries only
+# their own map plus the pointer and seed bytes to hook it up -- no ROM
+# content. See sylt_graphics/PROVENANCE.md.
 *.ips
+!sylt_graphics/Sim City Sylt.ips
 
 # Active recompiler output -- generated locally per-developer
 src/gen/
@@ -89,4 +93,15 @@ mx_*.bin
 # when it is missing, so a checkout without this still builds and still shows
 # a ninth entry. Regenerate with:
 #   python tools/make_sylt_card.py sylt_graphics/<your card>.jpg
-sylt_graphics/
+# sylt_graphics/ is now COMMITTED -- the Sylt map is used with the written
+# permission of its author, and the card artwork is the project's own. Two
+# exceptions stay out:
+#
+#   "Sim City Rio on its own Bank.ips" embeds 7605 bytes that are byte-identical
+#   to Rio's map in the ROM (verified: it decompresses to the same 10068 bytes).
+#   That is copyrighted ROM data, which no third-party permission covers, and
+#   this host does not need it -- Rio is never relocated. See docs/ROM_MAP.md.
+#
+#   *_check.png are regenerated previews, not sources.
+sylt_graphics/Sim City Rio on its own Bank.ips
+sylt_graphics/*_check.png

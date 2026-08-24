@@ -626,6 +626,54 @@ the card's character data was uploaded once behind a static flag, and the
 screen's re-entry reloads VRAM over it. Both symptoms appeared together in the
 same report, which is why the control mattered.
 
+### The real Sylt map, without patching the ROM
+
+The map arrives as an IPS that drops a compressed map at `$108000` and repoints
+scenario index **5 — Rio** — at it, so applying it plainly replaces Rio. A
+companion patch exists to relocate Rio first. Neither is applied, for two
+reasons.
+
+**Patching the ROM would cost four features.** `main()` fingerprints the image
+with FNV-1a and sets `s_rom_is_us` on an exact match against the pristine US
+ROM. That flag gates the host map renderer (`ScMapView_Render` returns false
+without it), `SC_FIBER`, the cursor-cadence patch and the view fix. Any patch
+changes the fingerprint and silently loses all four.
+
+**Index 8 is the practice map, not a spare slot.** Overriding its data
+unconditionally would hand Sylt to the tutorial.
+
+So the map is decompressed offline by `tools/make_sylt_map.py` and written into
+WRAM at run time, and only when the ninth entry was actually confirmed:
+
+| | |
+|---|---|
+| arm | `03:de4d`, the B-accepted path, sets the flag only when `$52 == 4` and **clears** it for every other choice, so a stale arm can never reach another scenario |
+| swap | `03:ce5e`, the `JSR $d15f` — `03:ce2e` has decompressed the map to `$7E8000` and is about to unpack it, so the buffer is replaced with Sylt's own intermediate and the ROM's unpacker does the work |
+
+Verified: Sylt loads 150 distinct tiles (the stock index-8 island has 36) as the
+real island — Ellenbogen at the north, the narrow waist, Westerland built up,
+and the Hindenburgdamm running east. Starting Las Vegas in the same build logs
+no swap at all and loads its own 472-tile map.
+
+The seed for index 8 reproduces what the patch produces: it repoints index 5,
+so Sylt inherits **Rio's** entries except where overridden — year `07ff` (2047,
+which is what the card says), event `0102`, class `0004` -> `0001`, population
+25341 -> 3400.
+
+### Blob sizes, for reference
+
+| | compressed | unpacked |
+|---|---|---|
+| index 8 island (stock) | 1611 | 2814 |
+| index 5 Rio (stock) | 7605 | 10068 |
+| index 6 Las Vegas | 4494 | 8030 |
+| Sylt (patch) | 4304 | 4034 |
+| "Rio on its own Bank" (patch) | 7605 | 10068 |
+
+The last row is the important one: that patch's payload is **byte-identical to
+Rio's map in the ROM**, so it is a verbatim copy of copyrighted data and is not
+committed, whatever permission covers the Sylt map itself.
+
 ### Still missing for a real scenario
 
 Sylt currently has a map, a card and free play's seed. It has no briefing text,

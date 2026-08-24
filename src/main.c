@@ -1284,6 +1284,12 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * value the host can simply overwrite the instant the ROM has written it,
  * which needs no free ROM space and leaves every byte of the image intact. */
 static bool s_ninth_scenario;
+/* Declared here rather than beside load_sylt_map(): the arm is set from the
+ * selector hook and the swap runs in the opcode loop, both of which come
+ * earlier in this file. */
+static uint8_t *s_sylt_map;
+static long s_sylt_map_len;
+static bool s_sylt_map_armed;   /* only when the ninth column is confirmed */
 static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
                                       * Past the tilemap's own 359 px, which
                                       * selector_extend_tilemap() fills in. */
@@ -1304,6 +1310,13 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       }
       selector_extend_tilemap();
       sylt_place_card();
+      break;
+    case 0xde4d:   /* B accepted on the selector (03:de4d is the JSR $e574 /
+                    * INC $14 path). Arm the map swap only for the ninth
+                    * column, and clear it for every other choice so a stale
+                    * arm can never hand Sylt's map to another scenario --
+                    * index 8 is the PRACTICE map, so that matters. */
+      s_sylt_map_armed = (g_ram[0x52] == 4);
       break;
     case 0xdebb:   /* 03:deb2 and 03:deb8 have just stored the selection
                     * cursor's x and y. They come from the EIGHT-entry tables
@@ -1359,13 +1372,16 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       break;
     case 0xcec8:   /* 03:ce8b has just seeded from its 8-entry tables */
       if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8) {
-        /* Index 8 read past the tables. Give it free play's seed, which is
-         * the only entry with no win condition and no starting city. */
-        g_ram[0x0c0d] = 0x0a; g_ram[0x0c0e] = 0x00;   /* event countdown */
-        g_ram[0x0b53] = 0xc7; g_ram[0x0b54] = 0x07;   /* year 1991 */
-        g_ram[0x0deb] = 0x00; g_ram[0x0dec] = 0x00;   /* city class */
-        g_ram[0x0ca5] = 0x00; g_ram[0x0ca6] = 0x00;
-        g_ram[0x0ba5] = 0x00; g_ram[0x0ba6] = 0x00;   /* population */
+        /* Index 8 reads past the eight-entry tables, so the seed is supplied
+         * here. These are the values the Sylt patch produces: it repoints
+         * index 5, so Sylt inherits Rio's entries except where the patch
+         * overrides them -- class 0004 -> 0001 and population 25341 -> 3400.
+         * Year 2047 is Rio's and is what the card says. */
+        g_ram[0x0c0d] = 0x02; g_ram[0x0c0e] = 0x01;   /* event countdown 258 */
+        g_ram[0x0b53] = 0xff; g_ram[0x0b54] = 0x07;   /* year 2047 */
+        g_ram[0x0deb] = 0x01; g_ram[0x0dec] = 0x00;   /* city class 1 */
+        g_ram[0x0ca5] = 0x01; g_ram[0x0ca6] = 0x00;
+        g_ram[0x0ba5] = 0x48; g_ram[0x0ba6] = 0x0d;   /* population 3400 */
         g_ram[0x0ba7] = 0x00; g_ram[0x0ba8] = 0x00;
       }
       break;
@@ -1558,6 +1574,17 @@ static bool run_one_frame(void) {
     /* 0b:fbe7 is the free-play welcome block the ROM hands index 8. Keyed
      * on the source, so if it ever selects a different one this simply
      * does not fire rather than corrupting whatever did load. */
+    if (s_ninth_scenario && cpu->k == 0x03 && cpu->pc == 0xce5e &&
+        s_sylt_map_armed && s_sylt_map) {
+      /* 03:ce2e has decompressed the scenario's map to $7E8000 and is about
+       * to unpack it. Swap in Sylt's, then disarm so the next scenario --
+       * practice included -- loads its own. */
+      s_sylt_map_armed = false;
+      memcpy(&g_ram[0x8000], s_sylt_map, (size_t)s_sylt_map_len);
+      fprintf(stderr, "[sylt] map swapped in at $7E8000 (%ld bytes)",
+              s_sylt_map_len);
+      fputc('\n', stderr);
+    }
     if (s_ninth_scenario && cpu->k == 0x00) {
       if (cpu->pc == 0x90eb)
         s_sylt_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
@@ -2992,6 +3019,56 @@ static void render_settings_menu(SDL_Renderer *renderer) {
   SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 }
 
+/* The Sylt map, supplied at run time instead of patched into the ROM.
+ *
+ * The map arrives as an IPS that drops a compressed map at $108000 and
+ * repoints scenario index 5 -- Rio -- at it, so applying it plainly would
+ * replace Rio. The companion patch exists to relocate Rio first. Neither is
+ * applied here:
+ *
+ *   * patching the ROM changes its FNV, and the check in main() matches that
+ *     exactly to set s_rom_is_us. That flag gates the host map renderer,
+ *     SC_FIBER, the cursor-cadence patch and the view fix, so a patched image
+ *     quietly loses all four.
+ *   * index 8 is the PRACTICE map, not a spare slot. Overriding its data
+ *     unconditionally would hand Sylt to the tutorial.
+ *
+ * So the map is written into WRAM only when the ninth entry was actually
+ * chosen. 03:ce2e decompresses a scenario's map to $7E8000 and 03:ce5e unpacks
+ * it with JSR $d15f; replacing the buffer just before that JSR hands the game
+ * its own intermediate form and lets its own unpacker do the work. Rio keeps
+ * its slot, practice keeps its map, the ROM is untouched, and Sylt still loads
+ * through the ROM's own path. */
+
+static void load_sylt_map(void) {
+  const char *path = getenv("SC_SYLT_MAP");
+  if (!path) path = "sylt_graphics/sylt_map.bin";
+  FILE *f = fopen(path, "rb");
+  if (!f) return;                       /* absent is not an error */
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
+  const long n = ftell(f);
+  /* $7E8000 upward is the decompression scratch; the largest shipped map
+   * unpacks from 10068 bytes, so anything near that is plausible and anything
+   * far past it is not. */
+  if (n <= 0 || n > 0x4000) {
+    fprintf(stderr, "[sylt] %s: implausible map size %ld, ignored", path, n);
+    fputc('\n', stderr);
+    fclose(f);
+    return;
+  }
+  rewind(f);
+  s_sylt_map = (uint8_t *)malloc((size_t)n);
+  if (!s_sylt_map) { fclose(f); return; }
+  if (fread(s_sylt_map, 1, (size_t)n, f) != (size_t)n) {
+    free(s_sylt_map); s_sylt_map = NULL; fclose(f); return;
+  }
+  fclose(f);
+  s_sylt_map_len = n;
+  fprintf(stderr, "[sylt] loaded %s (%ld bytes, unpacked by the ROM's own "
+          "JSR $d15f)", path, n);
+  fputc('\n', stderr);
+}
+
 /* The Sylt card, as real BG1 tiles.
  *
  * Everything here was measured off the live selector rather than assumed:
@@ -3945,6 +4022,7 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_HUD_MASK");
     if (e && *e) s_hud_mask = (uint8_t)strtol(e, NULL, 0); }
   load_sylt_card();
+  load_sylt_map();
   { const char *e = getenv("SC_REPLAY_FREE");
     if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
