@@ -1,6 +1,6 @@
 # Reply draft — issue #15 / PR #16 test result
 
-**Status: NOT POSTED.** Draft only.
+**POSTED: https://github.com/mstan/snesrecomp/issues/15#issuecomment-5396740657**
 
 ---
 

@@ -1,6 +1,6 @@
 # A master-deadline expiry in scheduler mode never returns to the host
 
-**Status: NOT FILED.** Draft only — posting is the user's call.
+**FILED: https://github.com/mstan/snesrecomp/issues/23**
 
 Checked against `origin/main` @ `fe6045c` (post-DKC2 rewrite of
 `interp_bridge.c`). The bug survives that rewrite.

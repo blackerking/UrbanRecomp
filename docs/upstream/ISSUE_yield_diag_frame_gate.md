@@ -1,6 +1,6 @@
 # `SNESRECOMP_YIELD_STACK_DIAG` is gated on a hardcoded frame number
 
-**Status: NOT FILED.** Draft only — posting is the user's call.
+**FILED: https://github.com/mstan/snesrecomp/issues/24**
 
 `origin/main` @ `fe6045c`, `runner/src/snes/interp_bridge.c`:
 
