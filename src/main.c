@@ -586,6 +586,11 @@ enum { kVideoWidthMax = kVideoWidth + 96 * 2,
        kVideoPitchMax = kVideoWidthMax * 4 };
 static int s_ws_extra;                 /* pixels per side; 0 = authentic 256 */
 static int s_video_w = kVideoWidth;    /* active render width */
+/* Which BG layers stay pinned to the authentic 256 columns in widescreen.
+ * Bit per layer, BG1..BG4. 0x0F clamps all four, which is safe but leaves the
+ * margins empty on screens whose background would happily tile. SC_WS_CLAMP
+ * overrides it so a screen can be widened one layer at a time. */
+static uint8_t s_ws_clamp = 0x0F;
 static int s_video_pitch = kVideoPitch;
 static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
 
@@ -783,7 +788,29 @@ static void handle_pos_stuff(void) {
        * play on a clean start, which sits at $01df == 4. The clamp belongs to
        * widescreen itself; whether the map is being replaced is a separate
        * question. Re-applied per frame, as the API requires. */
-      if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, 0x0F);
+      if (s_ws_extra > 0) PpuSetWidescreenLayerClamp(g_ppu, s_ws_clamp);
+      /* SC_PPU_LAYOUT=1: one line per screen, printed when $14 changes.
+       * Widening a screen means knowing which BG carries its background and
+       * whether that tilemap has anything in the columns the extra width
+       * would expose -- the same question SC_SELECTOR_PPU answered for the
+       * scenario screen, asked everywhere. */
+      if (getenv("SC_PPU_LAYOUT")) {
+        static uint8_t last = 0xff;
+        if (g_ram[0x14] != last) {
+          last = g_ram[0x14];
+          fprintf(stderr, "[layout] $14=%02x $01df=%u mode=%d main=%02x sub=%02x\n",
+                  g_ram[0x14], g_ram[0x1df], (int)PPU_mode(g_ppu),
+                  g_ppu->screenEnabled[0], g_ppu->screenEnabled[1]);
+          for (int L = 0; L < 4; L++)
+            if ((g_ppu->screenEnabled[0] >> L) & 1)
+              fprintf(stderr, "[layout]   BG%d map=%04x wide=%d high=%d chr=%04x hs=%d vs=%d\n",
+                      L + 1, (unsigned)PPU_bgTilemapAdr(g_ppu, L),
+                      PPU_bgTilemapWider(g_ppu, L) ? 1 : 0,
+                      PPU_bgTilemapHigher(g_ppu, L) ? 1 : 0,
+                      (unsigned)PPU_bgTileAdr(g_ppu, L),
+                      g_ppu->hScroll[L], g_ppu->vScroll[L]);
+        }
+      }
       host_map_arm_captures();
       snes->inVblank = false; snes->inNmi = false;
       /* Real "HDMA init": (re)latch each currently-enabled channel's table
@@ -4020,6 +4047,8 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_WS_CLAMP");
+    if (e && *e) s_ws_clamp = (uint8_t)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_HOST_HDMA");
     if (e && *e) s_host_hdma = (*e != '0'); }
   { const char *e = getenv("SC_REPLAY_MENU");
