@@ -708,6 +708,7 @@ static void hdma_do_line(HdmaChanState *c) {
 /* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
+static void selector_extend_wood(void);
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
 /* Layers taken into the HUD pass. SC_HUD_MASK overrides it: bit0 BG1,
@@ -791,6 +792,7 @@ static void handle_pos_stuff(void) {
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
       host_map_compose();   /* all 224 visible lines are drawn by now */
+      selector_extend_wood();
       snes->inVblank = true;
       snes->inNmi = true;
       if (snes->nmiEnabled) { cpu->nmiWanted = true; s_nmi_requests++; }
@@ -1281,9 +1283,9 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * value the host can simply overwrite the instant the ROM has written it,
  * which needs no free ROM space and leaves every byte of the image intact. */
 static bool s_ninth_scenario;
-static int  s_ninth_scroll = 0x68;   /* $22 target for the new column --
-                                      * the largest with no black margin;
-                                      * see render_sylt_card() */
+static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
+                                      * Past the tilemap's own 359 px, which
+                                      * selector_extend_wood() fills in. */
 
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
@@ -1611,6 +1613,52 @@ static bool run_one_frame(void) {
   return guard > 0;
 }
 
+/* Extend the selector's wood backdrop across the margin its tilemap does not
+ * cover.
+ *
+ * The tilemap stops at world x = 359. Column 3 already views to 335, so
+ * scrolling far enough to give the ninth entry its own column runs into the
+ * backdrop colour -- black. The wood is a designed panel, not a tiling
+ * pattern (autocorrelating the strip beside the cards found no period under
+ * 120 px worth having), so this does not try to continue the texture. It
+ * mirror-tiles instead, taking the source from the SAME ROW so the grain
+ * lines always meet, and alternating direction so there is no hard seam.
+ *
+ * Source is the leftmost 16 columns, which is the only span clear of the
+ * cards and of the title at every row (measured: the title reaches x = 196 on
+ * its rows, and the worst row still leaves a 40 px run somewhere, but only
+ * x = 0..15 is clear on all 224 of them).
+ *
+ * Only runs on the selector, and only with SC_NINTH on -- without the ninth
+ * column the stock scroll never exposes the margin in the first place. */
+#define SC_WOOD_SRC 16
+static void selector_extend_wood(void) {
+  if (!s_ninth_scenario || !g_ppu) return;
+  if (s_frames - s_selector_frame >= 4) return;
+
+  uint16_t bd = g_ppu->cgram[0];
+  const uint32_t backdrop = 0xFF000000u
+      | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+      | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+      | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    /* Right-hand run of untouched backdrop = the uncovered margin. */
+    int x = s_video_w - 1;
+    /* 24-bit compare: ppu_runLine leaves the top byte at 0, so anything
+     * matched against a 0xFF-alpha constant never compares equal. */
+    while (x >= 0 && (row[x] & 0x00FFFFFFu) == (backdrop & 0x00FFFFFFu)) x--;
+    const int first = x + 1;
+    if (first >= s_video_w) continue;          /* nothing uncovered */
+    if (first <= SC_WOOD_SRC) continue;        /* no source to copy from */
+    for (int dx = first; dx < s_video_w; dx++) {
+      int k = (dx - first) % (SC_WOOD_SRC * 2);
+      row[dx] = row[k < SC_WOOD_SRC ? k : (SC_WOOD_SRC * 2 - 1 - k)];
+    }
+  }
+}
+
 /* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
  * at whatever frame SC_DUMP_AT names.
  *
@@ -1759,7 +1807,13 @@ static void host_map_compose(void) {
         int sxp = x + ui_shift;
         if (sxp >= s_video_w) break;
         uint32_t p = hud[sxp];
-        if (p != s_backdrop_argb && (p & 0x00FFFFFFu) != 0) dst[x] = p;
+        /* Same 24-bit compare as selector_extend_wood(). This keying was
+         * written to make a fade match by treating backdrop pixels as
+         * transparent, but s_backdrop_argb carries 0xFF alpha while the
+         * rendered pixels carry 0, so `p != s_backdrop_argb` was ALWAYS
+         * true and only the black test ever did anything. */
+        if ((p & 0x00FFFFFFu) != (s_backdrop_argb & 0x00FFFFFFu) &&
+            (p & 0x00FFFFFFu) != 0) dst[x] = p;
       }
     }
   }
@@ -2904,7 +2958,7 @@ static void render_sylt_card(SDL_Renderer *renderer) {
    * card is placed in those coordinates and scaled to the real window. */
   const double sx = (double)out_w / (double)s_video_w;
   const double sy = (double)out_h / (double)kVideoHeight;
-  const int cx = (int)(190 * sx), cy = (int)(56 * sy);
+  const int cx = (int)(172 * sx), cy = (int)(56 * sy);
   const int cw = (int)(62 * sx), ch = (int)(74 * sy);
   int px = (int)(1 * sy); if (px < 1) px = 1; if (px > 3) px = 3;
 

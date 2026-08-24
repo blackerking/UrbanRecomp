@@ -516,6 +516,49 @@ instead, over the right edge, using the same overlay route as the replay menu.
 With the screen already full of cards it unavoidably overlaps the right edge of
 the Las Vegas card — there is no clear space at any scroll.
 
+### Extending the wood, and a keying bug it exposed
+
+The wood is a designed panel, not a tiling texture — autocorrelating the strip
+beside the cards found no worthwhile period under 120 px. So
+`selector_extend_wood()` does not try to continue the pattern. It mirror-tiles,
+taking the source from the **same row** so the grain lines always meet and
+alternating direction so there is no hard seam.
+
+The source is the leftmost 16 columns, which is the only span clear of both the
+cards and the title on all 224 rows. Measured at scroll `$a0`: the title
+reaches x = 196 on its own rows, the rightmost card-free column overall is only
+x = 197, and although the worst single row still leaves a 40 px run somewhere,
+`x = 0..15` is the only span clear on *every* row.
+
+With the margin filled, `SC_NINTH_SCROLL` goes back to `$a0` and the Sylt card
+gets a real fifth column instead of overlapping Las Vegas.
+
+**The keying bug.** The first cut of this filled nothing at all. The test was
+
+```c
+while (x >= 0 && row[x] == backdrop) x--;
+```
+
+and `backdrop` is built with `0xFF000000` while `ppu_runLine` writes pixels
+with the **top byte left at 0** — sampled live: `00310000`, `00522910`. So the
+comparison could never be true.
+
+The same mistake was already in `host_map_compose()`:
+
+```c
+if (p != s_backdrop_argb && (p & 0x00FFFFFFu) != 0) dst[x] = p;
+```
+
+`p != s_backdrop_argb` was **always** true, so the backdrop keying there has
+never done anything and only the black test ever ran. That keying was added
+specifically so a fade would match, by treating backdrop pixels as transparent
+— which is why the fade never came right. Both now compare 24 bits.
+
+Measured effect on the city view: **0 of 57344 pixels change**, because that
+screen's backdrop is black and the two tests coincide there. It should differ
+during a fade, which is the case it was written for and the one still worth
+checking in play.
+
 ### Still missing for a real scenario
 
 Sylt currently has a map, a card and free play's seed. It has no briefing text,
