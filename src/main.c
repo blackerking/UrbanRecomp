@@ -594,6 +594,8 @@ static uint8_t s_ws_clamp = 0x0F;
 static bool s_ws_clamp_auto = true;   /* derive it per frame; SC_WS_CLAMP pins it */
 static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode */
 static bool s_ws_obj_clip = true;     /* SC_WS_OBJ_CLIP=0 to let sprites into the margins */
+static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
+static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
 static uint8_t *s_ws_scratch;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
@@ -736,6 +738,7 @@ static void hdma_do_line(HdmaChanState *c) {
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static void selector_extend_tilemap(void);
+static void widen_menu_bg(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
@@ -846,6 +849,23 @@ static void handle_pos_stuff(void) {
        * play on a clean start, which sits at $01df == 4. The clamp belongs to
        * widescreen itself; whether the map is being replaced is a separate
        * question. Re-applied per frame, as the API requires. */
+      widen_menu_bg();
+      /* BG3 is hard-clamped independent of wsLayerClamp:
+       *
+       *     if (layer != 2) return extra;
+       *     return (ppu->wsBg3WidenY && y >= ppu->wsBg3WidenY) ? extra : 0;
+       *
+       * because BG3 usually carries a status bar that must not tile sideways.
+       * The main menu is BG3-only, so nothing else could widen it -- measured,
+       * its margins stayed at 0 pixels with the tilemap already 64 columns and
+       * the clamp mask showing BG3 clear.
+       *
+       * Set EVERY frame, not once inside widen_menu_bg(): the field is sticky
+       * and PpuResetLayerPolicies() does not clear it, so opening it on the
+       * menu would leave BG3 widened on the gameplay HUD afterwards -- exactly
+       * the tiling this default exists to prevent. */
+      if (g_ppu)
+        PpuSetWidescreenBg3Widen(g_ppu, s_bg3_widened ? 1 : 0);
       if (s_ws_extra > 0) {
         /* Clamp exactly the layers that CANNOT be widened, derived from the
          * live registers rather than a per-screen table.
@@ -1839,6 +1859,60 @@ static bool run_one_frame(void) {
   if (s_generating || s_gen_loop_active_frames > 0) s_gen_boost_frames++;
   if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
+}
+
+/* Widen the main menu by relocating its background to a 64-column tilemap.
+ *
+ * The main menu ($14 == 3) draws everything on BG3 alone, from a 32-column
+ * tilemap at $3000 -- 256 px, so widescreen wraps it and the menu box
+ * reappears in the margin. The scenario screen's trick does not apply: that
+ * one was already 64 columns with the second page blank, whereas here page 1
+ * ($3400) is 1009/1024 non-zero, so it belongs to something else.
+ *
+ * Mirror and repeat do not help either. PpuMergePaddedBackground pads from the
+ * whole authentic 256, and the box sits close enough to both edges that either
+ * drags a piece of it into the margin.
+ *
+ * So the map is copied to free VRAM as a 64-column map and the new half filled
+ * with wood. Measured free: $6800/$6c00/$7000/$7400/$7800 are entirely empty
+ * 2KB pages, and a 64-column map needs two consecutive ones.
+ *
+ * The wood is an 8x8 block of consecutive tiles, read off the live tilemap:
+ * tile = kMenuWood[row % 8] + (col % 8). Column 32 continues the phase from 31
+ * exactly (32 % 8 == 0), so the seam is invisible.
+ *
+ * Redone every frame: the screen's own DMA owns $3000, and BG3SC is rewritten
+ * per frame, so both the copy and the register have to be reasserted. */
+#define SC_MENU_MAP_SRC 0x3000u
+#define SC_MENU_MAP_DST 0x6800u
+static const uint16_t kMenuWood[8] = {
+  0x68, 0x78, 0x88, 0x98, 0x60, 0x70, 0x80, 0x90
+};
+
+static void widen_menu_bg(void) {
+  s_bg3_widened = false;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
+  if (g_ram[0x14] != 0x03) return;                 /* main menu only */
+  /* Only act on the layout this was measured against; if the screen is
+   * arranged differently, leave it alone rather than corrupt VRAM. */
+  if ((unsigned)PPU_bgTilemapAdr(g_ppu, 2) != SC_MENU_MAP_SRC) return;
+
+  for (unsigned i = 0; i < 0x400u; i++)
+    g_ppu->vram[SC_MENU_MAP_DST + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
+  for (unsigned row = 0; row < 32u; row++)
+    for (unsigned col = 0; col < 32u; col++)
+      g_ppu->vram[SC_MENU_MAP_DST + 0x400u + row * 32u + col] =
+          (uint16_t)(kMenuWood[row & 7u] + ((col + 32u) & 7u));
+
+  /* BG3SC: base in the top six bits, bit 0 = 64 columns wide. */
+  g_ppu->bgXsc[2] = (uint8_t)((SC_MENU_MAP_DST >> 8) | 0x01u);
+  s_bg3_widened = true;
+  { static int n; if (getenv("SC_WS_DIAG") && n < 4) { n++;
+      fprintf(stderr, "[menuwide] frame=%llu bg3sc=%02x page1[0]=%04x page1[40]=%04x hs=%d\n",
+              (unsigned long long)s_frames, g_ppu->bgXsc[2],
+              g_ppu->vram[SC_MENU_MAP_DST + 0x400u],
+              g_ppu->vram[SC_MENU_MAP_DST + 0x400u + 40u],
+              g_ppu->hScroll[2]); } }
 }
 
 /* Extend the selector background in the TILEMAP, not in the framebuffer.
@@ -4152,6 +4226,8 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_WS_MENU");
+    if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
     if (e && *e) s_ws_obj_clip = (*e != '0'); }
   { const char *e = getenv("SC_WS_OAM");
