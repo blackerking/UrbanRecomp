@@ -597,6 +597,8 @@ static bool s_ws_obj_clip = true;     /* SC_WS_OBJ_CLIP=0 to let sprites into th
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
 static bool s_ws_pillarbox;           /* this frame renders 256 centred, margins blacked */
+static uint8_t s_ws_mirror;           /* SC_WS_MIRROR: layers padded by mirroring */
+static bool s_ws_margin_fill = true;  /* SC_WS_FILL=0 to leave empty margins black */
 static uint8_t *s_ws_scratch;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
@@ -741,6 +743,7 @@ static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static void selector_extend_tilemap(void);
 static void widen_menu_bg(void);
+static void ws_fill_margins(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
@@ -928,6 +931,13 @@ static void handle_pos_stuff(void) {
         if (s_ws_clamp_auto)
           for (int L = 0; L < 4; L++)
             if (!PPU_bgTilemapWider(g_ppu, L)) clamp |= (uint8_t)(1u << L);
+        /* SC_WS_MIRROR=<mask>: pad those layers by mirroring the authentic
+         * 256 into the margins instead of clamping them. Needs no VRAM, which
+         * matters on the screens that have none free -- map select and name
+         * entry both have a single spare 2KB page and no consecutive pair, so
+         * the menu's relocate-and-fill is impossible there. */
+        clamp &= (uint8_t)~s_ws_mirror;
+        PpuSetWidescreenLayerMirror(g_ppu, s_ws_mirror);
         PpuSetWidescreenLayerClamp(g_ppu, clamp);
         /* Sprites are NOT covered by that mask -- PpuWidescreenLayerExtra()
          * only consults it for layer < 4 -- so they reach the margins however
@@ -992,6 +1002,7 @@ static void handle_pos_stuff(void) {
           for (int x = 0; x < s_ws_extra; x++) row[x] = 0;
           for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) row[x] = 0;
         }
+      ws_fill_margins();
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
       snes->inNmi = true;
@@ -1907,6 +1918,91 @@ static bool run_one_frame(void) {
   if (s_generating || s_gen_loop_active_frames > 0) s_gen_boost_frames++;
   if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
+}
+
+/* Fill widescreen margins that nothing drew into, from the screen's own edge.
+ *
+ * Some screens cannot be widened at all. Map select and name entry each carry
+ * their background on BG3 as a 32-column tilemap, and have a single spare 2KB
+ * VRAM page with no consecutive pair, so the main menu's relocate-and-fill is
+ * impossible. Mirroring the layer does work without VRAM, but it reflects the
+ * screen's own label into the margin -- "MAP SELECT" came back as "AM" on the
+ * left and "T" on the right.
+ *
+ * So the margins are filled here instead, from the leftmost columns of the
+ * authentic picture, which on both screens are 16 columns of plain desk on
+ * every row. Mirror-tiled, so there is no seam and no need for the source to
+ * be a whole pattern period.
+ *
+ * Two guards keep this from touching anything it should not:
+ *
+ *   - a row is filled only if its margins are ENTIRELY backdrop, so any screen
+ *     that legitimately reaches the margins (the title's BG1, the widened main
+ *     menu, the scenario selector) is skipped row by row;
+ *   - the source strip must itself be free of backdrop, so a blank or fading
+ *     screen does not smear nothing across the margins.
+ *
+ * These screens do not scroll, which is what makes a static fill honest here --
+ * an earlier framebuffer fill on the scrolling selector crawled, and that is
+ * why the selector got real tiles instead. */
+#define SC_WS_FILL_SRC 16
+static void ws_fill_margins(void) {
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill || s_ws_pillarbox) return;
+
+  const uint16_t bd = g_ppu->cgram[0];
+  const uint32_t backdrop = ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+                          | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+                          | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+  const int right0 = s_video_w - s_ws_extra;
+
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    bool empty = true;
+    for (int x = 0; x < s_ws_extra && empty; x++)
+      if ((row[x] & 0x00FFFFFFu) != backdrop) empty = false;
+    for (int x = right0; x < s_video_w && empty; x++)
+      if ((row[x] & 0x00FFFFFFu) != backdrop) empty = false;
+    if (!empty) continue;                       /* something drew here */
+
+    const uint32_t *src = &row[s_ws_extra];     /* authentic left edge */
+    /* The strip has to look like a BACKGROUND, not like content. "Not
+     * backdrop" was too weak a test: on the gameplay screen the left edge is
+     * map and toolbar, and tiling it produced vertical smears across the
+     * margins.
+     *
+     * Measured over every screen, distinct colours in the 16-pixel strip and
+     * the channel range across it separate the two cleanly:
+     *
+     *   title / menu / map select / name entry   1.8-1.9 colours, range ~71
+     *   gameplay / tax                           5.7-6.6 colours, range ~215
+     *
+     * so a plain texture is at most four colours and a modest range. */
+    unsigned distinct = 0, seen[SC_WS_FILL_SRC];
+    unsigned lo = 255, hi = 0;
+    bool usable = true;
+    for (int k = 0; k < SC_WS_FILL_SRC; k++) {
+      const uint32_t c = src[k] & 0x00FFFFFFu;
+      if (c == backdrop) { usable = false; break; }
+      unsigned j = 0;
+      while (j < distinct && seen[j] != c) j++;
+      if (j == distinct) seen[distinct++] = c;
+      for (int sh = 0; sh < 24; sh += 8) {
+        const unsigned ch = (c >> sh) & 0xffu;
+        if (ch < lo) lo = ch;
+        if (ch > hi) hi = ch;
+      }
+    }
+    if (!usable || distinct > 4u || (hi - lo) > 120u) continue;
+
+    for (int x = s_ws_extra - 1; x >= 0; x--) {
+      const int d = (s_ws_extra - 1 - x) % (SC_WS_FILL_SRC * 2);
+      row[x] = src[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
+    }
+    for (int x = right0; x < s_video_w; x++) {
+      const int d = (x - right0) % (SC_WS_FILL_SRC * 2);
+      row[x] = src[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
+    }
+  }
 }
 
 /* Widen the main menu by relocating its background to a 64-column tilemap.
@@ -4274,6 +4370,10 @@ int main(int argc, char **argv) {
     } }
   { const char *e = getenv("SC_NINTH");
     if (e && *e && *e != '0') s_ninth_scenario = true; }
+  { const char *e = getenv("SC_WS_FILL");
+    if (e && *e) s_ws_margin_fill = (*e != '0'); }
+  { const char *e = getenv("SC_WS_MIRROR");
+    if (e && *e) s_ws_mirror = (uint8_t)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_WS_MENU");
     if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
