@@ -708,7 +708,7 @@ static void hdma_do_line(HdmaChanState *c) {
 /* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
-static void selector_extend_wood(void);
+static void selector_extend_tilemap(void);
 static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
@@ -793,7 +793,6 @@ static void handle_pos_stuff(void) {
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
       host_map_compose();   /* all 224 visible lines are drawn by now */
-      selector_extend_wood();
       snes->inVblank = true;
       snes->inNmi = true;
       if (snes->nmiEnabled) { cpu->nmiWanted = true; s_nmi_requests++; }
@@ -1286,7 +1285,7 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
 static bool s_ninth_scenario;
 static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
                                       * Past the tilemap's own 359 px, which
-                                      * selector_extend_wood() fills in. */
+                                      * selector_extend_tilemap() fills in. */
 
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
@@ -1302,6 +1301,7 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
         g_ram[0x52] = 4;
         g_ram[0x54] = 0;
       }
+      selector_extend_tilemap();
       break;
     case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
                     * Hooks fire BEFORE the opcode at pc, so this has to sit
@@ -1645,64 +1645,44 @@ static bool run_one_frame(void) {
   return guard > 0;
 }
 
-/* Extend the selector's wood backdrop across the margin its tilemap does not
- * cover.
+/* Extend the selector background in the TILEMAP, not in the framebuffer.
  *
- * The tilemap stops at world x = 359. Column 3 already views to 335, so
- * scrolling far enough to give the ninth entry its own column runs into the
- * backdrop colour -- black. The wood is a designed panel, not a tiling
- * pattern (autocorrelating the strip beside the cards found no period under
- * 120 px worth having), so this does not try to continue the texture. It
- * mirror-tiles instead, taking the source from the SAME ROW so the grain
- * lines always meet, and alternating direction so there is no hard seam.
+ * BG1 is the only layer on the main screen for this screen (measured:
+ * mode 0, BG1 map $3000 wide=1 chr $0000, BG2/3/4 off), and wide=1 means the
+ * tilemap is 64 tiles across -- two 32x32 pages, the second at map+$400 words.
+ * The shipped screen fills columns 0..44 and leaves 45..63 as tile $0000,
+ * which is why scrolling the ninth column into view showed black.
  *
- * Source is the leftmost 16 columns, which is the only span clear of the
- * cards and of the title at every row (measured: the title reaches x = 196 on
- * its rows, and the worst row still leaves a 40 px run somewhere, but only
- * x = 0..15 is clear on all 224 of them).
+ * The wood is genuinely repeatable, as it turns out: columns 41..44 carry a
+ * 4-wide by 8-tall block that repeats down the whole screen. Reading it off
+ * the live tilemap and tiling it into columns 45..63 extends the background
+ * for real -- the PPU draws it, it scrolls with everything else, and the
+ * host-side pixel fill it replaces is gone along with its scroll artefacts.
  *
- * Only runs on the selector, and only with SC_NINTH on -- without the ninth
- * column the stock scroll never exposes the margin in the first place. */
-#define SC_WOOD_SRC 16
-static uint32_t s_wood_strip[SC_WOOD_SRC * kVideoHeight];
-static bool s_wood_have;
-static void selector_extend_wood(void) {
-  if (!s_ninth_scenario || !g_ppu) return;
-  if (s_frames - s_selector_frame >= 4) { s_wood_have = false; return; }
+ * Phase continues from column 41 so the seam at column 44/45 is invisible. */
+static const uint16_t kSelWood[8][4] = {
+  { 0x0029, 0x002a, 0x002b, 0x002c },
+  { 0x0039, 0x003a, 0x003b, 0x003c },
+  { 0x0049, 0x004a, 0x004b, 0x004c },
+  { 0x0059, 0x005a, 0x005b, 0x005c },
+  { 0x0061, 0x0062, 0x0063, 0x0064 },
+  { 0x0071, 0x0072, 0x0073, 0x0074 },
+  { 0x0081, 0x0082, 0x0083, 0x0084 },
+  { 0x0091, 0x0092, 0x0093, 0x0094 },
+};
 
-  uint16_t bd = g_ppu->cgram[0];
-  const uint32_t backdrop = 0xFF000000u
-      | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
-      | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
-      | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
-
-  /* The source columns are SCREEN coordinates, so while the view is scrolling
-   * they hold different wood every frame and the filled margin crawls -- seen
-   * in play as the background beside Sylt animating. Capture the strip only
-   * once the scroll has settled ($16 == $22, the compare 03:de33 itself
-   * makes) and reuse it while the view moves, so the margin holds still. */
-  const bool settled = (g_ram[0x16] | (g_ram[0x17] << 8)) ==
-                       (g_ram[0x22] | (g_ram[0x23] << 8));
-
-  for (int y = 0; y < kVideoHeight; y++) {
-    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-    /* Right-hand run of untouched backdrop = the uncovered margin. */
-    int x = s_video_w - 1;
-    /* 24-bit compare: ppu_runLine leaves the top byte at 0, so anything
-     * matched against a 0xFF-alpha constant never compares equal. */
-    while (x >= 0 && (row[x] & 0x00FFFFFFu) == (backdrop & 0x00FFFFFFu)) x--;
-    const int first = x + 1;
-    if (first >= s_video_w) continue;          /* nothing uncovered */
-    if (first <= SC_WOOD_SRC) continue;        /* no source to copy from */
-    uint32_t *strip = &s_wood_strip[(size_t)y * SC_WOOD_SRC];
-    if (settled || !s_wood_have)
-      for (int k = 0; k < SC_WOOD_SRC; k++) strip[k] = row[k];
-    for (int dx = first; dx < s_video_w; dx++) {
-      const int k = (dx - first) % (SC_WOOD_SRC * 2);
-      row[dx] = strip[k < SC_WOOD_SRC ? k : (SC_WOOD_SRC * 2 - 1 - k)];
+/* Written every frame the selector runs: the screen's own setup DMA lands
+ * before this and would otherwise put the blank tiles back. */
+static void selector_extend_tilemap(void) {
+  if (!g_ppu) return;
+  const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);   /* BG1, in words */
+  for (int row = 0; row < 32; row++)
+    for (int col = 45; col < 64; col++) {
+      /* Columns 32..63 live in the second 32x32 page, at map + $400 words. */
+      const unsigned idx = map + 0x400u + (unsigned)row * 32u + (unsigned)(col - 32);
+      if (idx >= 0x8000u) continue;
+      g_ppu->vram[idx] = kSelWood[row & 7][(col - 41) & 3];
     }
-  }
-  s_wood_have = true;
 }
 
 /* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
@@ -1853,7 +1833,7 @@ static void host_map_compose(void) {
         int sxp = x + ui_shift;
         if (sxp >= s_video_w) break;
         uint32_t p = hud[sxp];
-        /* Same 24-bit compare as selector_extend_wood(). This keying was
+        /* 24-bit compare. This keying was
          * written to make a fade match by treating backdrop pixels as
          * transparent, but s_backdrop_argb carries 0xFF alpha while the
          * rendered pixels carry 0, so `p != s_backdrop_argb` was ALWAYS
