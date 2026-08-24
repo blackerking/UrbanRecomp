@@ -1343,6 +1343,10 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
         g_ram[0x52] = 4;
         g_ram[0x54] = 0;
       }
+      /* Reaching the selector clears the arm; 03:de4d re-sets it later in this
+       * same routine if the ninth column is confirmed. Backing out of Sylt
+       * without starting it therefore cannot leave it armed for the tutorial. */
+      s_sylt_map_armed = false;
       selector_extend_tilemap();
       sylt_place_card();
       break;
@@ -1625,7 +1629,12 @@ static bool run_one_frame(void) {
         s_sylt_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
                             ((uint32_t)g_ram[0x0a] << 8);
       else if (cpu->pc == 0x9106 && s_sylt_decomp_src == 0x0bfbe7u &&
-               (g_ram[0x40] | (g_ram[0x41] << 8)) == 8)
+               s_sylt_map_armed)
+        /* Armed, NOT just "$0040 == 8". Index 8 is the practice map, so the
+         * tutorial decompresses the very same welcome block with $0040 at 8
+         * and was getting Sylt's briefing -- reported from play. The arm is
+         * read here and consumed later by the map swap at 03:ce5e, which runs
+         * after this. */
         sylt_write_brief_tilemap();
     }
     if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
