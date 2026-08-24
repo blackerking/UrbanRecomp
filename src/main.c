@@ -1305,6 +1305,25 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       selector_extend_tilemap();
       sylt_place_card();
       break;
+    case 0xdebb:   /* 03:deb2 and 03:deb8 have just stored the selection
+                    * cursor's x and y. They come from the EIGHT-entry tables
+                    * at 03:df10 and 03:df00, and 03:dea8 indexes them with
+                    * $0040*2 -- so index 8 reads 16 bytes past 03:df10, which
+                    * is the win-mark table, and the blinking border lands on
+                    * the wood instead of the ninth card.
+                    *
+                    * X runs 0010/0060/00b0 for grid columns 0..2 and 0100 for
+                    * column 3: eighty apart, so column 4 is $150 = 336, which
+                    * is tilemap column 42 x 8 -- the card's own position.
+                    * Y is $27 on the top row, $7f on the bottom. */
+      if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8) {
+        const uint16_t scroll = (uint16_t)(g_ram[0x16] | (g_ram[0x17] << 8));
+        const uint16_t cx = (uint16_t)(0x150u - scroll);   /* 03:deb0 SBC $16 */
+        g_ram[0x025d] = (uint8_t)(cx & 0xff);
+        g_ram[0x025e] = (uint8_t)(cx >> 8);
+        g_ram[0x025f] = 0x27; g_ram[0x0260] = 0x00;
+      }
+      break;
     case 0xddc3:   /* 03:ddc1 STA $79 has just run -- widen the max column.
                     * Hooks fire BEFORE the opcode at pc, so this has to sit
                     * on the instruction after the store, not on it. */

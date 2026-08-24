@@ -584,6 +584,31 @@ converted rather than just the thumbnail.
 ninth card has none. Cosmetic, and it would need a free OAM slot plus the
 sprite's own tile.
 
+### The selection cursor, and why it missed the ninth card
+
+`03:dea4` draws the blinking green border from two **eight-entry** word tables,
+indexed at `03:dea8` by `$0040 * 2`:
+
+| | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| `03:df00` Y | 0027 | 0027 | 0027 | 007f | 007f | 007f | 0027 | 007f |
+| `03:df10` X | 0010 | 0060 | 00b0 | 0010 | 0060 | 00b0 | 0100 | 0100 |
+
+Index 8 therefore reads sixteen bytes past `03:df10`, which is the win-mark
+table at `03:df20`, and the border lands on the wood instead of the card —
+reported from play as the ninth entry never getting the green blinking border.
+
+X is `0010`/`0060`/`00b0` for grid columns 0..2 and `0100` for column 3:
+**eighty apart**. Column 4 is therefore `$150` = 336, which is tilemap column
+42 x 8 — the position the card already occupies, arrived at independently from
+the card spacing. Y is `$27` on the top row.
+
+Supplied at `03:debb`, after `03:deb2`/`03:deb8` have stored x and y, with the
+same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
+
+The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
+is never marked beaten so nothing reads past them.
+
 ### Still missing for a real scenario
 
 Sylt currently has a map, a card and free play's seed. It has no briefing text,
