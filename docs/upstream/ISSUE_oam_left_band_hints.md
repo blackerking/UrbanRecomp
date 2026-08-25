@@ -1,6 +1,6 @@
 # Widescreen has no left-band counterpart to `wsOamRightHint`
 
-**Status: NOT FILED.** Draft only — posting is the user's call.
+**FILED: https://github.com/mstan/snesrecomp/issues/28**
 
 `origin/main` @ `fe6045c`.
 
