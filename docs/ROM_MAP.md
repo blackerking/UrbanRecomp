@@ -609,6 +609,53 @@ same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
 The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
 is never marked beaten so nothing reads past them.
 
+### The title's light row cannot be widened by any display setting
+
+The row of blinking lights along the bottom of the title is OBJ, not a
+background. Measured at 448 wide (`SC_LAYER_MASK=0x10`, authentic area is
+x = 96..351):
+
+| frame | light row spans |
+|---|---|
+| 1430 | x = 48..335 |
+| 1434 | x = 45..335 |
+| 1438 | x = 42..335 |
+
+So the row **scrolls left** — its left edge advances 3 px per frame and passes
+happily into the left margin — while its right end sits fixed at x = 335, which
+is authentic x = 239. The ROM spawns each light there and never places a sprite
+further right, because for a 256-wide picture 239 is already near the edge.
+
+Widescreen therefore shows the spawn point 112 px inside the right margin
+instead of 16 px from the screen edge, and the lights appear to pop into
+existence mid-picture. Reported from play as wanting them to "render before
+entering and delete after disappearing" -- the *disappearing* half already works,
+because the left margin is drawn.
+
+Two mechanisms were tried and neither applies:
+
+* the ambiguous-band decode (`wsOamRightHintStrict`) makes no difference --
+  strict and permissive both give x = 48..335, so these are not sprites parked
+  in `[256, 256+extraRight)`;
+* `PpuSetWsHudOamShift` anchors *edge-hugging* sprites outward with the margins,
+  which for a continuous scrolling row would move only its rightmost members and
+  tear a gap in the middle of it.
+
+There is nothing to reveal: the sprites do not exist out there. Closing the gap
+means changing where the ROM spawns them -- a host hook on the title's marquee
+that widens its spawn X and wrap point, in the same spirit as the ninth-scenario
+hooks. That is a behaviour change rather than a presentation one, and is the
+only route that can work.
+
+### Not the gradient
+
+The sky gradient was reported as incomplete and is not. It is BG3, whose sky
+rows are uniformly tile `$0000` with scattered stars and a silhouette along the
+bottom. Unclamping BG2 and BG3 on the title changes the clamp mask from `$0e`
+to `$08` and produces **zero** pixel difference at four different scroll
+positions, so that change was reverted rather than shipped inert. Confirmed
+from play afterwards that the gradient looks correct as it stands.
+
 ### Widescreen exposes sprites the ROM parks off-screen
 
 The scenario selector's blinking green cursor shows a second marker in the left
