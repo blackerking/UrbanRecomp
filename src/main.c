@@ -611,7 +611,8 @@ static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
  * what happened to the extra lights on the right. */
 static uint8_t s_oam_right_hints[16];
 static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
-static bool s_ws_pillarbox;           /* this frame renders 256 centred, margins blacked */
+static bool s_ws_bg_margins;          /* margins come from a backdrop-only pass */
+static int  s_ws_margin_layer;        /* which BG that pass draws */
 static uint8_t s_ws_mirror;           /* SC_WS_MIRROR: layers padded by mirroring */
 static bool s_ws_margin_fill = true;  /* SC_WS_FILL=0 to leave empty margins black */
 static uint8_t *s_ws_scratch;
@@ -800,6 +801,13 @@ static void handle_pos_stuff(void) {
       /* Same $14 == 0 gate as host_map_compose(): this pass exists only to
        * feed it, and rendering every line twice on screens the compose
        * will not touch changes their picture for nothing. */
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0) {
+        g_snes_ppu_dbg_layer_mask = (uint8_t)(1u << s_ws_margin_layer);
+        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
       if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
         /* Everything EXCEPT BG2, not just BG3|OBJ.
          *
@@ -855,6 +863,14 @@ static void handle_pos_stuff(void) {
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
       ppu_runLine(g_ppu, snes->vPos);
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0 &&
+          snes->vPos <= kVideoHeight) {
+        const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
+        uint32_t *dst = (uint32_t *)(s_video_pixels + row);
+        const uint32_t *src = (const uint32_t *)(s_ws_scratch + row);
+        for (int x = 0; x < s_ws_extra; x++) dst[x] = src[x];
+        for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) dst[x] = src[x];
+      }
       if (s_ws_extra > 0 && s_ws_obj_clip && s_ws_scratch && snes->vPos > 0 &&
           snes->vPos <= kVideoHeight) {
         const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
@@ -933,9 +949,28 @@ static void handle_pos_stuff(void) {
         for (int L = 0; L < 4; L++)
           if (((g_ppu->screenEnabled[0] >> L) & 1) && !PPU_bgTilemapWider(g_ppu, L))
             all_wide = false;
-        s_ws_pillarbox = mode0 && !all_wide;
-        if (s_ws_pillarbox) PpuSetExtraSpaceCentered(g_ppu, (uint8_t)s_ws_extra);
-        else                PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
+        /* Mode 0 has no working clamp, so a 32-column layer tiles. Rather
+         * than pillarbox the whole picture, widen it and take the MARGINS from
+         * a pass that draws only the backdrop layer.
+         *
+         * The fax is the case that motivates it. Its BG3 is the wooden desk --
+         * a genuinely repeating block, 8 tiles wide on a 16-row cycle, tile
+         * = $20 + (row%8)*$10 + ((row/8)%2)*8 + col%8 -- so a 256 px wrap on
+         * that layer is seamless. What must not tile is BG1, the briefing
+         * text, and BG2, the paper. Widening their tilemaps is not an option:
+         * both are high=1, 32x64 maps already spanning two pages each, so a
+         * 64-column version needs four pages apiece and only four are free in
+         * total.
+         *
+         * Taking the margins from a backdrop-only pass sidesteps all of it and
+         * costs no VRAM. Reported from play: the wood pattern is complete and
+         * visible before the paper rises. */
+        s_ws_bg_margins = mode0 && !all_wide;
+        s_ws_margin_layer = 0;
+        if (s_ws_bg_margins)
+          for (int L = 3; L >= 0; L--)          /* highest enabled BG = backdrop */
+            if ((g_ppu->screenEnabled[0] >> L) & 1) { s_ws_margin_layer = L; break; }
+        PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       widen_menu_bg();
@@ -1065,13 +1100,6 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
-      if (s_ws_pillarbox && s_ws_extra > 0)
-        /* PpuSetExtraSpaceCentered leaves the margins to the caller. */
-        for (int y = 0; y < kVideoHeight; y++) {
-          uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-          for (int x = 0; x < s_ws_extra; x++) row[x] = 0;
-          for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) row[x] = 0;
-        }
       ws_fill_margins();
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
@@ -2017,7 +2045,29 @@ static bool run_one_frame(void) {
  * why the selector got real tiles instead. */
 #define SC_WS_FILL_SRC 16
 static void ws_fill_margins(void) {
-  if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill || s_ws_pillarbox) return;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
+  /* Pillarboxed screens are filled too. The margins there have just been
+   * blacked by the caller, so there is nothing to preserve, and a screen that
+   * cannot widen its tilemap can still show its own backdrop in the margins. */
+
+  /* Remember the last usable source strip for this screen, and fall back to it
+   * when the live edge is no longer plain.
+   *
+   * The fax is why. Its BG3 carries wood across the whole picture -- visible
+   * before the paper rises, as reported from play -- but once the sheet is up
+   * it covers the edge on most rows, so a live-only source fills the top and
+   * leaves the rest black. Caching the strip while it IS clean keeps the whole
+   * margin filled for as long as the screen lasts.
+   *
+   * Dropped whenever $14 changes, so one screen's wood can never leak into
+   * another's margins. */
+  static uint32_t cache[SC_WS_FILL_SRC * kVideoHeight];
+  static bool cache_ok[kVideoHeight];
+  static uint8_t cache_screen = 0xff;
+  if (cache_screen != g_ram[0x14]) {
+    cache_screen = g_ram[0x14];
+    memset(cache_ok, 0, sizeof cache_ok);
+  }
 
   const uint16_t bd = g_ppu->cgram[0];
   const uint32_t backdrop = ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
@@ -2062,15 +2112,21 @@ static void ws_fill_margins(void) {
         if (ch > hi) hi = ch;
       }
     }
-    if (!usable || distinct > 4u || (hi - lo) > 120u) continue;
+    uint32_t *keep = &cache[(size_t)y * SC_WS_FILL_SRC];
+    if (usable && distinct <= 4u && (hi - lo) <= 120u) {
+      for (int k = 0; k < SC_WS_FILL_SRC; k++) keep[k] = src[k];
+      cache_ok[y] = true;
+    } else if (!cache_ok[y]) {
+      continue;                       /* never had a clean source for this row */
+    }
 
     for (int x = s_ws_extra - 1; x >= 0; x--) {
       const int d = (s_ws_extra - 1 - x) % (SC_WS_FILL_SRC * 2);
-      row[x] = src[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
+      row[x] = keep[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
     }
     for (int x = right0; x < s_video_w; x++) {
       const int d = (x - right0) % (SC_WS_FILL_SRC * 2);
-      row[x] = src[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
+      row[x] = keep[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
     }
   }
 }
