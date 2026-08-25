@@ -1,6 +1,20 @@
 # Widescreen layer policies are silently dead on the legacy renderer
 
-**FILED: https://github.com/mstan/snesrecomp/issues/25**
+**FILED: https://github.com/mstan/snesrecomp/issues/25 — ANSWERED.**
+
+Upstream took the documentation option. `runner/src/snes/ppu.h` now carries, on
+`PpuSetWidescreenLayerClamp`, `PpuSetWidescreenLayerMirror`,
+`PpuSetWidescreenLayerRepeat` and the band setters:
+
+> Requires `PpuBeginDrawing(..., kPpuRenderFlags_NewRenderer)`; the legacy
+> renderer stores this policy but does not apply it.
+
+Worth noting a second line that confirms our own mode handling rather than
+contradicting it: mirror and repeat are documented as filling **Mode-1**
+background margins, and the bands as applying to the Mode-1 4bpp and 2bpp
+paths. Our host selects the legacy renderer on mode 0 for a different reason
+(the new renderer draws nothing there), and this says the policies would not
+have helped on mode 0 anyway.
 
 `origin/main` @ `fe6045c`.
 

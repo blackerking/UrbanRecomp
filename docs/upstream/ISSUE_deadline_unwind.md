@@ -1,6 +1,19 @@
 # A master-deadline expiry in scheduler mode never returns to the host
 
-**FILED: https://github.com/mstan/snesrecomp/issues/23**
+**FILED: https://github.com/mstan/snesrecomp/issues/23 — FIX IN PROGRESS UPSTREAM.**
+
+`origin/codex/lle-deadline-unwind` (`4454da6`, "runtime: return on scheduler
+deadline unwind") implements the same shape as our patch: latch that the unwind
+came from a deadline where the deadline is detected, then branch on it in the
+unwind handler to publish the resume PC and return to the host.
+
+Theirs is better than ours in two ways — it also clears `s_lle_unwind_active`
+and `s_lle_unwind_owner_depth` on that path, which our version left set, and it
+adds a regression test in `tests/interp816/bridge_test.c`.
+
+**NOT merged into `main` yet**, so `main` still has the bug. Our local
+`pr-deadline-unwind` branch is superseded and should be dropped rather than
+offered, once theirs lands.
 
 Checked against `origin/main` @ `fe6045c` (post-DKC2 rewrite of
 `interp_bridge.c`). The bug survives that rewrite.
