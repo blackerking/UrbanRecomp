@@ -72,3 +72,45 @@ this one stopped.
 
 We have this as a patch (~+32/-3, `interp_bridge.c` only) against the previous
 `main`; happy to rebase onto `fe6045c` and send it if that is welcome.
+
+## Rebase trial, 2026-08-25
+
+Rehearsed on a scratch branch in the submodule (`scratch-rebase`, with
+`scratch-rebase-backup` pinning the old tip). Base chosen as
+`origin/codex/lle-deadline-unwind` rather than `origin/main`, so the trial gets
+the new main *and* the deadline fix in one go.
+
+Of our nine local commits:
+
+| commit | result |
+|---|---|
+| Model COP as a tier-to-LLE call | clean |
+| `cfg: exit_mx_set` | clean |
+| deadline unwind | **dropped** — upstream's `4454da6` supersedes it |
+| bounce/step counters | 1 trivial conflict, both sides kept |
+| host coverage hooks | 1 conflict; kept the hook, dropped a `pctrace` reference belonging to a commit not carried over |
+| two diagnostics for runs that never return | not carried |
+| pctrace markers + APU bisect switch | not carried |
+| deadline-fired reporting | not carried |
+| `SNESRECOMP_REGWRITE_DIAG` | not carried |
+
+The four left behind are pure diagnostics with no external API. The two that
+were carried are load-bearing: `main.c` calls `interp_bridge_bounces`,
+`_steps`, `_bounce_hook` and `_pc_hook`, none of which exist upstream.
+
+Result: **builds clean and behaves identically.**
+
+```
+default  PASS frames=600 master=214385616 logic_changes=592 video_changes=174
+SC_FIBER PASS frames=600 master=214385616 logic_changes=592 video_changes=174
+                 nmi_requests=592 nmi_serviced=592
+```
+
+`SC_FIBER` matters most here — it is the path the deadline fix exists for, and
+upstream's version carries this host as well as ours did.
+
+The submodule was then restored to `bedf078` and rebuilt, so the working tree is
+unchanged. The pin is still NOT moved: `codex/lle-deadline-unwind` is not merged
+into `main`, and four of the commits on the scratch branch exist only locally,
+so committing that pointer would reference hashes nobody else can fetch. Move it
+once that branch lands.
