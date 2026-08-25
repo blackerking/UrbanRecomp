@@ -958,10 +958,22 @@ static void handle_pos_stuff(void) {
          * for both, so parked sprites ghost in -- reported from play as a
          * small blinking rope along the bottom of the title.
          *
-         * Passing NULL hints turns on the strict decode with nothing marked,
-         * so every ambiguous slot wraps negative exactly as hardware does.
+         * NOTE the setter's polarity: PpuWsSetOamRightHints(ppu, NULL) sets
+         * wsOamRightHintStrict to ZERO -- permissive -- and only a non-NULL
+         * pointer turns strict on. An earlier version passed NULL and a
+         * comment claiming it enabled strict; it did the opposite, which left
+         * parked sprites ghosting into the right margin. Reported from play as
+         * a second green selection marker blinking on the scenario screen.
+         *
+         * A zeroed hint array is therefore "strict, nothing marked": every
+         * ambiguous slot wraps negative exactly as hardware does.
          * SC_WS_OAM=0 restores the permissive decode. */
-        if (s_ws_oam_strict) PpuWsSetOamRightHints(g_ppu, NULL);
+        if (s_ws_oam_strict) {
+          static const uint8_t kNoRightHints[16] = { 0 };
+          PpuWsSetOamRightHints(g_ppu, kNoRightHints);
+        } else {
+          PpuWsSetOamRightHints(g_ppu, NULL);
+        }
       }
       /* SC_PPU_LAYOUT=1: one line per screen, printed when $14 changes.
        * Widening a screen means knowing which BG carries its background and
