@@ -609,6 +609,40 @@ same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
 The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
 is never marked beaten so nothing reads past them.
 
+### Widescreen exposes sprites the ROM parks off-screen
+
+The scenario selector's blinking green cursor shows a second marker in the left
+margin at 448 wide. It is not a duplicate: it is the *hidden* phase of the same
+cursor.
+
+`03:de9d` toggles `$30` and `03:dea6` skips the draw when it is clear, and the
+ROM hides the sprite by parking it at a negative X. Hardware clips that away
+entirely. Widescreen renders those columns, so the parked sprite appears.
+
+Measured on `savestate_3`, `$42` forced unlocked, same frames both ways:
+
+| frame | 256 wide | 448 wide |
+|---|---|---|
+| 1432, 1444 | box at 176..239 | box at 272..335 — 176+96, correct |
+| 1436, 1440 | **nothing** (blink off) | **box at 48..71, left margin** |
+
+Reproduces identically with `SC_NINTH=0`, so it is nothing to do with the ninth
+entry.
+
+**There is no setting that fixes this without breaking something else.**
+`SC_WS_OBJ_CLIP=1` removes it, and also removes the win marks and the cursor
+from any card that legitimately sits in a margin -- both are sprites at negative
+X, and nothing in OAM distinguishes "parked to hide" from "scrolled out of the
+authentic window but genuinely wanted". That is the same trade recorded against
+the sprite clip default.
+
+A real fix needs per-slot knowledge. The runner already has the mechanism for
+the right-hand band -- `wsOamRightHint`, a bit per OAM slot published by the
+game each NMI, with `wsOamRightHintStrict` deciding whether unmarked slots wrap
+negative. The left band has no equivalent. Extending it symmetrically, or
+letting a host mark slots it knows are parked, would settle this properly and
+is worth raising upstream.
+
 ### Open: the selector comes back half-loaded from a scenario
 
 Starting a scenario and backing out to the selector leaves the screen's
