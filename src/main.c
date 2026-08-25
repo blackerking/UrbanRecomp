@@ -603,6 +603,7 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
 static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_ws_widen_title = true;  /* SC_WS_TITLE=0 to clamp the title's sky */
+static int  s_menu_settled;           /* consecutive frames on the main menu */
 static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
 /* One bit per OAM slot, published to the PPU each frame. A sprite this host
  * places at X >= 256 is a GENUINE right-margin sprite, so it must be marked
@@ -795,7 +796,10 @@ static void handle_pos_stuff(void) {
        * gets the HUD and sprites in isolation without the overlay export,
        * which arms cleanly but exports nothing. Needs no cooperation from the
        * runner beyond retargeting PpuBeginDrawing between the two calls. */
-      if (s_host_map && s_hud_pixels && snes->vPos > 0) {
+      /* Same $14 == 0 gate as host_map_compose(): this pass exists only to
+       * feed it, and rendering every line twice on screens the compose
+       * will not touch changes their picture for nothing. */
+      if (s_host_map && s_hud_pixels && snes->vPos > 0 && g_ram[0x14] == 0x00) {
         /* Everything EXCEPT BG2, not just BG3|OBJ.
          *
          * BG2 is the map -- the only layer being replaced. Capturing every
@@ -2204,10 +2208,32 @@ static const uint16_t kMenuWood[8] = {
 static void widen_menu_bg(void) {
   s_bg3_widened = false;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
-  if (g_ram[0x14] != 0x03) return;                 /* main menu only */
+  if (g_ram[0x14] != 0x03) { s_menu_settled = 0; return; }  /* main menu only */
   /* Only act on the layout this was measured against; if the screen is
    * arranged differently, leave it alone rather than corrupt VRAM. */
   if ((unsigned)PPU_bgTilemapAdr(g_ppu, 2) != SC_MENU_MAP_SRC) return;
+
+  /* Do not claim $6800..$6fff until the screen has settled AND that region is
+   * genuinely empty.
+   *
+   * $14 passes through 3 while other screens load, and this writes four
+   * kilobytes of VRAM. If the region still holds graphics being DMAd in, the
+   * result is scrambled tiles -- reported from play as looking like a bad
+   * cartridge, and intermittent, which is exactly what a race with a load
+   * looks like. Measuring it free once on the main menu is not a promise that
+   * it is free every time the screen index happens to read 3.
+   *
+   * So: require several consecutive frames on this screen, then check the
+   * destination is all zero before taking it. If it is not, this screen simply
+   * stays narrow -- a black margin is a far better failure than corruption. */
+  static bool dst_ok;
+  if (++s_menu_settled == 1) dst_ok = false;
+  if (s_menu_settled < 8) return;
+  if (!dst_ok) {
+    for (unsigned i = 0; i < 0x800u; i++)
+      if (g_ppu->vram[SC_MENU_MAP_DST + i]) return;   /* in use -- leave it */
+    dst_ok = true;
+  }
 
   for (unsigned i = 0; i < 0x400u; i++)
     g_ppu->vram[SC_MENU_MAP_DST + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
@@ -2326,6 +2352,7 @@ static void host_map_init(void) {
 /* Per frame, before any line renders. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
+  if (g_ram[0x14] != 0x00) return;   /* city view only, as above */
   /* Keep the UI layers out of the widescreen margins.
    *
    * BG3 is a tilemap like BG2, so widening the picture tiles the toolbar and
@@ -2357,17 +2384,29 @@ static void host_map_compose(void) {
    * states). Without this the map painted over the scenario select, the
    * disaster page and everything else -- reported from play as "menu broken",
    * and entirely my omission rather than a renderer fault. */
-  /* NO screen-mode gate.
+  /* Gate on $14, the screen index -- NOT on $01df.
    *
-   * $01df was read as "3 means the city view". It is not: the same city view
-   * with a tool palette open has been observed at 3, at 4 AND at 0. Gating on
-   * it made the map vanish and left the widescreen margins black -- reported
-   * from play.
+   * $01df was tried first and is genuinely unreliable: the same city view with
+   * a tool palette open has been observed at 3, at 4 and at 0, and gating on it
+   * made the map vanish. That note stood for a long time as "no gate is
+   * needed", and it was wrong. Without one this draws the city map on EVERY
+   * screen, decoding whatever CHR happens to be in VRAM as map tiles -- on the
+   * title that is title graphics, and the result is a screenful of scrambled
+   * tiles that looks like a failing cartridge. Reported from play, and
+   * reproduced exactly by loading the title with SC_HOST_MAP=1.
    *
-   * No gate is needed. The capture pass takes every layer except BG2, so
+   * $14 separates cleanly, measured across every save state: the city view and
+   * its in-view menus are 00 (savestates 7, 8 and 9, whose $01df differ), while
+   * title is 01, main menu 03, map select 05, name entry 07, scenario select
+   * 0b and the fax 0f. Boot sits at 01, so nothing draws before a city exists.
+   *
+   * The reasoning that follows still holds WITHIN the city view: the capture
+   * pass takes every layer except BG2, so
    * whatever the guest draws on any other layer covers the map by itself.
    * That is the same property that made in-view menus work without a special
    * case, applied consistently. */
+  if (g_ram[0x14] != 0x00) return;
+
   { static int shown = 0;
     if (shown < 3) { shown++;
       int n3 = 0, no = 0;
