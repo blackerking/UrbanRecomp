@@ -756,6 +756,7 @@ static void hdma_do_line(HdmaChanState *c) {
 /* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
+static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_menu_bg(void);
 static void widen_title_lights(void);
@@ -799,7 +800,7 @@ static void handle_pos_stuff(void) {
       /* Same $14 == 0 gate as host_map_compose(): this pass exists only to
        * feed it, and rendering every line twice on screens the compose
        * will not touch changes their picture for nothing. */
-      if (s_host_map && s_hud_pixels && snes->vPos > 0 && g_ram[0x14] == 0x00) {
+      if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
         /* Everything EXCEPT BG2, not just BG3|OBJ.
          *
          * BG2 is the map -- the only layer being replaced. Capturing every
@@ -2352,7 +2353,7 @@ static void host_map_init(void) {
 /* Per frame, before any line renders. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
-  if (g_ram[0x14] != 0x00) return;   /* city view only, as above */
+  if (!host_map_screen_live()) return;   /* city view only, as above */
   /* Keep the UI layers out of the widescreen margins.
    *
    * BG3 is a tilemap like BG2, so widening the picture tiles the toolbar and
@@ -2373,6 +2374,21 @@ static void host_map_arm_captures(void) {
     if (shown < 2) { shown++;
       fprintf(stderr, "host map: capture armed bg3=%d obj=%d mode=%d\n",
               (int)c3, (int)co, (int)PPU_mode(g_ppu)); } }
+}
+
+/* True only when a city actually exists to draw.
+ *
+ * $14 == 0 is the city view -- but it is ALSO the state the machine sits in
+ * for the first hundred-odd frames of a cold boot, before the title appears,
+ * with no map in WRAM at all. Gating on $14 alone therefore drew the map over
+ * the boot screen from whatever happened to be in VRAM and WRAM: reported from
+ * play as the first frames showing garbage.
+ *
+ * $003e is the mode byte and is 0 until a game is running (1 practice, 2 free
+ * play, 3 scenario). Measured at boot: $14 = 00 and $3e = 0 through frame 110+,
+ * while savestates 7, 8 and 9 -- real city views -- all have $3e = 1. */
+static bool host_map_screen_live(void) {
+  return g_ram[0x14] == 0x00 && (g_ram[0x3e] | (g_ram[0x3f] << 8)) != 0;
 }
 
 /* After the guest frame: replace the picture with our map, then put the
@@ -2405,7 +2421,7 @@ static void host_map_compose(void) {
    * whatever the guest draws on any other layer covers the map by itself.
    * That is the same property that made in-view menus work without a special
    * case, applied consistently. */
-  if (g_ram[0x14] != 0x00) return;
+  if (!host_map_screen_live()) return;
 
   { static int shown = 0;
     if (shown < 3) { shown++;
