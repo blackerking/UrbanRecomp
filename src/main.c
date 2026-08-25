@@ -602,6 +602,7 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
  * default now favours showing everything. SC_WS_OBJ_CLIP=1 restores it. */
 static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
+static bool s_ws_widen_title = true;  /* SC_WS_TITLE=0 to clamp the title's sky */
 static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
 /* One bit per OAM slot, published to the PPU each frame. A sprite this host
  * places at X >= 256 is a GENUINE right-margin sprite, so it must be marked
@@ -933,6 +934,9 @@ static void handle_pos_stuff(void) {
       }
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       widen_menu_bg();
+      /* AFTER widen_menu_bg(), which clears the flag for the frame. */
+      if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
+        s_bg3_widened = true;
       widen_title_lights();
       /* BG3 is hard-clamped independent of wsLayerClamp:
        *
@@ -971,6 +975,15 @@ static void handle_pos_stuff(void) {
         if (s_ws_clamp_auto)
           for (int L = 0; L < 4; L++)
             if (!PPU_bgTilemapWider(g_ppu, L)) clamp |= (uint8_t)(1u << L);
+        /* The title is the exception: wrapping its 32-column backgrounds is
+         * wanted, not a fault. BG3 is the sky -- rows of uniformly tile $0000
+         * with scattered stars -- and BG2 the far skyline, so a 256 px wrap is
+         * invisible on the one and reads as more skyline on the other.
+         * Clamping them stops the gradient dead at the authentic edge, which
+         * is exactly what it did once the flags below started reaching the PPU
+         * per frame and the clamp became live for the first time. */
+        if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title)
+          clamp &= (uint8_t)~0x06;   /* BG2 | BG3 */
         /* SC_WS_MIRROR=<mask>: pad those layers by mirroring the authentic
          * 256 into the margins instead of clamping them. Needs no VRAM, which
          * matters on the screens that have none free -- map select and name
@@ -4531,6 +4544,8 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_mirror = (uint8_t)strtol(e, NULL, 0); }
   { const char *e = getenv("SC_WS_LIGHTS");
     if (e && *e) s_ws_widen_lights = (*e != '0'); }
+  { const char *e = getenv("SC_WS_TITLE");
+    if (e && *e) s_ws_widen_title = (*e != '0'); }
   { const char *e = getenv("SC_WS_MENU");
     if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
