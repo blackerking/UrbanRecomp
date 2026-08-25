@@ -762,6 +762,7 @@ static void selector_extend_tilemap(void);
 static void widen_menu_bg(void);
 static void widen_title_lights(void);
 static void ws_fill_margins(void);
+static void ws_hide_backdrop_furniture(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
 static bool     s_host_map;
@@ -1100,6 +1101,7 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
+      ws_hide_backdrop_furniture();
       ws_fill_margins();
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
@@ -2018,6 +2020,42 @@ static bool run_one_frame(void) {
   return guard > 0;
 }
 
+/* Keep the backdrop layer's FURNITURE out of the margins.
+ *
+ * The margins on a mode-0 screen are taken from a backdrop-only pass, and on
+ * the fax that layer carries the machine as well as the desk -- so the machine
+ * repeated into both margins along with the wood. Reported from play as
+ * wanting the fax hidden on the left and right.
+ *
+ * The desk repeats on a 16-row cycle, so a row showing furniture can borrow
+ * its margin from 16 rows above and land on exactly the same phase. Rows are
+ * walked downward so a borrowed row can itself be borrowed from, which carries
+ * plain wood down through a tall obstruction.
+ *
+ * Judging it by "is this a plain texture" does NOT work: the machine is flat
+ * beige, so it has few colours and a small channel range and passes as plain.
+ * The desk is judged by its colour instead -- brown, meaning red clearly ahead
+ * of green and blue and none of them bright. Anything else in the strip is
+ * something standing on the desk. */
+static void ws_hide_backdrop_furniture(void) {
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_bg_margins || !s_ws_margin_fill) return;
+  const int right0 = s_video_w - s_ws_extra;
+  for (int y = 16; y < kVideoHeight; y++) {
+    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    const uint32_t *above =
+        (const uint32_t *)(s_video_pixels + (size_t)(y - 16) * s_video_pitch);
+    int woody = 0;
+    for (int k = 0; k < 8; k++) {
+      const uint32_t c = row[k];
+      const unsigned r = (c >> 16) & 0xffu, g = (c >> 8) & 0xffu, b = c & 0xffu;
+      if (r > g + 8u && r > b + 8u && r < 170u) woody++;
+    }
+    if (woody >= 6) continue;                              /* plain desk */
+    for (int x = 0; x < s_ws_extra; x++) row[x] = above[x];
+    for (int x = right0; x < s_video_w; x++) row[x] = above[x];
+  }
+}
+
 /* Fill widescreen margins that nothing drew into, from the screen's own edge.
  *
  * Some screens cannot be widened at all. Map select and name entry each carry
@@ -2257,7 +2295,6 @@ static void widen_title_lights(void) {
  * Redone every frame: the screen's own DMA owns $3000, and BG3SC is rewritten
  * per frame, so both the copy and the register have to be reasserted. */
 #define SC_MENU_MAP_SRC 0x3000u
-#define SC_MENU_MAP_DST 0x6800u
 static const uint16_t kMenuWood[8] = {
   0x68, 0x78, 0x88, 0x98, 0x60, 0x70, 0x80, 0x90
 };
@@ -2283,30 +2320,56 @@ static void widen_menu_bg(void) {
    * So: require several consecutive frames on this screen, then check the
    * destination is all zero before taking it. If it is not, this screen simply
    * stays narrow -- a black margin is a far better failure than corruption. */
-  static bool dst_ok;
-  if (++s_menu_settled == 1) dst_ok = false;
-  if (s_menu_settled < 8) return;
-  if (!dst_ok) {
-    for (unsigned i = 0; i < 0x800u; i++)
-      if (g_ppu->vram[SC_MENU_MAP_DST + i]) return;   /* in use -- leave it */
-    dst_ok = true;
+  if (++s_menu_settled < 8) return;
+
+  /* Take the destination only if no ENABLED layer is using it.
+   *
+   * The first version required the region to be all zero, and that was wrong
+   * in a way only play showed: save the game while this is active and the
+   * copy is captured INTO the save state, so on reload the region is non-zero,
+   * the check refuses forever, and the menu silently falls back to the pixel
+   * fill -- which is the banded wood reported from play as "all over the
+   * place". Emptiness cannot tell another screen's data from our own.
+   *
+   * What actually matters is whether anything on screen READS those words, so
+   * that is what is tested: every enabled background's tilemap and character
+   * base, plus the sprite character bases. */
+  unsigned dst = 0;
+  for (int c = 0; c < 5 && !dst; c++) {
+    static const unsigned kCand[5] = { 0x6800u, 0x7000u, 0x7400u, 0x7800u, 0x1800u };
+    const unsigned lo = kCand[c], hi = lo + 0x800u;
+    bool clash = false;
+    for (int L = 0; L < 4 && !clash; L++) {
+      if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
+          !((g_ppu->screenEnabled[1] >> L) & 1)) continue;
+      const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+      const unsigned ch = (unsigned)PPU_bgTileAdr(g_ppu, L);
+      if (lo < m + 0x800u && m < hi) clash = true;
+      if (lo < ch + 0x2000u && ch < hi) clash = true;
+    }
+    const unsigned o1 = (unsigned)PPU_objTileAdr1(g_ppu);
+    const unsigned o2 = (unsigned)PPU_objTileAdr2(g_ppu);
+    if (lo < o1 + 0x2000u && o1 < hi) clash = true;
+    if (lo < o2 + 0x2000u && o2 < hi) clash = true;
+    if (!clash) dst = lo;
   }
+  if (!dst) return;                    /* nowhere safe -- stay narrow */
 
   for (unsigned i = 0; i < 0x400u; i++)
-    g_ppu->vram[SC_MENU_MAP_DST + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
+    g_ppu->vram[dst + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
   for (unsigned row = 0; row < 32u; row++)
     for (unsigned col = 0; col < 32u; col++)
-      g_ppu->vram[SC_MENU_MAP_DST + 0x400u + row * 32u + col] =
+      g_ppu->vram[dst + 0x400u + row * 32u + col] =
           (uint16_t)(kMenuWood[row & 7u] + ((col + 32u) & 7u));
 
   /* BG3SC: base in the top six bits, bit 0 = 64 columns wide. */
-  g_ppu->bgXsc[2] = (uint8_t)((SC_MENU_MAP_DST >> 8) | 0x01u);
+  g_ppu->bgXsc[2] = (uint8_t)((dst >> 8) | 0x01u);
   s_bg3_widened = true;
   { static int n; if (getenv("SC_WS_DIAG") && n < 4) { n++;
       fprintf(stderr, "[menuwide] frame=%llu bg3sc=%02x page1[0]=%04x page1[40]=%04x hs=%d\n",
               (unsigned long long)s_frames, g_ppu->bgXsc[2],
-              g_ppu->vram[SC_MENU_MAP_DST + 0x400u],
-              g_ppu->vram[SC_MENU_MAP_DST + 0x400u + 40u],
+              g_ppu->vram[dst + 0x400u],
+              g_ppu->vram[dst + 0x400u + 40u],
               g_ppu->hScroll[2]); } }
 }
 
