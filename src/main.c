@@ -602,6 +602,12 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
  * default now favours showing everything. SC_WS_OBJ_CLIP=1 restores it. */
 static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
+static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
+/* One bit per OAM slot, published to the PPU each frame. A sprite this host
+ * places at X >= 256 is a GENUINE right-margin sprite, so it must be marked
+ * or the strict decode wraps it negative and hides it -- which is exactly
+ * what happened to the extra lights on the right. */
+static uint8_t s_oam_right_hints[16];
 static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
 static bool s_ws_pillarbox;           /* this frame renders 256 centred, margins blacked */
 static uint8_t s_ws_mirror;           /* SC_WS_MIRROR: layers padded by mirroring */
@@ -750,6 +756,7 @@ static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static void selector_extend_tilemap(void);
 static void widen_menu_bg(void);
+static void widen_title_lights(void);
 static void ws_fill_margins(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
@@ -881,6 +888,30 @@ static void handle_pos_stuff(void) {
       if (g_ppu && s_ws_extra > 0) {
         const bool mode0 = PPU_mode(g_ppu) == 0;
         s_render_flags = (!mode0 && !s_force_legacy) ? 1u : 0u;
+        /* Lift the per-scanline sprite limit while widened.
+         *
+         * The title's light row is four 64 px sprites, which is already 32
+         * 8x8 tiles -- the hardware ceiling for one line. Adding the sprites
+         * that carry it into the margins therefore pushed existing ones out,
+         * and 128 pixels per line vanished from INSIDE the authentic picture
+         * on rows 199..220. Measured, not guessed.
+         *
+         * kPpuRenderFlags_NoSpriteLimits removes that ceiling. It is a
+         * departure from hardware, but only on a picture that is already wider
+         * than hardware ever drew, and it is the difference between extending
+         * the row and corrupting the row. At authentic width nothing sets it. */
+        if (s_ws_widen_lights) s_render_flags |= 8u;   /* NoSpriteLimits */
+        /* Push them. PpuBeginDrawing is what copies renderFlags into the PPU,
+         * and in the default configuration this host called it exactly once,
+         * at startup -- the host-map and sprite-clip paths call it per line,
+         * but both are off by default. So every per-frame decision above was
+         * being computed and thrown away. */
+        static uint32_t pushed = 0xffffffffu;
+        if (pushed != s_render_flags) {
+          pushed = s_render_flags;
+          PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch,
+                          s_render_flags);
+        }
         /* Mode 0 has no working clamp, so a 32-column layer WILL tile. The fax
          * showed three copies of the briefing side by side. The runner has a
          * purpose-built answer: PpuSetExtraSpaceCentered renders only the
@@ -900,7 +931,9 @@ static void handle_pos_stuff(void) {
         if (s_ws_pillarbox) PpuSetExtraSpaceCentered(g_ppu, (uint8_t)s_ws_extra);
         else                PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
+      memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       widen_menu_bg();
+      widen_title_lights();
       /* BG3 is hard-clamped independent of wsLayerClamp:
        *
        *     if (layer != 2) return extra;
@@ -969,8 +1002,8 @@ static void handle_pos_stuff(void) {
          * ambiguous slot wraps negative exactly as hardware does.
          * SC_WS_OAM=0 restores the permissive decode. */
         if (s_ws_oam_strict) {
-          static const uint8_t kNoRightHints[16] = { 0 };
-          PpuWsSetOamRightHints(g_ppu, kNoRightHints);
+          /* Strict, with only the slots this host placed itself marked. */
+          PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
         } else {
           PpuWsSetOamRightHints(g_ppu, NULL);
         }
@@ -2021,6 +2054,109 @@ static void ws_fill_margins(void) {
       const int d = (x - right0) % (SC_WS_FILL_SRC * 2);
       row[x] = src[d < SC_WS_FILL_SRC ? d : (SC_WS_FILL_SRC * 2 - 1 - d)];
     }
+  }
+}
+
+/* Extend the title's light marquee across the widescreen margins.
+ *
+ * The row along the bottom of the title is OBJ, not a background, and it
+ * scrolls left. Measured at 448 wide it spans x = 48..335 with its left edge
+ * advancing 3 px per frame -- so it leaves into the left margin correctly, but
+ * its right end is pinned at authentic x = 239, where the ROM spawns each
+ * light. For a 256-wide picture that is near enough the edge; widened, the
+ * spawn point sits 112 px inside the right margin and the lights appear to pop
+ * into existence mid-picture.
+ *
+ * Nothing can reveal them, because the sprites do not exist out there. Neither
+ * the ambiguous-band decode nor PpuSetWsHudOamShift helps -- see
+ * docs/ROM_MAP.md. The only thing that closes the gap is putting more of them
+ * in OAM, which is what this does: it finds the row, works out its pitch, and
+ * repeats the SAME sprite outward into free slots until the widened picture is
+ * covered. Nothing is invented -- tile, palette, priority and size are copied
+ * from the row's own members, and the extras move with it because they are
+ * recomputed from the live row every frame.
+ *
+ * Slots 104..127 are the game's parked pool on this screen (X=128, Y=0, tile
+ * and attributes all zero), so the extras go there, highest first.
+ *
+ * OAM layout, from PpuDecodeOamX: the index there is the WORD index, so sprite
+ * i owns words 2i and 2i+1, and its two high bits live in highOam[(2i)>>3] at
+ * bit (2i)&7 -- X bit 8 -- and the bit above it -- size. That is the ordinary
+ * SNES arrangement of four sprites per high byte. */
+#define SC_LIGHTS_FIRST_SPARE 104
+
+static int oam_get_x(int i) {
+  const int wi = i * 2;
+  int x = g_ppu->oam[wi] & 0xff;
+  x |= ((g_ppu->highOam[wi >> 3] >> (wi & 7)) & 1) << 8;
+  return x >= 256 ? x - 512 : x;
+}
+
+static void oam_put(int i, int x, int y, int tile, int attr, int size) {
+  const unsigned x9 = (unsigned)x & 0x1ffu;
+  const int wi = i * 2;
+  g_ppu->oam[wi]     = (uint16_t)(((unsigned)(y & 0xff) << 8) | (x9 & 0xffu));
+  g_ppu->oam[wi + 1] = (uint16_t)(((unsigned)(attr & 0xff) << 8) | (unsigned)(tile & 0xff));
+  uint8_t *hb = &g_ppu->highOam[wi >> 3];
+  const int bit = wi & 7;
+  *hb = (uint8_t)(*hb & ~(3u << bit));
+  if (x9 & 0x100u) *hb = (uint8_t)(*hb | (1u << bit));
+  if (size)        *hb = (uint8_t)(*hb | (2u << bit));
+}
+
+static void widen_title_lights(void) {
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_lights) return;
+  if (g_ram[0x14] != 0x01) return;                 /* title only */
+
+  /* The row is the largest group of sprites sharing a Y, tile and attribute in
+   * the bottom of the picture. Found rather than hard-coded, so a different
+   * frame of the animation cannot leave it half-extended. */
+  int best_n = 0, best_y = 0, best_tile = 0, best_attr = 0, best_size = 0;
+  for (int i = 0; i < SC_LIGHTS_FIRST_SPARE; i++) {
+    const int y = g_ppu->oam[i * 2] >> 8;
+    if (y < 150 || y > 215) continue;
+    const int tile = g_ppu->oam[i * 2 + 1] & 0xff;
+    const int attr = g_ppu->oam[i * 2 + 1] >> 8;
+    int n = 0;
+    for (int j = 0; j < SC_LIGHTS_FIRST_SPARE; j++)
+      if ((g_ppu->oam[j * 2] >> 8) == y &&
+          (g_ppu->oam[j * 2 + 1] & 0xff) == tile &&
+          (g_ppu->oam[j * 2 + 1] >> 8) == attr) n++;
+    if (n > best_n) {
+      best_n = n; best_y = y; best_tile = tile; best_attr = attr;
+      best_size = (g_ppu->highOam[(i * 2) >> 3] >> (((i * 2) & 7) + 1)) & 1;
+    }
+  }
+  if (best_n < 3) return;              /* not a row; leave it alone */
+
+  /* Pitch is the smallest positive gap between members. */
+  int lo = 0x7fff, hi = -0x7fff, pitch = 0x7fff;
+  for (int i = 0; i < SC_LIGHTS_FIRST_SPARE; i++) {
+    if ((g_ppu->oam[i * 2] >> 8) != best_y) continue;
+    if ((g_ppu->oam[i * 2 + 1] & 0xff) != best_tile) continue;
+    if ((g_ppu->oam[i * 2 + 1] >> 8) != best_attr) continue;
+    const int x = oam_get_x(i);
+    if (x < lo) lo = x;
+    if (x > hi) hi = x;
+    for (int j = 0; j < SC_LIGHTS_FIRST_SPARE; j++) {
+      if ((g_ppu->oam[j * 2] >> 8) != best_y) continue;
+      if ((g_ppu->oam[j * 2 + 1] & 0xff) != best_tile) continue;
+      const int d = oam_get_x(j) - x;
+      if (d > 0 && d < pitch) pitch = d;
+    }
+  }
+  if (pitch <= 0 || pitch > 128) return;
+
+  int slot = 127;
+  for (int x = lo - pitch; x >= -s_ws_extra - pitch && slot >= SC_LIGHTS_FIRST_SPARE; x -= pitch) {
+    oam_put(slot, x, best_y, best_tile, best_attr, best_size);
+    slot--;
+  }
+  for (int x = hi + pitch; x <= 256 + s_ws_extra && slot >= SC_LIGHTS_FIRST_SPARE; x += pitch) {
+    oam_put(slot, x, best_y, best_tile, best_attr, best_size);
+    /* Past 256 it lands in the ambiguous band, so claim it explicitly. */
+    if (x >= 256) s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    slot--;
   }
 }
 
@@ -4393,6 +4529,8 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_margin_fill = (*e != '0'); }
   { const char *e = getenv("SC_WS_MIRROR");
     if (e && *e) s_ws_mirror = (uint8_t)strtol(e, NULL, 0); }
+  { const char *e = getenv("SC_WS_LIGHTS");
+    if (e && *e) s_ws_widen_lights = (*e != '0'); }
   { const char *e = getenv("SC_WS_MENU");
     if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
