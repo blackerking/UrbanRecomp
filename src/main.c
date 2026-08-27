@@ -603,19 +603,35 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
 static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_ws_widen_title = true;  /* SC_WS_TITLE=0 to clamp the title's sky */
-static int  s_menu_settled;           /* consecutive frames on the main menu */
 static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
 /* One bit per OAM slot, published to the PPU each frame. A sprite this host
  * places at X >= 256 is a GENUINE right-margin sprite, so it must be marked
  * or the strict decode wraps it negative and hides it -- which is exactly
  * what happened to the extra lights on the right. */
 static uint8_t s_oam_right_hints[16];
-static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
+static bool s_bg3_widened;            /* set by widen_wood_bg() for this frame only */
+static uint8_t s_ws_clamp_now = 0x0f;  /* the mask actually pushed this frame */
+static bool s_wood_widened;           /* BG3 carries real wood into the margins */
+/* Wood-only stand-in map, for screens with no VRAM to relocate into. Armed by
+ * widen_wood_bg(), swapped in around the margin pass only. */
+static uint16_t s_wood_pass_map[0x400];
+static int      s_wood_pass_layer = -1;
+static unsigned s_wood_pass_src;
+static bool     s_wood_pass_ready;    /* a usable map has been built at least once */
 static bool s_ws_bg_margins;          /* margins come from a backdrop-only pass */
 static int  s_ws_margin_layer;        /* which BG that pass draws */
 static uint8_t s_ws_mirror;           /* SC_WS_MIRROR: layers padded by mirroring */
 static bool s_ws_margin_fill = true;  /* SC_WS_FILL=0 to leave empty margins black */
 static uint8_t *s_ws_scratch;
+/* A SECOND scratch surface, for the backdrop/wood margin pass.
+ *
+ * It cannot share the sprite-clip one. Both render a line into scratch
+ * before the picture is drawn and both copy margins out of it afterwards, so
+ * with one buffer the second render overwrites the first's result and both
+ * copies take the same pixels. Harmless while no screen ran both -- and then
+ * View Mode did, and its margins came out as the city's black wrapping in
+ * rather than the wood the pass had drawn. */
+static uint8_t *s_ws_scratch_bg;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
  *
@@ -759,14 +775,23 @@ static void host_map_arm_captures(void);
 static void host_map_compose(void);
 static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
-static void widen_menu_bg(void);
+static void widen_wood_bg(void);
 static void widen_title_lights(void);
 static void ws_fill_margins(void);
+static void ws_fill_flat_margins(void);
 static void ws_hide_backdrop_furniture(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
+/* OFF by default, still. The compositor it depends on works now, but the gate
+ * that decides WHICH screen it may draw on does not separate cleanly: the
+ * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
+ * the city view, and turning this on by default painted terrain across all
+ * of them. SC_HOST_MAP=1 to use it. */
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
+/* The host loop's own frame index, which is what SC_DUMP_AT counts -- not
+ * s_frames, which after --load-state resumes at the saved state's number. */
+static unsigned long long s_loop_frame;
 /* Layers taken into the HUD pass. SC_HUD_MASK overrides it: bit0 BG1,
  * bit1 BG2, bit2 BG3, bit3 BG4, bit4 OBJ. Adjustable because "every layer
  * except BG2" also drags in whatever BG1 paints behind the toolbar, which
@@ -802,31 +827,23 @@ static void handle_pos_stuff(void) {
       /* Same $14 == 0 gate as host_map_compose(): this pass exists only to
        * feed it, and rendering every line twice on screens the compose
        * will not touch changes their picture for nothing. */
-      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0) {
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch_bg && snes->vPos > 0) {
+        /* Where widen_wood_bg() could not relocate the map, swap a wood-only
+         * copy in for the length of this pass, so the margins get the desk
+         * without the furniture standing on it. Restored immediately after,
+         * before the picture proper is drawn from the same map. */
+        static uint16_t held[0x400];
+        const bool swap = s_wood_pass_layer >= 0;
+        if (swap) {
+          memcpy(held, &g_ppu->vram[s_wood_pass_src], sizeof held);
+          memcpy(&g_ppu->vram[s_wood_pass_src], s_wood_pass_map, sizeof held);
+        }
         g_snes_ppu_dbg_layer_mask = (uint8_t)(1u << s_ws_margin_layer);
-        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        PpuBeginDrawing(g_ppu, s_ws_scratch_bg, (size_t)s_video_pitch, s_render_flags);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask = 0xff;
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
-      }
-      if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
-        /* Everything EXCEPT BG2, not just BG3|OBJ.
-         *
-         * BG2 is the map -- the only layer being replaced. Capturing every
-         * other layer means anything the guest draws wins over the host map
-         * automatically: the HUD, sprites, AND any menu, including the ones
-         * that open *inside* the city view without changing $01df. Reported
-         * from play: savestate_3 opens such a menu and $01df stays 3
-         * throughout, so no screen-mode gate could ever have caught it.
-         *
-         * Self-correcting by construction, which is why it beats hunting for
-         * a "menu is open" flag -- a search through the WRAM delta across the
-         * B press turned up only transient direct-page scratch. */
-        g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
-        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, s_render_flags);
-        ppu_runLine(g_ppu, snes->vPos);
-        g_snes_ppu_dbg_layer_mask = 0xff;
-        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+        if (swap) memcpy(&g_ppu->vram[s_wood_pass_src], held, sizeof held);
       }
       if (getenv("SC_WS_DIAG") && snes->vPos == 100) { static int n;
         if (n < 3) { n++;
@@ -864,11 +881,71 @@ static void handle_pos_stuff(void) {
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
       ppu_runLine(g_ppu, snes->vPos);
-      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0 &&
+      /* Blank the margins when nothing is entitled to draw there.
+       *
+       * Clamping only governs the four backgrounds on the MAIN screen. The
+       * subscreen is not covered, so a screen that shows the city through
+       * colour math puts it in the margins whatever the clamp says -- which is
+       * what the advice popup and the graphs page were doing: city map either
+       * side, at full brightness, while the authentic 256 showed it dimmed
+       * behind the panel.
+       *
+       * Clearing BEFORE the render does not help, because those pixels are
+       * genuinely drawn, not left over. (An earlier reading called them stale
+       * on the evidence that the margins changed by 0 pixels between frames --
+       * which proves nothing on a screen that is standing still.) So it is
+       * done after, and only when every background is clamped: if not one of
+       * them may reach the margins, whatever arrived there came in past the
+       * clamp and does not belong. Screens that legitimately fill their
+       * margins -- the title, the selector, anything the wood pass or the host
+       * map is handling -- always leave at least one layer unclamped and are
+       * never touched. */
+      if (s_ws_extra > 0 && snes->vPos >= 1 && snes->vPos <= kVideoHeight &&
+          (s_ws_clamp_now & 0x0fu) == 0x0fu &&
+          !(s_host_map && host_map_screen_live())) {
+        const uint16_t bd = g_ppu->cgram[0];
+        const uint32_t back = 0xFF000000u
+            | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+            | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+            | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+        uint32_t *row = (uint32_t *)(s_video_pixels +
+                                     (size_t)(snes->vPos - 1) * (size_t)s_video_pitch);
+        for (int x = 0; x < s_ws_extra; x++) row[x] = back;
+        for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) row[x] = back;
+      }
+      /* AFTER the real render, not before.
+       *
+       * Every extra ppu_runLine for the same scanline disturbs what the next
+       * one produces -- measured on the city view, turning the host map on
+       * changed the GUEST's own frame: the status bar's dark background at
+       * authentic (60,8) went from $311000 to the map's own colour, with no
+       * change to the guest's code path other than this pass existing. The
+       * overlay is taken from the guest's finished frame, so that frame has to
+       * be drawn from clean state; the capture can have whatever is left. */
+      if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
+        /* Everything EXCEPT BG2, not just BG3|OBJ.
+         *
+         * BG2 is the map -- the only layer being replaced. Capturing every
+         * other layer means anything the guest draws wins over the host map
+         * automatically: the HUD, sprites, AND any menu, including the ones
+         * that open *inside* the city view without changing $01df. Reported
+         * from play: savestate_3 opens such a menu and $01df stays 3
+         * throughout, so no screen-mode gate could ever have caught it.
+         *
+         * Self-correcting by construction, which is why it beats hunting for
+         * a "menu is open" flag -- a search through the WRAM delta across the
+         * B press turned up only transient direct-page scratch. */
+        g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
+        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch_bg && snes->vPos > 0 &&
           snes->vPos <= kVideoHeight) {
         const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
         uint32_t *dst = (uint32_t *)(s_video_pixels + row);
-        const uint32_t *src = (const uint32_t *)(s_ws_scratch + row);
+        const uint32_t *src = (const uint32_t *)(s_ws_scratch_bg + row);
         for (int x = 0; x < s_ws_extra; x++) dst[x] = src[x];
         for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) dst[x] = src[x];
       }
@@ -974,8 +1051,8 @@ static void handle_pos_stuff(void) {
         PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
-      widen_menu_bg();
-      /* AFTER widen_menu_bg(), which clears the flag for the frame. */
+      widen_wood_bg();
+      /* AFTER widen_wood_bg(), which clears the flag for the frame. */
       if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
       widen_title_lights();
@@ -989,7 +1066,7 @@ static void handle_pos_stuff(void) {
        * its margins stayed at 0 pixels with the tilemap already 64 columns and
        * the clamp mask showing BG3 clear.
        *
-       * Set EVERY frame, not once inside widen_menu_bg(): the field is sticky
+       * Set EVERY frame, not once inside widen_wood_bg(): the field is sticky
        * and PpuResetLayerPolicies() does not clear it, so opening it on the
        * menu would leave BG3 widened on the gameplay HUD afterwards -- exactly
        * the tiling this default exists to prevent. */
@@ -1025,6 +1102,12 @@ static void handle_pos_stuff(void) {
          * per frame and the clamp became live for the first time. */
         if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title)
           clamp &= (uint8_t)~0x06;   /* BG2 | BG3 */
+        /* The wood-only margin pass needs its layer to REACH the margins, or
+         * the pass renders 256 px of desk and nothing beyond. Its own map
+         * wraps seamlessly, and the frame the player sees is taken from the
+         * pass rather than from this one, so unclamping costs nothing here. */
+        if (s_ws_clamp_auto && s_wood_pass_layer >= 0)
+          clamp &= (uint8_t)~(1u << s_wood_pass_layer);
         /* SC_WS_MIRROR=<mask>: pad those layers by mirroring the authentic
          * 256 into the margins instead of clamping them. Needs no VRAM, which
          * matters on the screens that have none free -- map select and name
@@ -1033,6 +1116,7 @@ static void handle_pos_stuff(void) {
         clamp &= (uint8_t)~s_ws_mirror;
         PpuSetWidescreenLayerMirror(g_ppu, s_ws_mirror);
         PpuSetWidescreenLayerClamp(g_ppu, clamp);
+        s_ws_clamp_now = clamp;
         /* Sprites are NOT covered by that mask -- PpuWidescreenLayerExtra()
          * only consults it for layer < 4 -- so they reach the margins however
          * the BGs are clamped. Measured on the title: BG2 and BG3 clamp to 0
@@ -1102,6 +1186,7 @@ static void handle_pos_stuff(void) {
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
       ws_hide_backdrop_furniture();
+      ws_fill_flat_margins();
       ws_fill_margins();
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
@@ -2020,25 +2105,75 @@ static bool run_one_frame(void) {
   return guard > 0;
 }
 
-/* Keep the backdrop layer's FURNITURE out of the margins.
+/* Is the picture at its settled brightness?
+ *
+ * The three framebuffer fills below all decide what to paint by MEASURING the
+ * colours at the edge of the authentic picture -- is this strip flat, is this
+ * margin uniform, is this row plain wood. Mid-fade those colours are moving,
+ * so a row can qualify on one scanline and fail on the next, and the margins
+ * come out banded. Reported from play on the way out of the stats pages:
+ * stripes down both sides while the fade was still running, gone once it
+ * finished.
+ *
+ * So they do not run unless the display is settled. A margin that stays
+ * backdrop through a fade reads as a clean letterbox, and matches what the
+ * tilemap-based margins do anyway -- those go through the PPU, so they fade
+ * with everything else. */
+/* Report the guest's colour-math setup once per change, under SC_WS_DIAG.
+ *
+ * The popup screens dim the city behind their panel, and the question is what
+ * that dim actually is before trying to reproduce it in the margins. */
+static void ws_trace_math(void) {
+  if (!g_ppu || !getenv("SC_WS_DIAG")) return;
+  static unsigned last = ~0u;
+  const unsigned key = (unsigned)g_ppu->cgadsub << 16 | (unsigned)g_ppu->cgwsel << 8
+                     | (unsigned)(g_ppu->fixedColor & 0xff);
+  if (key == last) return;
+  last = key;
+  fprintf(stderr, "[math] $14=%02x cgadsub=%02x (layers=%02x half=%d sub=%d) "
+                  "cgwsel=%02x (addSub=%d prevent=%d clip=%d) fixed=%d,%d,%d\n",
+          g_ram[0x14], g_ppu->cgadsub, PPU_mathEnabled(g_ppu),
+          (int)PPU_halfColor(g_ppu), (int)PPU_subtractColor(g_ppu),
+          g_ppu->cgwsel, (int)PPU_addSubscreen(g_ppu),
+          PPU_preventMathMode(g_ppu), PPU_clipMode(g_ppu),
+          PPU_fixedColorR(g_ppu), PPU_fixedColorG(g_ppu), PPU_fixedColorB(g_ppu));
+}
+
+static bool ws_display_settled(void) {
+  ws_trace_math();
+  if (!g_ppu) return false;
+  const bool ok = !PPU_forcedBlank(g_ppu) && PPU_brightness(g_ppu) == 0x0f;
+  { static int last = -1;
+    const int now = PPU_forcedBlank(g_ppu) ? -2 : PPU_brightness(g_ppu);
+    if (getenv("SC_WS_DIAG") && now != last) { last = now;
+      fprintf(stderr, "[fade] f=%llu $14=%02x brightness=%d\n",
+              (unsigned long long)s_frames, g_ram[0x14], now); } }
+  return ok;
+}
+
+/* Keep the backdrop layer's FURNITURE out of the margins -- fallback only.
  *
  * The margins on a mode-0 screen are taken from a backdrop-only pass, and on
- * the fax that layer carries the machine as well as the desk -- so the machine
- * repeated into both margins along with the wood. Reported from play as
- * wanting the fax hidden on the left and right.
+ * the fax that layer carries the machine as well as the desk, so the machine
+ * repeated into both margins along with the wood. This was the first answer:
+ * the desk repeats on a 16-row cycle, so a row showing furniture borrows its
+ * margin from 16 rows above and lands on the same phase, walking downward so a
+ * borrowed row can itself be borrowed from.
  *
- * The desk repeats on a 16-row cycle, so a row showing furniture can borrow
- * its margin from 16 rows above and land on exactly the same phase. Rows are
- * walked downward so a borrowed row can itself be borrowed from, which carries
- * plain wood down through a tall obstruction.
+ * It does not work, and both reasons are visible on screen. It borrows 16
+ * PIXELS where the cycle is 16 tile ROWS, so it repeats a 16 px band instead
+ * of the real 128 px pattern; and it judges wood by colour on finished pixels,
+ * which the machine's flat beige can pass, dragging the machine's own
+ * structure sideways -- the leg-shaped smears reported from play.
  *
- * Judging it by "is this a plain texture" does NOT work: the machine is flat
- * beige, so it has few colours and a small channel range and passes as plain.
- * The desk is judged by its colour instead -- brown, meaning red clearly ahead
- * of green and blue and none of them bright. Anything else in the strip is
- * something standing on the desk. */
+ * widen_wood_bg() now fixes the fax at the tilemap instead, where neither
+ * failure is possible, so this runs only where that declined to act: a wood
+ * screen with no free VRAM pair, or some other mode-0 screen with furniture on
+ * its backdrop. Smeared wood still beats a copy of the machine. */
 static void ws_hide_backdrop_furniture(void) {
+  if (!ws_display_settled()) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_bg_margins || !s_ws_margin_fill) return;
+  if (s_wood_widened) return;          /* real wood is out there already */
   const int right0 = s_video_w - s_ws_extra;
   for (int y = 16; y < kVideoHeight; y++) {
     uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
@@ -2053,6 +2188,52 @@ static void ws_hide_backdrop_furniture(void) {
     if (woody >= 6) continue;                              /* plain desk */
     for (int x = 0; x < s_ws_extra; x++) row[x] = above[x];
     for (int x = right0; x < s_video_w; x++) row[x] = above[x];
+  }
+}
+
+/* Carry a flat backdrop field out into the margins.
+ *
+ * The tax, city evaluation, city overview and last-ten-events screens all sit
+ * on one flat colour, and all four drew it only inside the authentic 256:
+ * black bars either side, reported from play with the observation that the fix
+ * is simply to run the green out to both edges. It is. Where the picture's own
+ * edge is a flat field there is nothing to reconstruct, so the colour is
+ * carried outward and that is the whole of it -- no pattern, no VRAM, no
+ * tilemap.
+ *
+ * Measured, the margins on those screens are green only on rows 0..10 and
+ * 220..223 and black on 11..219, so the backdrop is reaching them at the top
+ * and bottom and something in the compositor is dropping it in between. This
+ * paints over the symptom rather than fixing that, which is worth being
+ * explicit about; the cause is the same compositor behaviour as the city
+ * view's grey block.
+ *
+ * Two guards keep it away from everything else. The edge must be flat for
+ * eight pixels -- measured across every screen, the four flat ones manage that
+ * on every row, while the wood screens manage 2..8 and the city view 1..3 --
+ * and the margin must already be a single colour, so any screen drawing real
+ * content out there is skipped row by row. */
+#define SC_WS_FLAT_RUN 8
+static void ws_fill_flat_margins(void) {
+  if (!ws_display_settled()) return;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
+  const int right0 = s_video_w - s_ws_extra;
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    for (int side = 0; side < 2; side++) {
+      const uint32_t edge = side ? row[right0 - 1] : row[s_ws_extra];
+      bool flat = true;
+      for (int k = 1; k < SC_WS_FLAT_RUN && flat; k++)
+        if (row[side ? right0 - 1 - k : s_ws_extra + k] != edge) flat = false;
+      if (!flat) continue;
+      const int x0 = side ? right0 : 0;
+      const int x1 = side ? s_video_w : s_ws_extra;
+      bool uniform = true;
+      for (int x = x0 + 1; x < x1 && uniform; x++)
+        if (row[x] != row[x0]) uniform = false;
+      if (!uniform || row[x0] == edge) continue;   /* real content, or done */
+      for (int x = x0; x < x1; x++) row[x] = edge;
+    }
   }
 }
 
@@ -2083,6 +2264,18 @@ static void ws_hide_backdrop_furniture(void) {
  * why the selector got real tiles instead. */
 #define SC_WS_FILL_SRC 16
 static void ws_fill_margins(void) {
+  if (!ws_display_settled()) return;
+  /* Not when every background is clamped.
+   *
+   * That case is now handled properly at the line level: nothing is entitled
+   * to the margins, so they are blanked to the backdrop. Filling them again
+   * here from the picture's own edge undoes it, and on the advice popup and
+   * the graphs page it undid it with a mirror-tiled strip of city map -- the
+   * very content those screens should not be showing out there. The flat
+   * screens that do want their colour carried out are covered by
+   * ws_fill_flat_margins(), which tests for a flat edge rather than a merely
+   * plain-looking one. */
+  if ((s_ws_clamp_now & 0x0fu) == 0x0fu) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
   /* Pillarboxed screens are filled too. The margins there have just been
    * blacked by the caller, so there is nothing to preserve, and a screen that
@@ -2272,105 +2465,320 @@ static void widen_title_lights(void) {
   }
 }
 
-/* Widen the main menu by relocating its background to a 64-column tilemap.
+/* The wooden desk, shared by the main menu and the fax.
  *
- * The main menu ($14 == 3) draws everything on BG3 alone, from a 32-column
- * tilemap at $3000 -- 256 px, so widescreen wraps it and the menu box
- * reappears in the margin. The scenario screen's trick does not apply: that
- * one was already 64 columns with the second page blank, whereas here page 1
- * ($3400) is 1009/1024 non-zero, so it belongs to something else.
+ * Both screens draw it from one sheet -- tiles $020..$11f, sixteen to a sheet
+ * row. Confirmed rather than assumed: rendering a 16x4 tile patch from each
+ * save state and comparing gives 0 of 4096 pixels different, same three
+ * colours. Only the character base differs ($4000 on the menu, $0000 on the
+ * fax), so a tile NUMBER means the same wood on either screen.
  *
- * Mirror and repeat do not help either. PpuMergePaddedBackground pads from the
- * whole authentic 256, and the box sits close enough to both edges that either
- * drags a piece of it into the margin.
+ * tools/wood_pattern.py measures the periods off live PPU dumps and renders
+ * the match -- the tilemap, the block it found, and that block tiled back --
+ * so the answer can be checked by eye instead of trusted:
  *
- * So the map is copied to free VRAM as a 64-column map and the new half filled
- * with wood. Measured free: $6800/$6c00/$7000/$7400/$7800 are entirely empty
- * 2KB pages, and a 64-column map needs two consecutive ones.
+ *   fax  BG3 $5000 / chr $0000    16 x 16 tiles    512/512 cells reproduced
+ *   menu BG3 $3000 / chr $4000    32 x  8 tiles    256/256 cells reproduced
  *
- * The wood is an 8x8 block of consecutive tiles, read off the live tilemap:
- * tile = kMenuWood[row % 8] + (col % 8). Column 32 continues the phase from 31
- * exactly (32 % 8 == 0), so the seam is invisible.
+ * The two differ because each screen lays the same sheet out its own way, so
+ * neither period can stand in for the other. What IS common is how a row runs:
+ * sixteen consecutive tiles, so walking sideways means walking the low four
+ * bits and wrapping them, while the high bits pick the sheet row and stay put.
+ * Grown that way off a screen's OWN edge tile, a margin inherits that screen's
+ * phase without being told it -- the fax sits at phase 0, the menu at phase 8
+ * on half its rows, and neither is written down anywhere here.
  *
- * Redone every frame: the screen's own DMA owns $3000, and BG3SC is rewritten
- * per frame, so both the copy and the register have to be reasserted. */
-#define SC_MENU_MAP_SRC 0x3000u
-static const uint16_t kMenuWood[8] = {
-  0x68, 0x78, 0x88, 0x98, 0x60, 0x70, 0x80, 0x90
-};
+ * This replaces an 8-wide table read off the menu. There is no 8-wide repeat
+ * on either screen; folding the wood into one is what put the menu's widened
+ * border out of step with the rest of the panel. */
+#define SC_WOOD_LO 0x020u
+#define SC_WOOD_HI 0x11fu
 
-static void widen_menu_bg(void) {
-  s_bg3_widened = false;
-  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
-  if (g_ram[0x14] != 0x03) { s_menu_settled = 0; return; }  /* main menu only */
-  /* Only act on the layout this was measured against; if the screen is
-   * arranged differently, leave it alone rather than corrupt VRAM. */
-  if ((unsigned)PPU_bgTilemapAdr(g_ppu, 2) != SC_MENU_MAP_SRC) return;
+static bool wood_tile(uint16_t e) {
+  const unsigned t = e & 0x3ffu;
+  return t >= SC_WOOD_LO && t <= SC_WOOD_HI && !(e & 0xc000u);   /* no flips */
+}
 
-  /* Do not claim $6800..$6fff until the screen has settled AND that region is
-   * genuinely empty.
-   *
-   * $14 passes through 3 while other screens load, and this writes four
-   * kilobytes of VRAM. If the region still holds graphics being DMAd in, the
-   * result is scrambled tiles -- reported from play as looking like a bad
-   * cartridge, and intermittent, which is exactly what a race with a load
-   * looks like. Measuring it free once on the main menu is not a promise that
-   * it is free every time the screen index happens to read 3.
-   *
-   * So: require several consecutive frames on this screen, then check the
-   * destination is all zero before taking it. If it is not, this screen simply
-   * stays narrow -- a black margin is a far better failure than corruption. */
-  if (++s_menu_settled < 8) return;
+static uint16_t wood_grow(uint16_t e, int d) {
+  const unsigned t = e & 0x3ffu;
+  return (uint16_t)((e & ~0x3ffu) | (t & ~0x0fu) |
+                    ((unsigned)((int)t + d) & 0x0fu));
+}
 
-  /* Take the destination only if no ENABLED layer is using it.
-   *
-   * The first version required the region to be all zero, and that was wrong
-   * in a way only play showed: save the game while this is active and the
-   * copy is captured INTO the save state, so on reload the region is non-zero,
-   * the check refuses forever, and the menu silently falls back to the pixel
-   * fill -- which is the banded wood reported from play as "all over the
-   * place". Emptiness cannot tell another screen's data from our own.
-   *
-   * What actually matters is whether anything on screen READS those words, so
-   * that is what is tested: every enabled background's tilemap and character
-   * base, plus the sprite character bases. */
-  unsigned dst = 0;
-  for (int c = 0; c < 5 && !dst; c++) {
-    static const unsigned kCand[5] = { 0x6800u, 0x7000u, 0x7400u, 0x7800u, 0x1800u };
-    const unsigned lo = kCand[c], hi = lo + 0x800u;
-    bool clash = false;
-    for (int L = 0; L < 4 && !clash; L++) {
-      if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
-          !((g_ppu->screenEnabled[1] >> L) & 1)) continue;
-      const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
-      const unsigned ch = (unsigned)PPU_bgTileAdr(g_ppu, L);
-      if (lo < m + 0x800u && m < hi) clash = true;
-      if (lo < ch + 0x2000u && ch < hi) clash = true;
-    }
-    const unsigned o1 = (unsigned)PPU_objTileAdr1(g_ppu);
-    const unsigned o2 = (unsigned)PPU_objTileAdr2(g_ppu);
-    if (lo < o1 + 0x2000u && o1 < hi) clash = true;
-    if (lo < o2 + 0x2000u && o2 < hi) clash = true;
-    if (!clash) dst = lo;
+/* A run of two consecutive wood tiles from c, walking by step.
+ *
+ * "The end tile is in the wood range" was too weak a test to grow a margin
+ * from. On map select the scenario names are still in the tilemap off to both
+ * sides, and their font tiles fall inside the same range, so growing from one
+ * walked along the font and printed "Flooding" and "Coastal" into the right
+ * margin. Letters are not consecutive tile numbers -- "Flooding" repeats an
+ * o -- so asking for a real run rejects them while the wood still passes.
+ *
+ * Two, because two is what these screens actually leave exposed, and asking
+ * for more throws away the rows that have least. Measured over every wood map,
+ * counting rows whose margin would come out at a phase the tilemap disagrees
+ * with:
+ *
+ *              run>=2   run>=3
+ *   map select    1        1      (the one is $0f9, a cable tile, correctly
+ *   View Mode     3       13       refused in both)
+ *   selector      0        0
+ *   fax           0        0
+ *   menu          0        0
+ *
+ * View Mode is the case that decides it: its desk is isometric, and row 6 ends
+ * $202e $202f with a non-wood tile beside them, so three was one too many. */
+static bool wood_run_at(const uint16_t *map, int r, int c, int step) {
+  for (int k = 0; k < 2; k++) {
+    const uint16_t a = map[r * 32 + c + k * step];
+    if (!wood_tile(a)) return false;
+    if (k && a != wood_grow(map[r * 32 + c + (k - 1) * step], step)) return false;
   }
-  if (!dst) return;                    /* nowhere safe -- stay narrow */
+  return true;
+}
 
-  for (unsigned i = 0; i < 0x400u; i++)
-    g_ppu->vram[dst + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
-  for (unsigned row = 0; row < 32u; row++)
-    for (unsigned col = 0; col < 32u; col++)
-      g_ppu->vram[dst + 0x400u + row * 32u + col] =
-          (uint16_t)(kMenuWood[row & 7u] + ((col + 32u) & 7u));
+static bool wood_row_ends(const uint16_t *map, int r) {
+  return wood_run_at(map, r, 0, 1) && wood_run_at(map, r, 31, -1);
+}
 
-  /* BG3SC: base in the top six bits, bit 0 = 64 columns wide. */
-  g_ppu->bgXsc[2] = (uint8_t)((dst >> 8) | 0x01u);
-  s_bg3_widened = true;
-  { static int n; if (getenv("SC_WS_DIAG") && n < 4) { n++;
-      fprintf(stderr, "[menuwide] frame=%llu bg3sc=%02x page1[0]=%04x page1[40]=%04x hs=%d\n",
-              (unsigned long long)s_frames, g_ppu->bgXsc[2],
-              g_ppu->vram[dst + 0x400u],
-              g_ppu->vram[dst + 0x400u + 40u],
-              g_ppu->hScroll[2]); } }
+/* Is this map the wood sheet, laid out the way wood_grow() assumes?
+ *
+ * Everything below writes four kilobytes of VRAM, so it has to be sure of the
+ * layout first. Being "mostly tiles in the wood range" is not enough -- what
+ * wood_grow() relies on is a run of CONSECUTIVE tiles, which wood_row_ends()
+ * now establishes at both ends of every row it accepts. On top of that: some
+ * rows entirely wood, and a good share of the map wood overall.
+ *
+ * The thresholds are set from measurement, not taste. Across every save state
+ * the three real wood maps score rows/full of 16/15 (menu), 20/20 (fax) and
+ * 10/8 (map select and name entry, whose picker device covers most of the
+ * screen -- an earlier bar of 600 wood cells excluded them, and they were the
+ * two screens still reported as looking wrong). Everything else in VRAM either
+ * scores rows = 0 or is a map no enabled layer points at. */
+static bool wood_map_ok(const uint16_t *map) {
+  int rows = 0, cells = 0, full = 0;
+  for (int r = 0; r < 32; r++) {
+    int w = 0;
+    for (int c = 0; c < 32; c++) if (wood_tile(map[r * 32 + c])) w++;
+    cells += w;
+    if (w == 32) full++;
+    if (wood_row_ends(map, r)) rows++;
+  }
+  return rows >= 8 && full >= 4 && cells >= 300;
+}
+
+/* The row a margin row grows from: itself, or the wood row it repeats.
+ *
+ * Rows carrying furniture have no wood at their ends to take a phase from --
+ * the fax machine spans rows 19..30, and rows 20..30 hold no wood at all. Those
+ * fall back to the row the wood repeats from, which is what the old "borrow
+ * from 16 rows above" was reaching for. Two things were wrong with that. It
+ * borrowed 16 PIXELS rather than 16 tile rows, so it smeared a 16 px band down
+ * the screen instead of repeating the real 128 px pattern; and it worked on
+ * finished pixels, so wherever its is-this-plain-wood test misfired on the
+ * machine's flat beige it dragged the machine's own structure sideways -- the
+ * leg-shaped smears reported from play. Working on tilemap entries makes both
+ * failures impossible, and measuring the period makes the first one moot.
+ *
+ * Measured on the EDGE columns alone, because they are the only ones the fill
+ * reads. Comparing whole rows needed both rows to be clean end to end, and on
+ * map select no such pair exists at any spacing -- its device covers the
+ * middle from row 6 to row 27 -- so the search found nothing and fell through
+ * to 16. The edge columns are unobstructed on every row and repeat every 8
+ * there, which is the answer the fill actually needs. */
+static int wood_vperiod(const uint16_t *map) {
+  for (int vp = 1; vp <= 16; vp <<= 1) {
+    int tested = 0, bad = 0;
+    for (int r = 0; r + vp < 32; r++) {
+      for (int e = 0; e < 2; e++) {
+        const int c = e ? 31 : 0;
+        const uint16_t a = map[r * 32 + c], b = map[(r + vp) * 32 + c];
+        if (!wood_tile(a) || !wood_tile(b)) continue;
+        tested++;
+        if (a != b) bad++;
+      }
+    }
+    /* A tenth may disagree. Demanding perfection let a single stray tile
+     * decide the answer: map select carries $0f9 at row 11 column 31, one cell
+     * of the device's cable that happens to land in the wood range, and it
+     * alone rejected the true period of 8 and sent the search to 16. */
+    if (tested >= 16 && bad * 10 <= tested) return vp;
+  }
+  return 16;
+}
+
+/* Fill a widened map's second page with wood grown off the first page's ends.
+ *
+ * On a 64-column map with no scroll the right margin reads columns 32.., and
+ * the left margin reads the map's far end -- 63, 62, ... -- because the fetch
+ * wraps. So the page is filled from both directions: its first half continues
+ * rightward out of column 31, its second half leads back into column 0. The
+ * middle is never visible at any supported margin (96 px = 12 tiles) and is
+ * filled anyway, rather than left as tile $0000. */
+/* One line per CHANGE of decision, with the frame number.
+ *
+ * The version this replaces printed the first few frames, keyed per screen
+ * index. That tells you what a screen settled on and nothing about how it got
+ * there, which is backwards for faults that only happen during a transition --
+ * and worse, a decline printed once per screen, so an alternation between
+ * widening and declining looked identical to one settled decision. It hid the
+ * very thing it was there to find. */
+static void wood_trace(const char *what, int layer, unsigned src) {
+  if (!getenv("SC_WS_DIAG")) return;
+  static char last[128];
+  char now[128];
+  snprintf(now, sizeof now, "%s $14=%02x mode=%d BG%d src=%04x en=%02x/%02x",
+           what, g_ram[0x14], g_ppu ? PPU_mode(g_ppu) : -1, layer + 1, src,
+           g_ppu ? g_ppu->screenEnabled[0] : 0,
+           g_ppu ? g_ppu->screenEnabled[1] : 0);
+  if (!strcmp(now, last)) return;
+  snprintf(last, sizeof last, "%s", now);
+  fprintf(stderr, "[wood] f=%llu %s\n", (unsigned long long)s_frames, now);
+}
+
+/* The tile to grow a row's margin from, at one end.
+ *
+ * The row's own end when it can be trusted; otherwise the nearest row at the
+ * same vertical phase that can be, with the OWN end's palette and flip bits
+ * kept. That last part is not cosmetic: below the fax machine, rows 28..30
+ * carry the desk in palette 1 while the rows they share a phase with use
+ * palette 0, so taking the borrowed tile whole would have painted three rows
+ * of margin in the wrong colours. */
+static uint16_t wood_end(const uint16_t *page0, int r, int c, int step, int vp) {
+  const uint16_t own = page0[r * 32 + c];
+  if (wood_run_at(page0, r, c, step)) return own;
+  for (int k = r % vp; k < 32; k += vp) {
+    if (!wood_run_at(page0, k, c, step)) continue;
+    const uint16_t v = page0[k * 32 + c];
+    return wood_tile(own) ? (uint16_t)((v & 0x3ffu) | (own & ~0x3ffu)) : v;
+  }
+  return own;
+}
+
+/* The wood that belongs beyond each edge, one row at a time.
+ *
+ * Each side is grown from its own end, because the two are not always the same
+ * cycle: the menu's row 0 runs $020..$02f and then $060..$06f, so the left edge
+ * continues out of $020 and the right out of $06f, and using one for both puts
+ * a visible step in the grain at one seam.
+ *
+ * Each end is read from a row at its OWN vertical phase -- r, or failing that
+ * the nearest row vp apart that still has a clean run there. Deriving the
+ * right end from the left instead is wrong on exactly the rows that look like
+ * the menu's: map select rows 8..11, 16..19 and 24..27 hold $020 at column 0
+ * and $06f at column 31, two different rows of the sheet side by side, so
+ * growing 31 steps from $020 gives $02f and the right margin comes out a
+ * quarter of the sheet off. Rows 0, 8, 16 and 24 all carry $06f, which is what
+ * the phase search finds.
+ *
+ * A row with no usable end anywhere at its phase falls back to row 0. On the
+ * fax that never happens; rows 20..30 are solid machine, but every one of them
+ * shares a phase with a clean row above. */
+static void wood_fill_page1(const uint16_t *page0, uint16_t *page1) {
+  const int vp = wood_vperiod(page0);
+  for (int r = 0; r < 32; r++) {
+    /* The row's OWN end first, always. Going straight to the phase search
+     * breaks View Mode, whose desk is drawn in isometric: each row is offset
+     * by a tile from the one above, so no vertical period describes it and any
+     * other row is the wrong answer even at the right phase. Its rows all have
+     * clean ends, so they never reach the search. */
+    const uint16_t l  = wood_end(page0, r, 0, 1, vp);
+    const uint16_t rt = wood_end(page0, r, 31, -1, vp);
+    for (int c = 0; c < 32; c++)
+      page1[r * 32 + c] = (c < 16) ? wood_grow(rt, c + 1) : wood_grow(l, c - 32);
+  }
+}
+
+/* Widen a wood-backed screen by lending its layer a wood-only map.
+ *
+ * The margins already come from a pass that renders one layer on its own, so
+ * for the length of that pass the layer's map is replaced with a copy carrying
+ * nothing but wood -- no menu box, no fax machine, no city, no furniture --
+ * and put back before the picture proper is drawn. A 32-column map wrapping at
+ * 256 px is seamless here because the sheet's period, 16 tiles, divides 32,
+ * and the wood arrives through the real PPU with the real palette and
+ * brightness. Costs two 2KB copies per scanline and NOT ONE BYTE of VRAM.
+ *
+ * It replaces a version that relocated the map to a spare 64-column region,
+ * and the reason is worth keeping. Choosing that region can only test the
+ * layers enabled RIGHT NOW, so a page belonging to a screen the player is not
+ * currently on looks free -- and these screens share VRAM. From a play log:
+ *
+ *   frame=3220 $14=09 BG3 src=5800 dst=5000
+ *   frame=3270 $14=07 BG3 src=5400 dst=5800
+ *   frame=3312 $14=07 BG3 src=5000 dst=5800
+ *
+ * Screen 09 wrote its copy over $5000, which is screen 07's own map; screen 07
+ * wrote over $5800, which is screen 09's. Each then had to be reloaded by the
+ * game on the way back, and until it was, the wrong tiles were on screen.
+ * Reported from play as the wood flickering for seconds after a screen change,
+ * and no amount of latching or settling could fix it, because the destination
+ * was never really free. Writing nothing at all cannot collide with anything,
+ * and it retires the whole risk of scrambling VRAM along with it. */
+static void widen_wood_bg(void) {
+  s_bg3_widened = false;
+  s_wood_widened = false;
+  s_wood_pass_layer = -1;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
+
+  /* Find the wood on WHICHEVER layer is carrying it.
+   *
+   * It is not always BG3. The menu, both faxes and View Mode put it there, but
+   * map select and name entry -- the two screens whose margin wood was
+   * reported wrong longest -- can have it elsewhere, and keying on BG3
+   * declined on exactly the screens that needed this most.
+   *
+   * A 32x64 map is two pages and a 64x64 one is four, so those are skipped
+   * rather than guessed at; a 64-column layer already reaches the margins. */
+  int layer = -1;
+  unsigned src = 0;
+  for (int L = 0; L < 4 && layer < 0; L++) {
+    if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
+        !((g_ppu->screenEnabled[1] >> L) & 1)) continue;
+    if (PPU_bgTilemapWider(g_ppu, L) || (g_ppu->bgXsc[L] & 0x02u)) continue;
+    const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+    if (m + 0x400u > 0x8000u || !wood_map_ok(&g_ppu->vram[m])) continue;
+    layer = L;
+    src = m;
+  }
+  if (layer < 0) { wood_trace("no-wood-layer", -1, 0); return; }
+
+  /* The stand-in is exactly page 1 of the 64-column map this used to build.
+   *
+   * On a 64-column map the right margin reads columns 32.. and the left reads
+   * 63, 62, ... downward; on a 32-column map that wraps, the right margin
+   * reads columns 0, 1, ... and the left reads 31, 30, ... -- the same cells
+   * in the same order. So the fill that was right for page 1 is right here,
+   * and both seams keep the screen's own phase. */
+  /* Rebuild only from a map that held still since last frame.
+   *
+   * Opening the scenario menu, the margins scrambled briefly while the screen
+   * was still fading and then came right -- reported from play. The map is
+   * being DMAd in over several frames, so a rebuild caught mid-write reads
+   * half-written rows, and the phase grown from them is nonsense. Sampling the
+   * anchors and requiring them to match the previous frame costs 32 compares
+   * and defers the rebuild by one frame; until then the previous screen's wood
+   * stays up, which during a fade is exactly what it should do. */
+  { static uint16_t anchor[32];
+    static unsigned anchor_src = ~0u;
+    bool steady = anchor_src == src;
+    for (int r = 0; r < 32; r++) {
+      const uint16_t a = g_ppu->vram[src + (unsigned)r * 32u];
+      if (a != anchor[r]) steady = false;
+      anchor[r] = a;
+    }
+    anchor_src = src;
+    if (steady || !s_wood_pass_ready) {
+      wood_fill_page1(&g_ppu->vram[src], s_wood_pass_map);
+      s_wood_pass_ready = true;
+    } }
+  s_wood_pass_layer = layer;
+  s_wood_pass_src = src;
+  s_ws_bg_margins = true;
+  s_ws_margin_layer = layer;
+  if (layer == 2) s_bg3_widened = true;   /* BG3 is clamped independently */
+  s_wood_widened = true;
+  wood_trace("wood-pass", layer, src);
 }
 
 /* Extend the selector background in the TILEMAP, not in the framebuffer.
@@ -2381,36 +2789,52 @@ static void widen_menu_bg(void) {
  * The shipped screen fills columns 0..44 and leaves 45..63 as tile $0000,
  * which is why scrolling the ninth column into view showed black.
  *
- * The wood is genuinely repeatable, as it turns out: columns 41..44 carry a
- * 4-wide by 8-tall block that repeats down the whole screen. Reading it off
- * the live tilemap and tiling it into columns 45..63 extends the background
- * for real -- the PPU draws it, it scrolls with everything else, and the
- * host-side pixel fill it replaces is gone along with its scroll artefacts.
+ * The extension is grown from the live tilemap with wood_grow(), the same rule
+ * the menu and the faxes use: a row of the wood sheet is sixteen consecutive
+ * tiles, so walking sideways walks the low four bits and wraps them.
  *
- * Phase continues from column 41 so the seam at column 44/45 is invisible. */
-static const uint16_t kSelWood[8][4] = {
-  { 0x0029, 0x002a, 0x002b, 0x002c },
-  { 0x0039, 0x003a, 0x003b, 0x003c },
-  { 0x0049, 0x004a, 0x004b, 0x004c },
-  { 0x0059, 0x005a, 0x005b, 0x005c },
-  { 0x0061, 0x0062, 0x0063, 0x0064 },
-  { 0x0071, 0x0072, 0x0073, 0x0074 },
-  { 0x0081, 0x0082, 0x0083, 0x0084 },
-  { 0x0091, 0x0092, 0x0093, 0x0094 },
-};
+ * This replaced a hardcoded 4-wide by 8-tall block read off columns 41..44.
+ * There is no 4-wide repeat -- reported from play as the selector's wood being
+ * the one still worth optimising -- and the loop was plain to see: row 0 ran
+ * $029 $02a $02b $02c $029 $02a... where the sheet continues $02d $02e $02f
+ * $020.
+ *
+ * Column 41 is the anchor, and it has to be. Column 44 would be the natural
+ * choice as the last column the shipped screen fills, but with SC_NINTH the
+ * Sylt card occupies columns 42..49 on rows 5..13, so 44 is card art on a
+ * third of the screen. 41 is wood on every row, which is presumably why the
+ * old table was read from there too. */
 
 /* Written every frame the selector runs: the screen's own setup DMA lands
- * before this and would otherwise put the blank tiles back. */
+ * before this and would otherwise put the blank tiles back. sylt_place_card()
+ * runs after it, so the card is laid back over columns 42..49. */
 static void selector_extend_tilemap(void) {
   if (!g_ppu) return;
   const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);   /* BG1, in words */
-  for (int row = 0; row < 32; row++)
-    for (int col = 45; col < 64; col++) {
-      /* Columns 32..63 live in the second 32x32 page, at map + $400 words. */
-      const unsigned idx = map + 0x400u + (unsigned)row * 32u + (unsigned)(col - 32);
-      if (idx >= 0x8000u) continue;
-      g_ppu->vram[idx] = kSelWood[row & 7][(col - 41) & 3];
-    }
+  if (map + 0x800u > 0x8000u) return;
+  /* Remember each row's anchor, and keep using the last good one while the
+   * screen is loading.
+   *
+   * Arriving at the selector, column 41 has not been written yet on the first
+   * frames, so the row was skipped and its columns 45..63 stayed as the blank
+   * tiles the shipped map holds -- reported from play as the left wood
+   * flickering briefly on the way in. Which end it shows up at is not a
+   * coincidence: BG1 is 64 columns and the left margin reads the map's far
+   * end, columns 60..63, so the columns this fills are exactly the ones the
+   * left margin shows. */
+  static uint16_t held[32];
+  static unsigned held_map = ~0u;
+  if (held_map != map) { held_map = map; memset(held, 0, sizeof held); }
+  for (int row = 0; row < 32; row++) {
+    /* Columns 32..63 live in the second 32x32 page, at map + $400 words. */
+    const unsigned page1 = map + 0x400u + (unsigned)row * 32u;
+    const uint16_t live = g_ppu->vram[page1 + (41u - 32u)];
+    if (wood_tile(live)) held[row] = live;
+    const uint16_t anchor = held[row];
+    if (!wood_tile(anchor)) continue;      /* never had one -- leave the row */
+    for (int col = 45; col < 64; col++)
+      g_ppu->vram[page1 + (unsigned)(col - 32)] = wood_grow(anchor, col - 41);
+  }
 }
 
 /* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
@@ -2469,7 +2893,25 @@ static void host_map_init(void) {
           (int)a, (int)b, (int)PPU_mode(g_ppu));
 }
 
-/* Per frame, before any line renders. */
+/* Per frame, before any line renders.
+ *
+ * Now a deliberate no-op, and the reason is the whole of the HUD bug.
+ *
+ * It used to arm the runner's overlay export for BG3 and OBJ with
+ * kPpuOverlayFlag_RemoveFromGame -- which does exactly what it says: those two
+ * layers are taken OUT of the game's own render and handed to the export
+ * instead. The export has never returned anything (the diagnostic below has
+ * been printing bg3px=0 objpx=0 since it was written), so the HUD was being
+ * deleted from the frame and never given back. That is what "the map shows
+ * through the toolbar" was: not a compositing failure at all, but the toolbar
+ * having been removed before compositing began. Measured plainly -- turning
+ * SC_HOST_MAP on changed the GUEST's own frame, the status bar's dark
+ * background at authentic (60,8) going from $311000 to the map's colour, with
+ * no other change to its code path.
+ *
+ * Nothing needs it now. The overlay is taken as the difference between the
+ * guest's finished frame and a map-only capture, so the layers must stay in
+ * the game's render, which is precisely what not arming this achieves. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
   if (!host_map_screen_live()) return;   /* city view only, as above */
@@ -4144,6 +4586,7 @@ static int run_qualification(uint64_t frames) {
     last_video_hash = vh;
 
     {
+      s_loop_frame = f;
       const char *dump_at = getenv("SC_DUMP_AT");
       const char *dump_path = getenv("SC_DUMP_PATH");
       if (dump_at && dump_path && f == strtoull(dump_at, NULL, 0)) {
@@ -4750,12 +5193,21 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_MAPGEN_TURBO");
     if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_mapgen_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
-    if (e && *e && *e != '0') s_host_map = true; }
+    if (e && *e) s_host_map = (*e != '0'); }
+  /* Say which binary this is, unconditionally.
+   *
+   * "Did you start an old version?" is not a question either of us should have
+   * to answer by inspecting timestamps. The compiler stamps the build, so the
+   * log names it. */
+  fprintf(stderr, "build: %s %s  widescreen=%d ninth=%d hostmap=%d\n",
+          __DATE__, __TIME__, s_ws_extra, s_ninth_scenario ? 1 : 0,
+          s_host_map ? 1 : 0);
   if (s_ws_extra > 0) {
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
     s_ws_scratch = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
+    s_ws_scratch_bg = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
     /* The per-frame choice above owns this now -- see the mode note there. */
     fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
             s_ws_extra, s_video_w, kVideoHeight);
