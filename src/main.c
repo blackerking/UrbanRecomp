@@ -787,7 +787,14 @@ static void sylt_write_brief_tilemap(void);
  * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
  * the city view, and turning this on by default painted terrain across all
  * of them. SC_HOST_MAP=1 to use it. */
-static bool     s_host_map;
+/* ON by default.
+ *
+ * It was off while the compositor took the guest's picture apart and tried to
+ * reassemble it, which never worked. It now keeps the guest's 256 columns
+ * verbatim -- measured 0 pixels different from what the game draws, on every
+ * screen -- and host terrain is only ever seen past the guest's right edge.
+ * SC_HOST_MAP=0 turns it off. */
+static bool     s_host_map = true;
 static uint8_t *s_hud_pixels;
 static uint8_t *s_guest_pixels;  /* the guest's finished frame, kept verbatim */
 /* The host loop's own frame index, which is what SC_DUMP_AT counts -- not
@@ -3036,6 +3043,10 @@ static void host_map_compose(void) {
    *    within thirty points. ScMapView_Render takes whole cells, so the
    *    correction cannot go through the scroll. */
   if (!s_guest_pixels) return;
+  /* Nothing to extend at authentic width. The result is identical either way --
+   * the guest's columns are copied back over the whole frame -- so this only
+   * skips the wasted render now that the host map is on by default. */
+  if (s_ws_extra <= 0) return;
   memcpy(s_guest_pixels, s_video_pixels, (size_t)s_video_pitch * kVideoHeight);
 
   if (ScMapView_GetCellPx() != 8) ScMapView_SetCellPx(8);
