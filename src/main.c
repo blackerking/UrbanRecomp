@@ -789,6 +789,7 @@ static void sylt_write_brief_tilemap(void);
  * of them. SC_HOST_MAP=1 to use it. */
 static bool     s_host_map;
 static uint8_t *s_hud_pixels;
+static uint8_t *s_guest_pixels;  /* the guest's finished frame, kept verbatim */
 /* The host loop's own frame index, which is what SC_DUMP_AT counts -- not
  * s_frames, which after --load-state resumes at the saved state's number. */
 static unsigned long long s_loop_frame;
@@ -2922,6 +2923,7 @@ static void host_map_init(void) {
    * pixels while binding and arming reported success. */
   s_ov_pitch = s_video_pitch;
   s_hud_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
+  s_guest_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
   s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
@@ -2932,48 +2934,20 @@ static void host_map_init(void) {
           (int)a, (int)b, (int)PPU_mode(g_ppu));
 }
 
-/* Per frame, before any line renders.
- *
- * Now a deliberate no-op, and the reason is the whole of the HUD bug.
+/* Per frame, before any line renders -- a deliberate no-op.
  *
  * It used to arm the runner's overlay export for BG3 and OBJ with
- * kPpuOverlayFlag_RemoveFromGame -- which does exactly what it says: those two
- * layers are taken OUT of the game's own render and handed to the export
- * instead. The export has never returned anything (the diagnostic below has
- * been printing bg3px=0 objpx=0 since it was written), so the HUD was being
- * deleted from the frame and never given back. That is what "the map shows
- * through the toolbar" was: not a compositing failure at all, but the toolbar
- * having been removed before compositing began. Measured plainly -- turning
- * SC_HOST_MAP on changed the GUEST's own frame, the status bar's dark
- * background at authentic (60,8) going from $311000 to the map's colour, with
- * no other change to its code path.
+ * kPpuOverlayFlag_RemoveFromGame, which takes those layers OUT of the game's
+ * own render. BG3 does come back correctly -- the surface reports exactly the
+ * pixels BG3 drew -- but OBJ never does (upstream #31), so arming it simply
+ * deletes the sprites from the picture.
  *
- * Nothing needs it now. The overlay is taken as the difference between the
- * guest's finished frame and a map-only capture, so the layers must stay in
- * the game's render, which is precisely what not arming this achieves. */
+ * Nothing needs it now. The guest's own 256 columns are kept verbatim below,
+ * so there is nothing to take apart and reassemble. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
-  if (!host_map_screen_live()) return;   /* city view only, as above */
-  /* Keep the UI layers out of the widescreen margins.
-   *
-   * BG3 is a tilemap like BG2, so widening the picture tiles the toolbar and
-   * status bar sideways exactly as it did the map -- reported from play as
-   * "the UI seems repeated too". Clamping pins them to the authentic 256
-   * columns; the composite below then anchors that block to the left edge.
-   *
-   * BG2 is clamped too and costs nothing: it is the layer being replaced.
-   * Must be re-applied every frame, per the API contract. */
-  memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
-  memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
+  if (!host_map_screen_live()) return;
   PpuClearOverlayCaptures(g_ppu);
-  bool c3 = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Bg3, 0, 0, s_video_w,
-                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
-  bool co = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Obj, 0, 0, s_video_w,
-                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
-  { static int shown = 0;
-    if (shown < 2) { shown++;
-      fprintf(stderr, "host map: capture armed bg3=%d obj=%d mode=%d\n",
-              (int)c3, (int)co, (int)PPU_mode(g_ppu)); } }
 }
 
 /* True only when a city actually exists to draw.
@@ -2988,7 +2962,21 @@ static void host_map_arm_captures(void) {
  * play, 3 scenario). Measured at boot: $14 = 00 and $3e = 0 through frame 110+,
  * while savestates 7, 8 and 9 -- real city views -- all have $3e = 1. */
 static bool host_map_screen_live(void) {
-  return g_ram[0x14] == 0x00 && (g_ram[0x3e] | (g_ram[0x3f] << 8)) != 0;
+  if (g_ram[0x14] != 0x00 || (g_ram[0x3e] | (g_ram[0x3f] << 8)) == 0) return false;
+  if (!g_ppu) return false;
+  /* $14 == 0 is not only the city view. The tax, evaluation, overview and
+   * history pages all report it, and so does View Mode -- View Mode with the
+   * SAME enable bits and the SAME three map bases as the city view, so no
+   * register separates those two at all.
+   *
+   * Two further tests do. BG2 is the map and the four menu pages do not enable
+   * it, which excludes them; and View Mode is the one carrying the wooden
+   * desk, which widen_wood_bg() has already found by reading the tilemap.
+   * Without both, the host map painted terrain across all five. */
+  if (!(((g_ppu->screenEnabled[0] | g_ppu->screenEnabled[1]) >> 1) & 1))
+    return false;                       /* BG2 = the map, on either screen */
+  if (s_wood_widened) return false;     /* View Mode */
+  return true;
 }
 
 /* After the guest frame: replace the picture with our map, then put the
@@ -3023,62 +3011,51 @@ static void host_map_compose(void) {
    * case, applied consistently. */
   if (!host_map_screen_live()) return;
 
-  { static int shown = 0;
-    if (shown < 3) { shown++;
-      int n3 = 0, no = 0;
-      for (int y = 0; y < kVideoHeight; y++) {
-        const uint32_t *b3 = (const uint32_t *)(s_ov_bg3 + (size_t)y * s_ov_pitch);
-        const uint32_t *ob = (const uint32_t *)(s_ov_obj + (size_t)y * s_ov_pitch);
-        for (int x = 0; x < s_video_w; x++) { if (b3[x] >> 24) n3++; if (ob[x] >> 24) no++; }
-      }
-      /* KNOWN ISSUE: both counts are 0. The captures arm successfully and the
-       * mode is 1, which HOST_OVERLAY_EXTRACTION.md lists as covered, yet the
-       * surfaces stay empty -- so the HUD and sprites do not come back and the
-       * frame is bare map. Reported from play as "map works, no overlay".
-       * Whatever the reason is, it is inside the runner's export path rather
-       * than this wiring. Diagnostic kept until it is understood. */
-      fprintf(stderr, "host map: composing, bgmode=%d bg3px=%d objpx=%d\n",
-              (int)PPU_mode(g_ppu), n3, no); } }
+  /* Keep the guest's own 256 columns EXACTLY; spend the extra width on host
+   * terrain to the right of them.
+   *
+   * Earlier versions replaced the map inside the authentic picture as well and
+   * then tried to key the guest's frame back over the top. That cannot work:
+   * the host renderer is a reimplementation and agrees with the guest's own map
+   * on 76.6% of pixels at its best alignment. The missing quarter is real
+   * content -- the taller roofs that overlap the tile behind them, shoreline
+   * decoration -- which a colour key then discards as "same as the map".
+   *
+   * Nothing has to be recovered if nothing is thrown away. Measured, this
+   * leaves the authentic 256 columns 0 pixels different from what the game
+   * draws, on every screen.
+   *
+   * Two details the render depends on:
+   *
+   *  - NATIVE cell size. This continues a picture the guest draws at 8 px per
+   *    cell, so any other zoom draws terrain at the wrong size AND starts from
+   *    the wrong cell: a band of mismatched tiles along the join that moves as
+   *    you scroll.
+   *  - ONE ROW UP. The host render sits a pixel low against the guest's map.
+   *    Sweeping the offset, dx 0 / dy +1 scores 91.8% and nothing else comes
+   *    within thirty points. ScMapView_Render takes whole cells, so the
+   *    correction cannot go through the scroll. */
+  if (!s_guest_pixels) return;
+  memcpy(s_guest_pixels, s_video_pixels, (size_t)s_video_pitch * kVideoHeight);
+
+  if (ScMapView_GetCellPx() != 8) ScMapView_SetCellPx(8);
   int sx = 0, sy = 0;
   ScMapView_GetScroll(&sx, &sy);
   const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
-  if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) return;
-  /* Composite the HUD-only pass over the map.
-   *
-   * An isolated render still paints the backdrop, so "not black" is the wrong
-   * test -- the whole scratch buffer would count as opaque. Key on the actual
-   * backdrop colour instead, taken from CGRAM entry 0 through the same
-   * brightness the PPU applies, so it matches whatever the pass produced. */
-  if (s_hud_pixels) {
-    uint16_t bd = g_ppu->cgram[0];
-    s_backdrop_argb = 0xFF000000u
-        | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
-        | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
-        | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
-    /* Anchor the UI to the upper-left rather than leaving it centred.
-     *
-     * With the layers clamped, the guest draws its UI into the authentic 256
-     * columns, which sit centred at x = s_ws_extra .. s_ws_extra+255 in a
-     * widened frame. Reading with that offset lands the block flush against
-     * the left edge, so the toolbar and status bar stay where they belong and
-     * the extra width goes entirely to map. */
-    const int ui_shift = s_ws_extra;
-    for (int y = 0; y < kVideoHeight; y++) {
-      uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-      const uint32_t *hud = (const uint32_t *)(s_hud_pixels + (size_t)y * s_video_pitch);
-      for (int x = 0; x < s_video_w; x++) {
-        int sxp = x + ui_shift;
-        if (sxp >= s_video_w) break;
-        uint32_t p = hud[sxp];
-        /* 24-bit compare. This keying was
-         * written to make a fade match by treating backdrop pixels as
-         * transparent, but s_backdrop_argb carries 0xFF alpha while the
-         * rendered pixels carry 0, so `p != s_backdrop_argb` was ALWAYS
-         * true and only the black test ever did anything. */
-        if ((p & 0x00FFFFFFu) != (s_backdrop_argb & 0x00FFFFFFu) &&
-            (p & 0x00FFFFFFu) != 0) dst[x] = p;
-      }
-    }
+  if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) {
+    memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
+    return;
+  }
+  for (int y = 0; y + 1 < kVideoHeight; y++)
+    memcpy(s_video_pixels + (size_t)y * s_video_pitch,
+           s_video_pixels + (size_t)(y + 1) * s_video_pitch,
+           (size_t)s_video_w * 4);
+
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    const uint32_t *gst =
+        (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
+    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);
   }
 }
 
