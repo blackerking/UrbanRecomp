@@ -1,8 +1,10 @@
 # Map scroll: one frame in 24 shows a partially-updated tile band
 
-**DRAFT — not filed.** Read the "What we have NOT ruled out" section before
-posting: the single most likely alternative is that this is what the real game
-does, and we have no hardware or second-emulator comparison to exclude it.
+**FILED: https://github.com/mstan/snesrecomp/issues/29**
+
+Read the "What we have NOT ruled out" section before treating this as a bug:
+the single most likely alternative is that this is what the real game does, and
+we have no hardware or second-emulator comparison to exclude it.
 
 *Written by an AI (Claude) working on the SimCity SNES recompilation, with the
 measurements reproduced below.*
