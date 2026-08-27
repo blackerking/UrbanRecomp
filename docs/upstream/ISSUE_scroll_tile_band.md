@@ -9,6 +9,91 @@ we have no hardware or second-emulator comparison to exclude it.
 *Written by an AI (Claude) working on the SimCity SNES recompilation, with the
 measurements reproduced below.*
 
+## CORRECTION (2026-08-27): this issue is wrong and should be closed
+
+Both halves of the original report have been re-measured and neither survives.
+
+### The "one frame in 24" band was animated water
+
+The break frames were found by asking how well a frame matches its predecessor
+translated by the scroll delta. Water in SimCity animates, so it can never
+match a translated previous frame -- and the map in the repro state has a large
+lake along the right side, exactly where the "band" was reported.
+
+On the 75->76 break, of 3765 mismatching pixels **3067 (81.5%) are
+water-coloured, while water is only 8.5% of the frame** -- a tenfold
+enrichment. Rendering the mismatch mask makes it plainly the shoreline.
+
+The "76.9% correctly scrolled / 63.6% stale" table in the original report is
+therefore measuring the water animation, not a partially-updated tilemap. My
+error, and the reason the hypothesis table looked inconclusive rather than
+wrong.
+
+### There IS a real seam, and it is the game's own design, not the runner's
+
+Re-measured properly on the city view scrolling right:
+
+| region | mismatch against a correctly-scrolled previous frame |
+|---|---|
+| middle of the screen | **0.0%** |
+| leftmost 8 px | **64-88%**, once per tile column of scroll |
+
+Isolating layers puts it entirely on BG2 (87.8%); BG1 measures 4.6%.
+
+The mechanism is geometric. BG2's tilemap is 32x32 (`wide=0`, confirmed from
+`PPU_bgTilemapWider`), so it is 256 px wide against a 256 px screen, and it
+serves as a circular buffer over a city far larger than itself. Scrolling must
+rewrite the column about to appear at the leading edge -- and because 32
+columns wrap onto themselves, that column is *still on screen at the trailing
+edge*. One column has to hold two different contents in the same frame. It
+cannot, so the incoming content flashes in at the far side.
+
+Traced per frame, the game rewrites 2 columns (~56 tilemap entries) every 8 px
+of scroll, exactly when the scroll uncovers a new column. Nothing arrives late:
+
+```
+f=31 hs=52 d=+4 leftcol= 6 rightcol= 6 wrote: 6 7
+f=32 hs=56 d=+4 leftcol= 7 rightcol= 6 wrote:
+```
+
+Note `leftcol == rightcol` -- the same map column showing at both edges.
+
+Vertically there is no such problem: 32 rows is 256 px against 224 visible
+lines, leaving 4 spare rows to stage into, and the trailing edge measures
+1.0% or less in both directions.
+
+### Ruled out as runner faults
+
+| check | result |
+|---|---|
+| tilemap changed during active display (all BG layers, sampled every 8 lines) | **never** |
+| BG2 windowed? | no -- `windowsel` nibble for BG2 is `0` |
+| BG1 windowed? | yes, W2 inverted, masking x 248..255 |
+
+The game writes `$2123 = $0c`: window BG1, leave BG2 alone. So the developers
+were aware of the wrap and masked BG1's copy of it -- BG1 is offset 8 px from
+BG2 (`hScroll[0] = hScroll[1] + 8`), which puts the two layers' wrap columns at
+opposite screen edges. BG2's lands on the left and is left unmasked.
+
+A plausible reason it shipped that way: on a CRT the leftmost columns sit in
+overscan and were never visible. That is a hypothesis, not a measurement --
+but either way the runner is reproducing what the game does, and there is no
+device-model bug here to fix.
+
+**Recommend closing.** The host works around it in the compositor, patching the
+trailing sliver from the previous frame, which takes the left edge from 85.4%
+to 0.0%.
+
+### Still standing from the original report
+
+The DMA observability note below is unaffected and still reproduces:
+`ppudma_record_dma()` has no callers, so `SNESRECOMP_DMA_LOG=1` produces no
+output. The colour-math note became #30.
+
+---
+
+*Original report follows, retained for the record.*
+
 ## Summary
 
 While the city map scrolls, roughly one frame in 24 renders a band along the

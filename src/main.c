@@ -773,6 +773,7 @@ static void hdma_do_line(HdmaChanState *c) {
 /* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
+static void ws_fix_scroll_seam(void);
 static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
@@ -1218,6 +1219,7 @@ static void handle_pos_stuff(void) {
       ws_hide_backdrop_furniture();
       ws_fill_flat_margins();
       ws_fill_margins();
+      ws_fix_scroll_seam(); /* before compose: it copies the guest columns */
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
       snes->inNmi = true;
@@ -3001,6 +3003,151 @@ static bool host_map_screen_live(void) {
 
 /* After the guest frame: replace the picture with our map, then put the
  * captured HUD and sprites back over it using their real alpha. */
+/* Repair the scroll seam.
+ *
+ * The map tilemap is 32 columns -- 256 px, exactly the screen width -- and
+ * serves as a circular buffer over a city far larger than it. Scrolling has to
+ * rewrite the column about to appear at the LEADING edge, and because 32
+ * columns wrap onto themselves that very column is still on screen at the
+ * TRAILING edge. The incoming content therefore flashes in at the far side,
+ * once per tile column of scroll: about fifteen times a second at the normal
+ * 2 px/frame, and it reads as content from the opposite edge.
+ *
+ * Measured on the city view scrolling right: the leftmost 8 px mismatch a
+ * correctly-scrolled previous frame by 64-88% while the middle of the screen
+ * mismatches by 0.0%. Isolating layers puts it entirely on BG2 (87.8%); BG1
+ * measures 4.6% because the game windows BG1 to x 0..247, masking its own copy
+ * of the same artifact. BG2 carries no window at all.
+ *
+ * No VRAM trick can fix it -- one column must serve both edges in the same
+ * frame with different content -- so the composed picture is patched instead.
+ * Between frames the map is a rigid translation by the scroll delta, and the
+ * previous frame held the correct content for that sliver, so prev[x + dx] is
+ * exactly it. Patched only on frames where the trailing column really was
+ * rewritten, which keeps a sprite sitting at the edge from smearing on every
+ * frame that merely scrolls. */
+static uint8_t *s_seam_prev;
+static size_t s_seam_prev_size;
+static uint16_t s_seam_map[0x400];
+static bool s_seam_have_prev;
+static int s_seam_hs_prev, s_seam_vs_prev;
+/* How many pixels of the rewritten column are still on screen at the
+ * trailing edge. The repair has to continue until that column has fully
+ * scrolled off, otherwise the picture simply snaps to the new content one
+ * frame later and the seam reappears displaced rather than removed. */
+static int s_seam_hold_x, s_seam_hold_y;
+
+static void ws_fix_scroll_seam(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("SC_SEAM_FIX");
+    enabled = (e && *e) ? (atoi(e) != 0) : 1;
+  }
+  if (!enabled || !s_video_pixels || !g_ppu) return;
+
+  const size_t need = (size_t)s_video_pitch * kVideoHeight;
+
+  /* Off the city view the history is meaningless -- drop it so returning to
+   * the map cannot patch from a menu's pixels. */
+  if (!host_map_screen_live()) { s_seam_have_prev = false; return; }
+
+  if (s_seam_prev_size != need) {
+    free(s_seam_prev);
+    s_seam_prev = (uint8_t *)malloc(need);
+    s_seam_prev_size = s_seam_prev ? need : 0;
+    s_seam_have_prev = false;
+  }
+  if (!s_seam_prev) return;
+
+  const int hs = g_ppu->hScroll[1] & 0x3ff;
+  const int vs = g_ppu->vScroll[1] & 0x3ff;
+
+  /* Which tilemap entries changed since the last frame. */
+  const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 1);
+  bool col_changed[32] = {false}, row_changed[32] = {false};
+  for (unsigned i = 0; i < 0x400u; i++) {
+    const uint16_t v = g_ppu->vram[(m + i) & 0x7fffu];
+    if (v != s_seam_map[i]) { col_changed[i & 31] = true; row_changed[i >> 5] = true; }
+    s_seam_map[i] = v;
+  }
+
+  if (s_seam_have_prev) {
+    /* Scroll registers are 10-bit and the map wraps at 256; keep the delta
+     * small and signed so a wrap does not read as a huge jump. */
+    int dx = ((hs - s_seam_hs_prev) & 0xff), dy = ((vs - s_seam_vs_prev) & 0xff);
+    if (dx > 128) dx -= 256;
+    if (dy > 128) dy -= 256;
+
+    const int gx0 = s_ws_extra;              /* guest's left edge, render coords */
+    const int gx1 = gx0 + kVideoWidth;
+
+    /* Horizontal: trailing edge is the side the content is leaving by. */
+    if (dx != 0 && dx > -8 && dx < 8) {
+      /* Check BOTH edge columns, not just the trailing one. The two coincide
+       * only when the scroll sits off a tile boundary; exactly at a boundary
+       * they differ by one, and testing the wrong one missed the rewrite --
+       * measured as a 4% residual on the right edge when scrolling left. */
+      const int left_col = (hs >> 3) & 31;
+      const int right_col = ((hs + kVideoWidth - 1) >> 3) & 31;
+      /* Sixteen pixels, not eight. The game rewrites TWO tilemap columns per
+       * update ("wrote: 6 7" in the per-frame trace), and both land inside the
+       * trailing sliver. An 8 px repair left the second column showing through:
+       * measured x0-7 at 0% but x8-15 still at 56%, which is why the seam was
+       * still plainly visible in play after the first attempt. */
+      if (col_changed[left_col] || col_changed[right_col]) s_seam_hold_x = 16;
+      if (s_seam_hold_x > 0) {
+        const int wdt = s_seam_hold_x;
+        const int x0 = dx > 0 ? gx0 : gx1 - wdt;
+        const int x1 = dx > 0 ? gx0 + wdt : gx1;
+        s_seam_hold_x -= dx > 0 ? dx : -dx;
+        if (s_seam_hold_x < 0) s_seam_hold_x = 0;
+        for (int y = 0; y < kVideoHeight; y++) {
+          uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          const uint32_t *src =
+              (const uint32_t *)(s_seam_prev + (size_t)y * s_video_pitch);
+          for (int x = x0; x < x1; x++) {
+            const int sx = x + dx;
+            if (sx >= gx0 && sx < gx1) dst[x] = src[sx];
+          }
+        }
+      }
+    } else {
+      s_seam_hold_x = 0;
+    }
+
+    /* Vertical: 32 rows is 256 px against 224 visible, so there is a little
+     * slack here that the horizontal axis does not have -- but the game still
+     * rewrites a visible row often enough to show the same seam. */
+    if (dy != 0 && dy > -8 && dy < 8) {
+      const int trailing_row = dy > 0 ? ((vs >> 3) & 31)
+                                      : (((vs + kVideoHeight - 1) >> 3) & 31);
+      if (row_changed[trailing_row]) s_seam_hold_y = 8;
+      if (s_seam_hold_y > 0) {
+        const int hgt = s_seam_hold_y;
+        const int y0 = dy > 0 ? 0 : kVideoHeight - hgt;
+        const int y1 = dy > 0 ? hgt : kVideoHeight;
+        s_seam_hold_y -= dy > 0 ? dy : -dy;
+        if (s_seam_hold_y < 0) s_seam_hold_y = 0;
+        for (int y = y0; y < y1; y++) {
+          const int sy = y + dy;
+          if (sy < 0 || sy >= kVideoHeight) continue;
+          uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          const uint32_t *src =
+              (const uint32_t *)(s_seam_prev + (size_t)sy * s_video_pitch);
+          for (int x = gx0; x < gx1; x++) dst[x] = src[x];
+        }
+      }
+    } else {
+      s_seam_hold_y = 0;
+    }
+  }
+
+  memcpy(s_seam_prev, s_video_pixels, need);
+  s_seam_have_prev = true;
+  s_seam_hs_prev = hs;
+  s_seam_vs_prev = vs;
+}
+
 static void host_map_compose(void) {
   if (!s_host_map || !s_ov_bg3) return;
   /* Only on the main map screen. $01df is the screen-mode index: 3 is the
@@ -3078,6 +3225,52 @@ static void host_map_compose(void) {
    * at fine (0,0) at rest, yet the host render is still a pixel low. */
   const int fx = g_ppu->hScroll[1] & 7;
   const int fy = g_ppu->vScroll[1] & 7;
+
+  /* Keep the strip's MOVEMENT equal to the guest's, without disturbing where
+   * it sits.
+   *
+   * The coarse cell and the fine offset come from different places:
+   * ScMapView_GetScroll reads the game's scroll in city cells, fx/fy above are
+   * the PPU's BG2 register. Around a tile boundary the cell can lag the
+   * register by a frame, and the strip then snaps a whole tile the wrong way --
+   * measured over a 230-frame vertical pan as exactly one frame where the guest
+   * moved dy=+4 and the strip moved dy=-4. Reported from play as the extension
+   * jumping "one tile away" when panning with A.
+   *
+   * Forcing the cell to agree with the register outright is NOT the fix: the
+   * two carry a standing offset that is perfectly normal, and overriding it
+   * moved the terrain on five of ten save states at rest. So correct only the
+   * discrepancy in MOTION -- how far the strip would travel this frame versus
+   * how far the register actually travelled -- and carry it as whole cells.
+   * The adjustment cancels itself once the cell catches up, so at rest it is
+   * zero and the picture is untouched. */
+  { static int prev_sy, prev_sx, prev_fy, prev_fx, prev_v, prev_h_, have;
+    static int adj_x, adj_y;
+    const int vpix = g_ppu->vScroll[1] & 0xff, hpix = g_ppu->hScroll[1] & 0xff;
+    if (have) {
+      int dv = (vpix - prev_v) & 0xff, dh = (hpix - prev_h_) & 0xff;
+      if (dv > 128) dv -= 256;
+      if (dh > 128) dh -= 256;
+      /* Only track ordinary scrolling; a jump means a screen change, not a pan. */
+      if (dv > -32 && dv < 32 && dh > -32 && dh < 32) {
+        const int moved_y = (sy - prev_sy) * 8 + (fy - prev_fy);
+        const int moved_x = (sx - prev_sx) * 8 + (fx - prev_fx);
+        if ((dv - moved_y) % 8 == 0) adj_y += (dv - moved_y) / 8;
+        if ((dh - moved_x) % 8 == 0) adj_x += (dh - moved_x) / 8;
+        /* Bound it. The fault is a one-frame, one-cell lag, so a correction
+         * beyond a single cell is not that fault -- it is the two sources
+         * tracking differently, and letting it accumulate walked the terrain
+         * right off its anchor (85662 pixels adrift on one save state). */
+        if (adj_y > 1) adj_y = 1; else if (adj_y < -1) adj_y = -1;
+        if (adj_x > 1) adj_x = 1; else if (adj_x < -1) adj_x = -1;
+      } else {
+        adj_x = adj_y = 0;
+      }
+    }
+    prev_sy = sy; prev_sx = sx; prev_fy = fy; prev_fx = fx;
+    prev_v = vpix; prev_h_ = hpix; have = 1;
+    sx += adj_x;
+    sy += adj_y; }
 
   /* Dim the extension the same way the guest dims the city behind an overlay.
    *
