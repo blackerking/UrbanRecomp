@@ -987,7 +987,25 @@ static void handle_pos_stuff(void) {
        * BG1 is genuinely 64 columns, so widening it unclamped is correct. */
       if (g_ppu && s_ws_extra > 0) {
         const bool mode0 = PPU_mode(g_ppu) == 0;
-        s_render_flags = (!mode0 && !s_force_legacy) ? 1u : 0u;
+        /* The new renderer gets HALVED colour math wrong. Use the legacy one
+         * whenever the guest is dimming a scene behind an overlay.
+         *
+         * Measured on the advice popup, comparing the authentic 256 columns
+         * against a plain 256-wide run of the same state: the new renderer is
+         * wrong on 8736 pixels, the legacy one on 0. It loses whole rectangles
+         * of the map -- the black bands above and below the panel, which a
+         * 256-wide render shows as ordinary city.
+         *
+         * It is not a geometry effect: 8, 32 and 96 pixels of extra space
+         * corrupt exactly the same 8736 pixels, so any widescreen at all
+         * switches the path and the width is irrelevant.
+         *
+         * Nothing is lost by dropping to legacy here. The new renderer is
+         * chosen for its widescreen layer policies, and a screen dimming
+         * behind an overlay has every background clamped anyway, so there are
+         * no policies left to apply. */
+        const bool dim_overlay = PPU_halfColor(g_ppu) && PPU_addSubscreen(g_ppu);
+        s_render_flags = (!mode0 && !s_force_legacy && !dim_overlay) ? 1u : 0u;
         /* Lift the per-scanline sprite limit while widened.
          *
          * The title's light row is four 64 px sprites, which is already 32
@@ -2218,6 +2236,27 @@ static void ws_fill_flat_margins(void) {
   if (!ws_display_settled()) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
   const int right0 = s_video_w - s_ws_extra;
+  /* All rows or none: this is a property of the SCREEN, not of a row.
+   *
+   * Judging each row on its own looked reasonable and is wrong. The city view
+   * is not a flat-background screen, but a handful of its rows happen to end
+   * in a run of one colour -- a band of water or sand meeting the edge -- and
+   * each of those got that colour smeared out to the last widescreen pixel.
+   * Measured: 7 rows of 224 on the city view against 224 of 224 on the
+   * evaluation page, so the two separate by a mile and a simple majority
+   * settles it. */
+  int flat_rows = 0;
+  for (int y = 0; y < kVideoHeight; y++) {
+    const uint32_t *row = (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    bool both = true;
+    for (int side = 0; side < 2 && both; side++) {
+      const uint32_t edge = side ? row[right0 - 1] : row[s_ws_extra];
+      for (int k = 1; k < SC_WS_FLAT_RUN && both; k++)
+        if (row[side ? right0 - 1 - k : s_ws_extra + k] != edge) both = false;
+    }
+    if (both) flat_rows++;
+  }
+  if (flat_rows * 4 < kVideoHeight * 3) return;   /* not a flat-background screen */
   for (int y = 0; y < kVideoHeight; y++) {
     uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
     for (int side = 0; side < 2; side++) {

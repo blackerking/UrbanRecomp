@@ -147,8 +147,26 @@ Same state rendered at 256 and at 448, comparing the authentic 256 columns:
 
 The advice is the screen whose picture is backdrop plus a HALVED subscreen. It
 loses whole rectangles of map -- the black bands above and below the panel. A
-256-wide render of the identical state shows city there. This is a renderer
-fault in the widescreen path, not a compositing one, and it is unfixed.
+256-wide render of the identical state shows city there.
+
+**Found and fixed after this was first written.** It is the NEW renderer
+(`kPpuRenderFlags_NewRenderer`), which mishandles halved colour math. On the
+advice popup at full widescreen the new renderer is wrong on 8736 pixels and
+the legacy one on 0. It is not a geometry effect either: 8, 32 and 96 pixels of
+extra space corrupt exactly the same 8736 pixels, so enabling any widescreen at
+all switches the path and the width is irrelevant.
+
+The per-frame choice now drops to the legacy renderer whenever
+`PPU_halfColor && PPU_addSubscreen` -- the "dim a scene behind an overlay"
+idiom. Nothing is lost: the new renderer is chosen for its widescreen layer
+policies, and such a screen has every background clamped anyway. Every screen
+measured is now 0 wrong except View Mode's 1049, which has no colour math at
+all (`cgadsub=$00`) and so is a different cost of the new renderer; forcing
+legacy there drops it to 13 but risks the layer policies its wood margins
+depend on, so it is left alone.
+
+This is worth reporting upstream: the new renderer's halved-colour-math path
+is wrong whenever extra space is non-zero.
 
 ### Colour math per screen
 
