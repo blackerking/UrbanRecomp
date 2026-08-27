@@ -797,6 +797,10 @@ static void sylt_write_brief_tilemap(void);
 static bool     s_host_map = true;
 static uint8_t *s_hud_pixels;
 static uint8_t *s_guest_pixels;  /* the guest's finished frame, kept verbatim */
+/* Host map render target, deliberately larger than the frame: the sub-cell
+ * shift below reads up to 8 px right of and below the visible window. */
+static uint8_t *s_hostmap_px;
+static int      s_hostmap_pitch;
 /* The host loop's own frame index, which is what SC_DUMP_AT counts -- not
  * s_frames, which after --load-state resumes at the saved state's number. */
 static unsigned long long s_loop_frame;
@@ -2931,6 +2935,8 @@ static void host_map_init(void) {
   s_ov_pitch = s_video_pitch;
   s_hud_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
   s_guest_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
+  s_hostmap_pitch = (s_video_w + 16) * 4;
+  s_hostmap_px = (uint8_t *)calloc((size_t)s_hostmap_pitch, kVideoHeight + 16);
   s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
@@ -3050,23 +3056,57 @@ static void host_map_compose(void) {
   memcpy(s_guest_pixels, s_video_pixels, (size_t)s_video_pitch * kVideoHeight);
 
   if (ScMapView_GetCellPx() != 8) ScMapView_SetCellPx(8);
+  if (!s_hostmap_px) return;
   int sx = 0, sy = 0;
   ScMapView_GetScroll(&sx, &sy);
-  const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
-  if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) {
+
+  /* SUB-CELL alignment. ScMapView_GetScroll reports whole map cells, but the
+   * guest scrolls its map 2 px at a time, so a cell-aligned render only agrees
+   * with it every fourth frame and drifts up to 7 px in between -- reported
+   * from play as the extension running slightly fast and visibly coming apart
+   * for a moment. Measured, the guest's BG2 register follows
+   * `cell * 8 + fine (mod 256)` exactly, so the fine part is the correction.
+   *
+   * The constant row below is separate and not this: every state measured sits
+   * at fine (0,0) at rest, yet the host render is still a pixel low. */
+  const int fx = g_ppu->hScroll[1] & 7;
+  const int fy = g_ppu->vScroll[1] & 7;
+
+  /* Dim the extension the same way the guest dims the city behind an overlay.
+   *
+   * The advisor pages compose backdrop plus subscreen, HALVED (cgadsub $60,
+   * cgwsel $02). With the backdrop black that is arithmetically `city / 2`, so
+   * the extension is halved too -- derived from the registers, not fitted to
+   * the picture. Two earlier attempts to measure a ratio off the frame both
+   * made things worse: a mean left the terrain 36% too dark, a median tinted
+   * other pages.
+   *
+   * Only this exact shape. Subtractive math against the subscreen cannot be
+   * reproduced here, because the value being subtracted is the subscreen and
+   * this code does not have it. */
+  const bool halve = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
+                     PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
+                     (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  const int cols = (s_video_w + 8 + 7) / 8, rows = (kVideoHeight + 16 + 7) / 8;
+  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
     return;
   }
-  for (int y = 0; y + 1 < kVideoHeight; y++)
-    memcpy(s_video_pixels + (size_t)y * s_video_pitch,
-           s_video_pixels + (size_t)(y + 1) * s_video_pitch,
-           (size_t)s_video_w * 4);
 
   for (int y = 0; y < kVideoHeight; y++) {
     uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
     const uint32_t *gst =
         (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
-    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);
+    const uint32_t *src =
+        (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
+    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
+    if (halve)
+      for (int x = kVideoWidth; x < s_video_w; x++) {
+        const uint32_t c = src[x + fx];
+        dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
+      }
+    else
+      for (int x = kVideoWidth; x < s_video_w; x++) dst[x] = src[x + fx];
   }
 }
 
