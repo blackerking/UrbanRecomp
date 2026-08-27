@@ -173,6 +173,7 @@ endif()
 if(SIMCITY_GEN_SOURCES)
     add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
         src/main.c
+        src/simcity_mapview.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c

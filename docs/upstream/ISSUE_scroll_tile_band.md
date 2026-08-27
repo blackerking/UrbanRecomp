@@ -1,0 +1,128 @@
+# Map scroll: one frame in 24 shows a partially-updated tile band
+
+**DRAFT — not filed.** Read the "What we have NOT ruled out" section before
+posting: the single most likely alternative is that this is what the real game
+does, and we have no hardware or second-emulator comparison to exclude it.
+
+*Written by an AI (Claude) working on the SimCity SNES recompilation, with the
+measurements reproduced below.*
+
+## Summary
+
+While the city map scrolls, roughly one frame in 24 renders a band along the
+leading edge that is **partially** updated: most tiles are correct for the new
+scroll position, about a quarter are not. It reads as a vertical seam that
+travels with the scroll, and at a glance looks like a tilemap wrap — content
+from the opposite edge appearing.
+
+It is not a wrap. Measured against the previous frame, the bad band matches
+"correctly scrolled" better than any other hypothesis, just not well enough:
+
+| hypothesis for the bad band | match |
+|---|---|
+| correctly scrolled (+2 px) | 76.9% |
+| stale, not scrolled at all | 63.6% |
+| wrapped from 256 px away | 0.0% |
+
+The failing columns cluster at 8-pixel intervals, which is what you would
+expect if the frame is drawn while the newly-exposed tile column is still
+being written.
+
+## Reproduction
+
+SimCity (USA), city view, scrolling right. The game scrolls the map 2 px per
+frame.
+
+```
+SC_NINTH=1 ./SimCitySNESRecomp --load-state <city.state> \
+    --input 5:300:80 --qualify 130
+```
+
+`0x80` is this host's Right bit (`kPad_Up 0x10, kPad_Down 0x20, kPad_Left 0x40,
+kPad_Right 0x80`).
+
+**The save state cannot be attached** — it carries ROM-derived WRAM/VRAM, and
+this project is deliberately ROM-free. To reproduce from scratch: start any
+city, let the view scroll sideways continuously, and dump consecutive frames.
+
+## Measurement
+
+Between consecutive frames the picture should translate rigidly by the scroll
+delta. Taking the best whole-pixel shift and the fraction of sampled pixels it
+explains:
+
+```
+frames 60..104, scrolling right, best shift is -2 px throughout
+
+  74 -> 75    99.9%      typical
+  75 -> 76    94.1%      <-- break
+  99 -> 100   83.4%      <-- break
+```
+
+Two breaks, 24 frames apart, everything else 99.5–99.9%.
+
+On the 75→76 break, every column that fails the translation lies in x 198..248
+— the right edge, where new content enters when scrolling right. The left band
+(x 20..190) still matches at 99.3%.
+
+## What it is NOT
+
+Each of these was varied independently and produced a **byte-identical** frame:
+
+| variation | result |
+|---|---|
+| recompiled tier vs AOT tier | 0 differing pixels; both break at 94.1% |
+| legacy renderer vs new renderer | both break at 94.1% |
+| widescreen 96 px vs authentic 256 | 0 differing pixels in the authentic columns |
+
+So it is not code generation, not the renderer choice, and not the widescreen
+path. That leaves the shared device layer (`ppu.c` / `dma.c` / `snes.c`) or the
+game itself.
+
+## What we have NOT ruled out
+
+**That this is authentic behaviour.** We have not compared against real
+hardware or another emulator. SimCity's map layer is a 32×32 tilemap — 256×256
+px — against a 256×224 viewport, so vertically there are 32 spare rows to stage
+into but **horizontally there are none**: every column is on screen, and a
+sideways scroll must rewrite columns while they are displayed. A game doing
+that has to land the write in vblank, and it is entirely possible the real
+thing does not always manage it either.
+
+That check should come first. If hardware is clean and this is not, it is a
+device-model timing bug; if hardware shows the same band, this issue should be
+closed.
+
+**We could not run the reference driver on it.** `smw_cosim_ref` requires a
+`SuperMarioWorldRecomp` checkout to configure, and boots from reset with no
+save-state support, so it cannot be pointed at a scrolling city. The tier
+comparison above is the nearest available substitute: two independent CPU
+execution paths over the same devices agree exactly.
+
+## Two incidental findings
+
+Both encountered while investigating, neither related to the above:
+
+- **The DMA observability ring is not wired in.** `ppu_dma_trace.h` states it
+  is "compiled into EVERY build" and records every A→B DMA, but
+  `ppudma_record_dma()` has no callers in `dma.c` or `common_rtl.c` in this
+  checkout, so `SNESRECOMP_DMA_LOG=1` and `SNESRECOMP_PPU_HEARTBEAT` produce no
+  output. Either the wiring was lost or the header overstates the coverage.
+
+- **The new renderer mishandles halved colour math when extra space is
+  non-zero.** On a screen composing backdrop plus a halved subscreen
+  (`cgadsub=$60`, `cgwsel=$02`) it loses whole rectangles of the background:
+  8736 of 57344 authentic pixels wrong against a 256-wide render, where the
+  legacy renderer is wrong on 0. Not a geometry effect — 8, 32 and 96 px of
+  extra space corrupt exactly the same 8736 pixels, so any non-zero extra
+  space switches the path. Filed separately if wanted; this host currently
+  works around it by selecting the legacy renderer when
+  `PPU_halfColor && PPU_addSubscreen`.
+
+## Suggested next diagnostic
+
+With the repro above, log every VRAM write landing in the BG2 tilemap range
+together with the `vPos` at which it occurs, for the frames either side of a
+break. If those writes land during active display rather than vblank, the
+question becomes why the game's update is arriving late; if they land in
+vblank, the render is sampling the tilemap at the wrong point.
