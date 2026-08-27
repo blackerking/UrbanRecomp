@@ -27,9 +27,16 @@ own picture.
 back over the host map.
 
 That flag does what it says: those layers are taken OUT of the game's own
-render. The export then returned nothing -- the diagnostic beside it had been
-printing `bg3px=0 objpx=0` since it was written, with a comment calling it a
-known issue. So the HUD was deleted from the frame and never given back.
+render, and the HUD was deleted from the frame.
+
+**Correction, measured later:** the export does not fail wholesale. BG3 comes
+back exactly right -- the surface reports 15378 pixels on a city view where a
+BG3-only render is 15378 pixels. It is OBJ alone that returns 0, against 6262
+rendered. The `bg3px=0 objpx=0` line that this was originally based on is the
+FIRST compose, which happens before the capture is armed; from the next frame
+on it reads `bg3px=15378 objpx=0`. So the HUD's panel was recoverable all
+along and only the sprites were lost. Filed upstream, see
+ISSUE_overlay_obj_export.md (upstream #31).
 
 Measured: turning `SC_HOST_MAP` on changed the GUEST's own frame. The status
 bar's dark background at authentic (60,8) went from `(49,16,0)` to the map's
