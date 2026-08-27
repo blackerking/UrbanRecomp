@@ -2173,11 +2173,18 @@ static bool ws_display_settled(void) {
   ws_trace_math();
   if (!g_ppu) return false;
   const bool ok = !PPU_forcedBlank(g_ppu) && PPU_brightness(g_ppu) == 0x0f;
-  { static int last = -1;
+  /* Log the EDGES of a fade, not every step. A fade walks brightness through
+   * sixteen values, so a step-by-step trace emitted sixteen lines per
+   * transition and buried everything else -- a play session came back as 16KB
+   * of nothing but this, with the build stamp scrolled out of the capture. */
+  { static int last = -3;
     const int now = PPU_forcedBlank(g_ppu) ? -2 : PPU_brightness(g_ppu);
-    if (getenv("SC_WS_DIAG") && now != last) { last = now;
-      fprintf(stderr, "[fade] f=%llu $14=%02x brightness=%d\n",
-              (unsigned long long)s_frames, g_ram[0x14], now); } }
+    const int settled_now = now == 0x0f, was = last == 0x0f;
+    if (getenv("SC_WS_DIAG") && last != -3 && settled_now != was)
+      fprintf(stderr, "[fade] f=%llu $14=%02x %s\n",
+              (unsigned long long)s_frames, g_ram[0x14],
+              settled_now ? "settled" : "fading");
+    last = now; }
   return ok;
 }
 
