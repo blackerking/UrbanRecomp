@@ -131,9 +131,10 @@ upstream's defect, not the merge's -- but the pre-merge pointer did not carry
 that gitlink, so this is a regression in clone-ability that arrived with it.
 
 The outer submodule still checks out and the build is unaffected; only the
-recursive clone errors. Not filed yet. If it is fixed by supplying the URL, do
-not guess it -- `lib/recomp-net` points at TechnicallyComputers, but that is an
-inference, not knowledge.
+recursive clone errors. Filed as
+[#41](https://github.com/mstan/snesrecomp/issues/41). If it is fixed by
+supplying the URL, do not guess it -- `lib/recomp-net` points at
+TechnicallyComputers, but that is an inference, not knowledge.
 
 ### 4. Filed upstream, still open
 
@@ -144,6 +145,10 @@ inference, not knowledge.
   it. No workaround; sprites cannot be borrowed, only deleted.
 - **#39** -- AOT and interpreter disagree on the abs,X/abs,Y read page-cross
   penalty. Tier accuracy only; results are identical.
+- **#40** -- `__attribute__((constructor))` in `interp_bridge.c` does not
+  compile on MSVC. Fixed on our fork; the fix is offered in the issue.
+- **#41** -- `lib/retcomm-rbengine` has no `url` in `.gitmodules`, so recursive
+  clone fails.
 - #29 was filed by me and is **closed**: its headline measurement was the
   animated water, not a rendering fault. See the correction in
   `docs/upstream/ISSUE_scroll_tile_band.md`.
