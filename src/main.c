@@ -622,6 +622,11 @@ static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
  * or the strict decode wraps it negative and hides it -- which is exactly
  * what happened to the extra lights on the right. */
 static uint8_t s_oam_right_hints[16];
+/* Same idea for the LEFT margin. A sprite the authentic 256-wide viewport
+ * clips entirely is hardware-hidden there, so the lights this host places at
+ * negative X never appeared -- 0 px in the left margin against 1293 in the
+ * right, on every title frame. Marking the slots opts them back in. */
+static uint8_t s_oam_left_hints[16];
 static bool s_bg3_widened;            /* set by widen_wood_bg() for this frame only */
 static uint8_t s_ws_clamp_now = 0x0f;  /* the mask actually pushed this frame */
 static bool s_wood_widened;           /* BG3 carries real wood into the margins */
@@ -1108,6 +1113,7 @@ static void handle_pos_stuff(void) {
         PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
+      memset(s_oam_left_hints, 0, sizeof s_oam_left_hints);
       widen_wood_bg();
       /* AFTER widen_wood_bg(), which clears the flag for the frame. */
       if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
@@ -1199,8 +1205,10 @@ static void handle_pos_stuff(void) {
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
+          PpuWsSetOamLeftHints(g_ppu, s_oam_left_hints);
         } else {
           PpuWsSetOamRightHints(g_ppu, NULL);
+          PpuWsSetOamLeftHints(g_ppu, NULL);
         }
       }
       /* SC_PPU_LAYOUT=1: one line per screen, printed when $14 changes.
@@ -2543,34 +2551,61 @@ static void widen_title_lights(void) {
   }
   if (best_n < 3) return;              /* not a row; leave it alone */
 
-  /* Pitch is the smallest positive gap between members. */
+  /* Pitch is the smallest positive gap between members, and lo/hi are the
+   * row's extent -- measured ONLY over members the authentic viewport actually
+   * shows.
+   *
+   * A member parked off-screen counts towards best_n but must not set the
+   * extent. One such sprite sat at x = -255, which made lo = -255, so the
+   * leftward loop below started at lo - pitch = -319 and its first condition
+   * (x >= -extra - pitch) was already false: it placed nothing at all, ever.
+   * Measured as 0 px of sprite in the left margin against 1293 in the right,
+   * on every title frame, and reported from play as the lights being missing
+   * on the left until the title starts moving -- at which point the game's own
+   * sprites move into the margin and cover it up. */
   int lo = 0x7fff, hi = -0x7fff, pitch = 0x7fff;
   for (int i = 0; i < SC_LIGHTS_FIRST_SPARE; i++) {
     if ((g_ppu->oam[i * 2] >> 8) != best_y) continue;
     if ((g_ppu->oam[i * 2 + 1] & 0xff) != best_tile) continue;
     if ((g_ppu->oam[i * 2 + 1] >> 8) != best_attr) continue;
     const int x = oam_get_x(i);
+    if (x <= -16 || x >= 256) continue;   /* parked, not part of the row */
     if (x < lo) lo = x;
     if (x > hi) hi = x;
     for (int j = 0; j < SC_LIGHTS_FIRST_SPARE; j++) {
       if ((g_ppu->oam[j * 2] >> 8) != best_y) continue;
       if ((g_ppu->oam[j * 2 + 1] & 0xff) != best_tile) continue;
-      const int d = oam_get_x(j) - x;
+      const int xj = oam_get_x(j);
+      if (xj <= -16 || xj >= 256) continue;
+      const int d = xj - x;
       if (d > 0 && d < pitch) pitch = d;
     }
   }
+  if (lo > hi) return;                    /* nothing on screen to extend */
   if (pitch <= 0 || pitch > 128) return;
 
   int slot = 127;
+  int placed_l = 0, placed_r = 0;
   for (int x = lo - pitch; x >= -s_ws_extra - pitch && slot >= SC_LIGHTS_FIRST_SPARE; x -= pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
+    /* Below 0 it is hardware-hidden unless this host claims it. */
+    if (x < 0) s_oam_left_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    placed_l++;
     slot--;
   }
   for (int x = hi + pitch; x <= 256 + s_ws_extra && slot >= SC_LIGHTS_FIRST_SPARE; x += pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
     /* Past 256 it lands in the ambiguous band, so claim it explicitly. */
     if (x >= 256) s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    placed_r++;
     slot--;
+  }
+  if (getenv("SC_LIGHTS_DIAG")) {
+    static int nn;
+    if (nn++ % 60 == 0)
+      fprintf(stderr,
+              "[lights] n=%d y=%d lo=%d hi=%d pitch=%d placed L=%d R=%d slot=%d\n",
+              best_n, best_y, lo, hi, pitch, placed_l, placed_r, slot);
   }
 }
 

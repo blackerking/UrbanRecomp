@@ -226,6 +226,34 @@ nothing -- and these defects only show while the map is moving, so they cannot
 be caught in a screenshot. Every diagnosis here that needed the user's own city
 depended on it.
 
+## Title lights: fixed 2026-08-27
+
+Reported from play: on the title, the widescreen light row was missing on the
+LEFT for the first frames, appearing only once the title started to move.
+
+Measured with `SC_LAYER_MASK=0x10` (sprites only): **0 px in the left margin
+against 1293 in the right**, on every title frame. It never worked; what shows
+once the title moves is the game's own sprites entering the margin.
+
+`widen_title_lights()` measured the row's extent over every OAM member sharing
+the row's Y/tile/attribute -- including one parked off-screen at **x = -255**.
+That made `lo = -255`, so the leftward loop started at `lo - pitch = -319` and
+its first condition (`x >= -extra - pitch`) was already false. It placed
+nothing, ever: `placed L=0 R=2`.
+
+The extent is now measured only over members the authentic viewport shows
+(`-16 < x < 256`), which gives `lo = 1` and `placed L=2 R=2`. Left margin
+renders 1296 px against the right's 1293.
+
+The left OAM hints (`PpuWsSetOamLeftHints`, from the upstream merge) were wired
+up at the same time, mirroring the right. They turned out NOT to be the cause --
+strict versus permissive decode is 0 differing pixels on four save states -- but
+they are kept: our own placed slots are now claimed explicitly on both sides
+rather than relying on the permissive default.
+
+`SC_LIGHTS_DIAG=1` prints the row the extender found: member count, y, lo, hi,
+pitch, and how many sprites it placed each side.
+
 ## Also open, pre-existing
 
 The host strip moves a different distance from the guest on ~25 of 106 frames
