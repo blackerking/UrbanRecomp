@@ -410,18 +410,37 @@ REP #$30 / LDA $0421 / ASL A / TAX / LDA $d193,X / STA $7e2000 / RTS
   for WRAM via `cpu_wram_offset()` and charges nothing; only hardware registers
   reach `cpu_pace_cycles()`. The stack is WRAM.
 
-### Where to look next
+### FOUND: the abs,X read page-cross penalty
 
-The conditional `+= 8` charges that DO exist in generated code -- e.g.
-`if (cpu->D & 0xFF) { cpu->cycles += 1; cpu->master_cycles += 8; }` for the
-direct-page penalty, and branch-taken penalties. Both are entry-state
-dependent, which matches the trial-dependence. D23A uses no direct-page
-addressing and does not branch, so if one of those is firing in its block, that
-is the bug. Dump `cpu->D` and the taken/not-taken path per trial and correlate
-against the disagreeing trials.
+The `M0X0` body for `00:D23A` carries exactly one conditional charge:
 
-Note this is tier accuracy, not correctness, and nothing in the rendering work
-depends on it.
+```c
+if ((0xD193 & 0xFF00) != ((0xD193 + cpu->X) & 0xFF00)) {
+    cpu->cycles += 1; cpu->master_cycles += 8;
+}  /* abs,X read page-cross */
+```
+
+Emitted by `recompiler/v2/emit_function.py` `_runtime_charges()` under
+`'xcross'`. The interpreter charges nothing here -- `interp816_adrIdy()` gates
+the penalty on the opcode WRITING, and `LDA abs,X` is a read.
+
+The count of `abs,X` reads per body predicts the delta exactly: `00:D23A` has
+one and is +8; `00:8924` (`LDA $896a,X`, `LDA $896c,X`) and `00:8982`
+(`LDA $89c8,X`, `LDA $89ca,X`) have two each and are +16. Trial-dependence
+follows from the randomised `X` deciding whether the page is crossed.
+
+The emitted test ignores the index width even though the recompiler emits a
+separate variant per M/X and so knows it statically. All 13 disagreements are
+on `X0` bodies, where a 16-bit index means there is no low-byte speculation to
+correct and so no penalty to charge.
+
+**Not fixed here, on purpose.** Three plausible rules are in play -- never for
+reads (interpreter), on page-cross (AOT), or always at `x=0` (bsnes, which the
+docstring says the model was measured against). Picking one is the timing
+model's owner's call. Written up in
+`docs/upstream/ISSUE_aot_abs_indexed_pagecross.md`, not posted.
+
+Tier accuracy, not correctness; nothing in the rendering work depends on it.
 
 ## Upstream submodule: a merge, not a bump
 
