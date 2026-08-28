@@ -285,6 +285,34 @@ left-edge question above is ever answered.
 At rest the change is confined to columns 248-255, verified on six save states.
 `SC_PASSEPARTOUT=0` restores the guest's own right-edge column.
 
+## 7. HUD ghosting -- the repair was dragging the HUD along
+
+Reported from play once the map itself was clean: HUD elements drawn a frame
+late, ghosting at the top left and at the far right when panning up. The map
+was explicitly fine.
+
+Two things I had added were responsible, and both were low value:
+
+- **The vertical repair.** The horizontal one touches 16 columns of map; the
+  vertical one rewrote 16 rows across the WHOLE guest width, straight through
+  the status bar, translating whatever HUD sat in them. It also bought nothing:
+  the tilemap has 4 spare rows vertically, so the game rewrites a row before it
+  is exposed -- 113 frames of downward scrolling measured median 0.0%, worst
+  12.8%, against 24-28% spikes on the horizontal axis where there is no slack.
+  Now off by default; `SC_SEAM_FIX_V=1` restores it.
+- **The left and top leading covers**, shipped unverified with a warning that
+  they paint over the toolbar and status bar. They do. Off by default;
+  `SC_SEAM_LEAD_LT=1` restores them.
+
+After: left edge median 0.0% (peak 0.0%), right 0.0% (peak 3.7%) across normal,
+fast and diagonal panning -- the map quality is unchanged.
+
+**The lesson, again:** anything that translates COMPOSED pixels moves the
+screen-fixed layers with the map. That is the same root cause as the cloned
+cursor. The horizontal repair still has it, over 16 columns of map where the
+HUD rarely is, which is why it is tolerable there and was not on the full-width
+vertical band.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.

@@ -3268,6 +3268,24 @@ static void ws_fix_scroll_seam(void) {
     /* Vertical: 32 rows is 256 px against 224 visible, so there is a little
      * slack here that the horizontal axis does not have -- but the game still
      * rewrites a visible row often enough to show the same seam. */
+    /* The vertical repair is OFF by default.
+     *
+     * Unlike the horizontal one, which touches 16 columns of map, this rewrites
+     * 16 rows across the WHOLE guest width -- straight through the status bar --
+     * so any HUD element in those rows is translated with the map and ghosts a
+     * frame behind. Reported from play as HUD elements drawn one frame too slow.
+     *
+     * And it buys nothing. The tilemap is 32 rows against 224 visible lines, so
+     * there are 4 spare rows to stage into and the game rewrites a row before it
+     * is exposed: measured over 113 frames of downward scrolling in a play
+     * capture, the leading edge is median 0.0%% and worst 12.8%%, against 24-28%%
+     * spikes on the horizontal axis where there is no slack at all.
+     *
+     * SC_SEAM_FIX_V=1 restores it. */
+    { static int von = -1;
+      if (von < 0) { const char *e = getenv("SC_SEAM_FIX_V");
+                     von = (e && *e) ? (atoi(e) != 0) : 0; }
+      if (!von) dy = 0, s_seam_hold_y = 0; }
     if (dy != 0) { s_seam_dir_y = dy > 0 ? 1 : -1; s_seam_idle_y = 0; }
     else if (++s_seam_idle_y > 12) s_seam_hold_y = 0;
     if (dy > -8 && dy < 8) {
@@ -3459,8 +3477,12 @@ static void host_map_compose(void) {
    * two or three frames they are active. SC_SEAM_LEAD_LT=0 turns them off
    * without disturbing the right edge. */
   static int lt_on = -1;
+  /* Off by default. These were never reproduced, and they cover the two
+   * edges where the HUD lives -- the toolbar and the status bar -- so when
+   * they do fire they paint host terrain over it. Reported from play as
+   * ghosting on HUD elements. SC_SEAM_LEAD_LT=1 re-enables them. */
   if (lt_on < 0) { const char *e = getenv("SC_SEAM_LEAD_LT");
-                   lt_on = (e && *e) ? (atoi(e) != 0) : 1; }
+                   lt_on = (e && *e) ? (atoi(e) != 0) : 0; }
   const int lead_l = (lt_on && s_seam_lead_left > 0 && s_seam_lead_left <= 8)
                          ? s_seam_lead_left : 0;
   const int lead_t = (lt_on && s_seam_lead_top > 0 && s_seam_lead_top <= 8)
