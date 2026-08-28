@@ -180,9 +180,42 @@ Before chasing the table address, resolve the contradiction recorded in
 empty map and a built-up one**, which cannot be true of two different cities.
 That reading is the more suspect of the two measurements.
 
+## 3. DONE -- the LEADING edge (right seam)
+
+Reported as: moving right WITHOUT S, a stripe of foreign content at the guest's
+right edge, which widescreen puts in the middle of the picture next to the host
+map join. Fast movement was fine.
+
+It is the mirror of the trailing-edge fault. A tile column becomes visible at
+the leading edge BEFORE the game rewrites it, so for two or three frames it
+still holds the wrapped content from 256 px away, then snaps correct. At
+2 px/frame the column is exposed for ~3 frames before the write; at 4 px/frame
+barely one, which is why only the slow pan showed it.
+
+Captured from play, right 16 px spiked every FOURTH frame -- one tile column --
+to 72-79% "correctly scrolled" against 84-86% on quiet frames, and it was
+neither stale (43%) nor wrapped-by-256 (27%): a one-off content flip.
+
+It cannot be repaired from history like the trailing edge, because the correct
+pixels do not exist yet anywhere -- the game has not written them. The host map
+has that terrain from WRAM, so the strip now starts a few pixels early to cover
+the sliver, and only while it is actually wrong (`s_seam_lead_dirty`). Zero
+cover on every frame the guest's own edge is correct.
+
+Note this only works on the RIGHT. The guest is left-aligned in the composed
+frame, so there is no host map to the left of it; scrolling left, the leading
+edge is the frame's left edge and has no cover available.
+
+**On hardware this sliver sat in CRT overscan and was never visible.** Widescreen
+is what exposed it.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.
+- `SC_DUMP_DIR=<dir> SC_DUMP_INTERVAL=1` now records frames from the INTERACTIVE
+  loop too. It used to work only under `--qualify`, so a capture session from
+  play silently recorded nothing -- which matters because these defects only
+  show while the map is moving and cannot be caught in a screenshot.
 - `SC_PASS_DIAG=1` renders each line twice into two scratch surfaces and reports
   how many pixels differ. Confirms whether an extra `ppu_runLine` pass is
   reproducible before anything is built on top of one.

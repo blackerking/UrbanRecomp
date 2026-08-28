@@ -3075,6 +3075,24 @@ static int s_seam_hold_x, s_seam_hold_y;
 /* Which way the map was last travelling, so a paused frame still knows
  * which edge is trailing, and how long it has been still. */
 static int s_seam_dir_x = 1, s_seam_dir_y = 1, s_seam_idle_x, s_seam_idle_y;
+/* The LEADING edge is a separate fault from the trailing one this file
+ * mostly deals with. Scrolling right, a tile column becomes visible at the
+ * right BEFORE the game rewrites it, so for two or three frames it still
+ * holds the wrapped content from 256 px away -- measured in a play capture
+ * as a spike on the right 16 px every fourth frame (one tile column at
+ * 2 px/frame), 72-79%% 'correctly scrolled' against 84-86%% on quiet frames.
+ *
+ * It cannot be repaired from history the way the trailing edge is: the
+ * correct pixels do not exist yet anywhere, because the game has not
+ * written them. The host map has that terrain from WRAM, so the strip is
+ * started a few pixels early to cover the sliver while it is wrong.
+ *
+ * On hardware this sliver sat in CRT overscan and was never seen; widescreen
+ * put the guest's right edge in the middle of the picture, next to the join,
+ * which is why it reads as a defect now. */
+static int s_seam_lead_col = -1;
+static bool s_seam_lead_dirty;
+static int s_seam_lead_cover;
 
 static void ws_fix_scroll_seam(void) {
   static int enabled = -1;
@@ -3088,7 +3106,12 @@ static void ws_fix_scroll_seam(void) {
 
   /* Off the city view the history is meaningless -- drop it so returning to
    * the map cannot patch from a menu's pixels. */
-  if (!host_map_screen_live()) { s_seam_have_prev = false; return; }
+  if (!host_map_screen_live()) {
+    s_seam_have_prev = false;
+    s_seam_lead_cover = 0;
+    s_seam_lead_col = -1;
+    return;
+  }
 
   if (s_seam_prev_size != need) {
     free(s_seam_prev);
@@ -3116,6 +3139,15 @@ static void ws_fix_scroll_seam(void) {
     int dx = ((hs - s_seam_hs_prev) & 0xff), dy = ((vs - s_seam_vs_prev) & 0xff);
     if (dx > 128) dx -= 256;
     if (dy > 128) dy -= 256;
+
+    /* Is the column now at the right edge still holding wrapped content?
+     * It goes suspect the moment it becomes the rightmost column, and is
+     * cleared the moment the game rewrites it. */
+    { const int rc = ((hs + kVideoWidth - 1) >> 3) & 31;
+      if (rc != s_seam_lead_col) { s_seam_lead_col = rc; s_seam_lead_dirty = true; }
+      if (col_changed[rc]) s_seam_lead_dirty = false;
+      s_seam_lead_cover = (dx > 0 && s_seam_lead_dirty)
+                              ? (((hs + kVideoWidth - 1) & 7) + 1) : 0; }
 
     const int gx0 = s_ws_extra;              /* guest's left edge, render coords */
     const int gx1 = gx0 + kVideoWidth;
@@ -3354,6 +3386,13 @@ static void host_map_compose(void) {
   const bool halve = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
                      PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
                      (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  /* Cover the guest's leading sliver while it is showing wrapped content.
+   * The host render already spans the guest's own columns, so this is just
+   * a matter of where the strip starts. Zero on every frame the guest's own
+   * edge is correct, which is most of them. */
+  const int lead = (s_seam_lead_cover > 0 && s_seam_lead_cover <= 8)
+                       ? s_seam_lead_cover : 0;
+  const int x_from = kVideoWidth - lead;
   const int cols = (s_video_w + 8 + 7) / 8, rows = (kVideoHeight + 16 + 7) / 8;
   if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
@@ -3368,12 +3407,12 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
     if (halve)
-      for (int x = kVideoWidth; x < s_video_w; x++) {
+      for (int x = x_from; x < s_video_w; x++) {
         const uint32_t c = src[x + fx];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = kVideoWidth; x < s_video_w; x++) dst[x] = src[x + fx];
+      for (int x = x_from; x < s_video_w; x++) dst[x] = src[x + fx];
   }
 }
 
@@ -6267,6 +6306,25 @@ int main(int argc, char **argv) {
        * drift after a one-off slow frame. */
       next_frame_deadline = now;
     }
+    /* SC_DUMP_DIR + SC_DUMP_INTERVAL, for the INTERACTIVE loop.
+     *
+     * The same pair has worked in run_qualification() for a long time, and I
+     * assumed it worked here too -- it does not, that hook is in the headless
+     * path only. A capture session recorded zero frames because of it, which
+     * matters whenever a defect only shows while the map is moving and so
+     * cannot be caught in a screenshot. */
+    { const char *dd = getenv("SC_DUMP_DIR"), *di = getenv("SC_DUMP_INTERVAL");
+      if (dd && *dd && di && *di) {
+        static unsigned long long cap_frame;
+        const unsigned long long iv = strtoull(di, NULL, 0);
+        if (iv && cap_frame % iv == 0) {
+          char pth[512];
+          snprintf(pth, sizeof pth, "%s/frame_%010llu.ppm", dd, cap_frame);
+          if (!write_ppm(pth))
+            fprintf(stderr, "SC_DUMP_DIR: cannot write %s\n", pth);
+        }
+        cap_frame++;
+      } }
     /* SDL_RenderPresent returns void on SDL2 and bool on SDL3, so it cannot
      * share the SC_SDL_OK spelling with the other calls. */
 #if SNESRECOMP_SDL3
