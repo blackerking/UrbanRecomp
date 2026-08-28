@@ -373,8 +373,55 @@ spins on `$4212` at 00:9280 and nothing advances the beam while the guest holds
 the CPU. A stub links and then hangs.
 
 **First run of `SimCityAOTDiff` since it was repaired: cycle counts agree on
-51 of 64 trials.** Nobody has looked at the other 13. That is a tier-accuracy
-question, unrelated to rendering, and worth a session of its own.
+51 of 64 trials.** First look below; the cause is NOT found.
+
+### What the 13 disagreements look like
+
+Results are fine -- `divergent: 0`, so WRAM and A/X/Y come out identical. Only
+the cycle accounting differs, and the AOT tier is always HIGH, always by a
+multiple of 8:
+
+```
+00:8982  AOT 760 vs interp 744  (+16)   on 4 of 8 trials
+00:8924  AOT 760 vs interp 744  (+16)   on 1 of 8
+00:D23A  AOT 240 vs interp 232  (+8)    on 1 of 8
+```
+
+**It is trial-dependent**, which is the strongest clue: the same body agrees on
+most randomised trials and disagrees on the rest. So the extra charge is
+conditional on entry state, not on the instruction stream.
+
+`00:D23A` is the small case and the one to work on:
+
+```
+REP #$30 / LDA $0421 / ASL A / TAX / LDA $d193,X / STA $7e2000 / RTS
+```
+
+### Ruled out
+
+- **A per-`STA long` overcharge.** It correlates perfectly -- D23A has one long
+  store and is +8, the two +16 bodies have two each -- but the generated block
+  for D23A charges `master_cycles += 232`, which is exactly what the
+  interpreter reports. The static cost is right, so the extra 8 is added
+  somewhere else, and the correlation is a coincidence of those three bodies.
+- **The AOT prologue's stack reads.** The generated function recovers the host
+  return PC with `cpu_read8()` when `host_return_valid` is 2 or 3, which varies
+  per trial and looked like an excellent fit. But `cpu_read8()` returns early
+  for WRAM via `cpu_wram_offset()` and charges nothing; only hardware registers
+  reach `cpu_pace_cycles()`. The stack is WRAM.
+
+### Where to look next
+
+The conditional `+= 8` charges that DO exist in generated code -- e.g.
+`if (cpu->D & 0xFF) { cpu->cycles += 1; cpu->master_cycles += 8; }` for the
+direct-page penalty, and branch-taken penalties. Both are entry-state
+dependent, which matches the trial-dependence. D23A uses no direct-page
+addressing and does not branch, so if one of those is firing in its block, that
+is the bug. Dump `cpu->D` and the taken/not-taken path per trial and correlate
+against the disagreeing trials.
+
+Note this is tier accuracy, not correctness, and nothing in the rendering work
+depends on it.
 
 ## Upstream submodule: a merge, not a bump
 
