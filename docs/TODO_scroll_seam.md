@@ -313,6 +313,41 @@ cursor. The horizontal repair still has it, over 16 columns of map where the
 HUD rarely is, which is why it is tolerable there and was not on the full-width
 vertical band.
 
+## 8. Passe-partout on BOTH edges; the repair is retired
+
+Reported from play after the vertical fixes: "left is the big problem, right
+the small one" -- HUD elements ghosting a frame behind. That is the horizontal
+repair, the last thing still translating COMPOSED pixels, so screen-fixed
+layers inside its 16 columns are dragged along with the map. Narrowing it again
+would not have cured it; only removing it does.
+
+So the passe-partout now covers both edges and `ws_fix_scroll_seam()` stands
+down entirely. No repair, no ghosting, no cloned cursor -- those all came from
+the same mechanism.
+
+**The cost, measured.** The right cover is exact: 100.0% match against a
+correctly translated previous frame, every frame. The left cover is not:
+
+```
+frame   left x0-7 match at +2      right x248-255
+  79          93.6                     100.0
+  82          78.1   <- dip            100.0
+  86          75.4   <- dip            100.0
+  90          67.0   <- dip            100.0
+```
+
+88-96% on most frames, dipping to 67-78% **every fourth frame** -- the tile
+column cadence at 2 px/frame. So it is a cell-boundary artifact in the left
+band specifically, not general misalignment, and the right band sampling the
+same buffer the same way is perfect.
+
+That asymmetry is still unexplained. Tested and disproved: that the leftmost
+rendered cell lacked a neighbour to take a roof overhang from. Rendering one
+cell further left and sampling 8 px in changed the numbers by exactly nothing.
+The extra cell was kept because it is more correct.
+
+`SC_PASSEPARTOUT=0` goes back to the repair -- exact edges, ghosting HUD.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.

@@ -3136,11 +3136,24 @@ static int s_seam_lead_row = -1;
 static bool s_seam_lead_rdirty;
 
 static void ws_fix_scroll_seam(void) {
-  /* The passe-partout covers the RIGHT edge permanently, so the leading-edge
-   * cover there is redundant -- but the repair still owns the left edge, where
-   * it measures exact (median 0%, peak 0%) and the host cover does not
-   * (median 11-34%). Measured both ways; neither wins on both sides. */
-  if (ws_passepartout()) s_seam_lead_cover = 0;
+  /* With the passe-partout on BOTH edges there is nothing left to repair, and
+   * the repair is what ghosts the HUD: it translates COMPOSED pixels, so any
+   * screen-fixed layer inside its 16 columns is dragged along a frame behind.
+   * That is the same root cause as the cloned cursor, and it is why this stands
+   * down entirely rather than being narrowed again.
+   *
+   * The trade is known and measured: on the left, the host cover mismatches a
+   * translated previous frame by 11-34%% where the repair was exact. That is a
+   * map-smoothness cost paid to remove a HUD defect, and it is the reason the
+   * switch below exists. */
+  if (ws_passepartout()) {
+    s_seam_lead_cover = 0;
+    s_seam_lead_left = 0;
+    s_seam_lead_top = 0;
+    s_seam_hold_x = 0;
+    s_seam_hold_y = 0;
+    return;
+  }
   static int enabled = -1;
   if (enabled < 0) {
     const char *e = getenv("SC_SEAM_FIX");
@@ -3488,7 +3501,7 @@ static void host_map_compose(void) {
   const int lead_t = (lt_on && s_seam_lead_top > 0 && s_seam_lead_top <= 8)
                          ? s_seam_lead_top : 0;
   const int pp = ws_passepartout() ? kPassePartout : 0;
-  const int left_cover = lead_l;   /* the repair owns this edge */
+  const int left_cover = pp > lead_l ? pp : lead_l;
   const int x_start = pp ? (kVideoWidth - pp) : x_from;
   /* Render one cell further left than needed, and skip it when sampling.
    * The overlay pass draws a building's upper half one CELL up and left, so
