@@ -116,30 +116,33 @@ attempts and is the one to start from if this is retried.
 
 ## Measured facts worth keeping
 
-### The host renderer never draws upper tiles
+### The host renderer's upper tiles -- CORRECTED 2026-08-27
 
-`ScMapView_Render` has a second pass for the overlapping upper halves of tall
-buildings, reading a table at `SC_TILU_ADDR`. Instrumented over 20 full frames:
-**0 drawn, 31360 skipped**. Every tile is rejected by its "no upper tile" test.
+**Everything this section used to say was wrong.** It recorded "0 drawn, 31360
+skipped" over 20 frames, map cells reading back `0x00..0x25` against a table
+with entries only at `0xf9..0x3ff`, and concluded the table address had to be
+wrong. Re-measured with `SC_ROOF_DIAG=1` on a built-up city:
 
-The table has 124 real entries, but at indices `0xf9..0x3ff`, and the map cells
-read back as `0x00..0x25` -- zero overlap. A scan of 64KB of ROM found no table
-with entries at the ids in use.
+| | claimed | actually |
+|---|---|---|
+| overlay tiles drawn | 0 | **1017 of 20000 (5%)** |
+| map cell ids `v` | `0x00..0x25` | **0..630** |
+| table entries `tu & 0x3ff` | all `0x300` | **120..942** |
 
-**This contradicts `REFERENCE_map_format.md`,** which documents exactly what
-the code implements: `TILU_ADDR = TILE_ADDR - 0x77C` (file `0x014f2d`),
-`v = u16 & 0x03FF`, overlay `0x300` means empty, drawn at −1,−1. The code
-matches the spec, so one of the two measurements below is wrong and that is
-where to start:
+The table address, the lookup and the emptiness test are all fine. The old
+figures cannot be reproduced and the "36 distinct ids on both an empty and a
+built-up map" reading -- flagged at the time as the suspect one -- was the wrong
+measurement, not the address.
 
-- the instrumented count (`0 drawn / 31360 skipped` over 20 frames), or
-- the direct read of the map array, which gives **36 distinct ids on BOTH an
-  empty map and a built-up one**. Two different cities cannot have identical
-  tile vocabularies, so this reading is the more suspect of the two.
+**The real fault was the draw position.** The format note at the top of
+`simcity_mapview.c` and `REFERENCE_map_format.md` both say the overlay is drawn
+at -1,-1. The code shifted by `cell / 8`, which at the native cell size of 8 is
+a single PIXEL, so every tall building's upper half sat 7 px too low. Reported
+from play as the roof tiles being about a tile below where they belong -- which
+is what identified it. Now `- cell`.
 
-Resolve that contradiction before concluding anything about the table address.
-Whichever way it falls, tall buildings currently have no upper halves anywhere
-the host renderer draws.
+Note this scaled the wrong way too: at `SC_MAP_ZOOM` cell sizes of 16 or 32 the
+old expression gave 2 px and 4 px, so the error grew with the zoom.
 
 ### Widescreen rendering alters the guest's own picture on some screens
 

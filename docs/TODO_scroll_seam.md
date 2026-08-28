@@ -165,7 +165,19 @@ the whole fix.
 Note 230 frames of vertical panning from savestate_2 found NO trailing-edge
 spike, so a repro for this needs a different spot in the city.
 
-## 5. Overlapping building parts not visible
+## 5. DONE -- overlapping building parts
+
+Fixed 2026-08-27. It was NOT the table address, and the note that said the
+upper-tile pass draws nothing was wrong -- `SC_ROOF_DIAG=1` measures 1017 of
+20000 overlay tiles drawn, cell ids 0..630, table entries 120..942. The lookup
+was always working.
+
+The fault was the draw position: `cell / 8` instead of `cell`, i.e. one PIXEL
+up-left instead of one CELL, leaving every tall building's upper half 7 px too
+low. Identified from play as the roofs sitting a tile below where they belong.
+See `docs/WIDESCREEN_HOST_MAP.md`.
+
+## 5b. Superseded note on building parts
 
 Tall buildings whose upper half overlaps the tile behind them are missing.
 

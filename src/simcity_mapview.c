@@ -14,6 +14,7 @@
  *   palette: BGR555 at $7E2440
  */
 #include <string.h>
+#include <stdlib.h>
 
 #include "snes/snes.h"
 #include "snes/ppu.h"
@@ -167,9 +168,41 @@ bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
                 } else {
                     unsigned tu = (unsigned)(rom[SC_TILU_ADDR + v * 2] |
                                              (rom[SC_TILU_ADDR + v * 2 + 1] << 8));
+                    /* SC_ROOF_DIAG: is the overlay pass drawing anything at all,
+                     * and what do the cell ids and table entries actually look
+                     * like? An earlier note recorded "0 drawn, 31360 skipped". */
+                    static int roof_diag = -1;
+                    if (roof_diag < 0) {
+                        const char *e = getenv("SC_ROOF_DIAG");
+                        roof_diag = (e && *e) ? 1 : 0;
+                    }
+                    if (roof_diag) {
+                        static int tot, skip, drawn, vmin = 0x7fff, vmax = -1;
+                        static int tumin = 0x7fff, tumax = -1, nf;
+                        tot++;
+                        if ((int)v < vmin) vmin = (int)v;
+                        if ((int)v > vmax) vmax = (int)v;
+                        if ((int)(tu & 0x3FFu) < tumin) tumin = (int)(tu & 0x3FFu);
+                        if ((int)(tu & 0x3FFu) > tumax) tumax = (int)(tu & 0x3FFu);
+                        if ((tu & 0x3FFu) == 0x300u) skip++; else drawn++;
+                        if (tot % 20000 == 0)
+                            fprintf(stderr,
+                                    "[roof] tot=%d drawn=%d skipped=%d  v=%d..%d  tu&3ff=%d..%d\n",
+                                    tot, drawn, skip, vmin, vmax, tumin, tumax);
+                        (void)nf;
+                    }
                     if ((tu & 0x3FFu) == 0x300u) continue;
-                    blit_tile(out, pitch, w, h, tu, rx * cell - cell / 8,
-                              ry * cell - cell / 8, cell);
+                    /* One CELL up and left, not one pixel.
+                     *
+                     * The format note at the top of this file, and
+                     * REFERENCE_map_format.md, both say the overlay is drawn at
+                     * -1,-1 -- in CELLS. This shifted by cell/8, which at the
+                     * native cell size of 8 is a single pixel, leaving every
+                     * tall building's upper half 7 px too low. Reported from
+                     * play as the roof tiles sitting about a tile below where
+                     * they belong. */
+                    blit_tile(out, pitch, w, h, tu, rx * cell - cell,
+                              ry * cell - cell, cell);
                 }
             }
         }
