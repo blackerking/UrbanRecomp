@@ -245,6 +245,46 @@ frames of downward scrolling give a median of 0.0% and a worst case of 12.8%,
 against 24-28% spikes on the right edge. Vertically the tilemap has 4 spare
 rows to stage into, so the row is normally written before it is exposed.
 
+## 6. Passe-partout -- adopted on the RIGHT edge only
+
+The idea: never display the guest's outermost tile column, since every seam in
+this file lives in exactly those 8 px and on hardware they sat in CRT overscan.
+The host map covers them instead, permanently, so the fault is gone by
+construction rather than repaired frame by frame.
+
+Checked first that this is safe: while the map scrolls, columns 0-15 change
+60-89%% (the toolbar starts at x~16), columns 240-255 change 34-59%%, and the
+top and bottom rows change too -- the status bar is a panel inside the picture,
+not a band across the edge. An 8 px crop takes map pixels only.
+
+**It only wins on the right.** Measured on savestate_5 against a correctly
+translated previous frame, median (peak):
+
+| | repair | passe-partout |
+|---|---|---|
+| left x0-7 | **0.0% (0.0%)** | 11-34% (39-50%) |
+| right x248-255 | 0.0% (**39-57%**) | 0.0% (**0-3.7%**) |
+
+So the two are used together: passe-partout owns the right edge, the repair
+owns the left. Combined, both edges are median 0.0% with a peak of 0.0% except
+one 3.7% frame. The right edge used to peak at 39-57%.
+
+Why the host cover loses on the left is NOT understood. The cover tracks the
+guest correctly there (same shift on 111 of 129 frames) yet still mismatches
+11-34%%. One hypothesis was tested and disproved: that the leftmost rendered
+cell lacked a neighbour to receive a roof overhang from, now that overlays
+extend a full cell. Rendering one cell further left and sampling 8 px in
+changed the numbers by nothing at all. That neighbour cell was kept anyway --
+it is more correct -- but the cause is still open.
+
+Because the repair still runs for the left edge, **the cloned cursor and HUD
+are still possible there**. Extending the passe-partout to the left would
+retire the repair entirely, and with it the cloning; that is the prize if the
+left-edge question above is ever answered.
+
+At rest the change is confined to columns 248-255, verified on six save states.
+`SC_PASSEPARTOUT=0` restores the guest's own right-edge column.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.

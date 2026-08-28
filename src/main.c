@@ -3039,6 +3039,43 @@ static bool host_map_screen_live(void) {
 
 /* After the guest frame: replace the picture with our map, then put the
  * captured HUD and sprites back over it using their real alpha. */
+/* Passe-partout: never show the guest's outermost tile column.
+ *
+ * Every seam chased in this file lives in exactly those 8 px at each side.
+ * The trailing one is the column the game rewrites while it is still on screen
+ * behind you; the leading one is the column that becomes visible before the
+ * game rewrites it. Both are the same geometry: a 32-column tilemap is 256 px
+ * against a 256 px screen, so one column has to serve both edges at once and
+ * cannot.
+ *
+ * On hardware those columns sat in CRT overscan and were never seen -- the game
+ * is built on that assumption. So rather than repair them frame by frame, do
+ * not display them: the host map, which draws the same terrain from WRAM,
+ * covers the outermost column on each side permanently.
+ *
+ * This removes the fault by construction, and with it the whole repair
+ * mechanism -- direction tracking, hold counters, staleness bookkeeping -- and
+ * the cloned cursor and HUD that mechanism caused, which came from translating
+ * composed pixels that included screen-fixed layers.
+ *
+ * Measured first: every edge of the guest picture is live map, not HUD. While
+ * the map scrolls, columns 0-15 change 60-89%% (the toolbar starts at x~16),
+ * columns 240-255 change 34-59%%, and the top and bottom rows change too -- the
+ * status bar is a panel inside the picture, not a band across the edge. An 8 px
+ * crop therefore takes map pixels only and clips no HUD anywhere.
+ *
+ * SC_PASSEPARTOUT=0 restores the guest's own edge columns and re-enables the
+ * per-frame repair. */
+enum { kPassePartout = 8 };
+static bool ws_passepartout(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("SC_PASSEPARTOUT");
+    on = (e && *e) ? (atoi(e) != 0) : 1;
+  }
+  return on != 0;
+}
+
 /* Repair the scroll seam.
  *
  * The map tilemap is 32 columns -- 256 px, exactly the screen width -- and
@@ -3099,6 +3136,11 @@ static int s_seam_lead_row = -1;
 static bool s_seam_lead_rdirty;
 
 static void ws_fix_scroll_seam(void) {
+  /* The passe-partout covers the RIGHT edge permanently, so the leading-edge
+   * cover there is redundant -- but the repair still owns the left edge, where
+   * it measures exact (median 0%, peak 0%) and the host cover does not
+   * (median 11-34%). Measured both ways; neither wins on both sides. */
+  if (ws_passepartout()) s_seam_lead_cover = 0;
   static int enabled = -1;
   if (enabled < 0) {
     const char *e = getenv("SC_SEAM_FIX");
@@ -3423,8 +3465,17 @@ static void host_map_compose(void) {
                          ? s_seam_lead_left : 0;
   const int lead_t = (lt_on && s_seam_lead_top > 0 && s_seam_lead_top <= 8)
                          ? s_seam_lead_top : 0;
-  const int cols = (s_video_w + 8 + 7) / 8, rows = (kVideoHeight + 16 + 7) / 8;
-  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx, sy)) {
+  const int pp = ws_passepartout() ? kPassePartout : 0;
+  const int left_cover = lead_l;   /* the repair owns this edge */
+  const int x_start = pp ? (kVideoWidth - pp) : x_from;
+  /* Render one cell further left than needed, and skip it when sampling.
+   * The overlay pass draws a building's upper half one CELL up and left, so
+   * the leftmost visible column needs a neighbour outside the window to
+   * receive an overhang from. Without it, roofs pop in at the left edge as
+   * cells scroll into the render -- measured as the left 8 px failing to
+   * translate on 11-34%% of frames while the rest of the picture was exact. */
+  const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
+  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
     return;
   }
@@ -3437,16 +3488,21 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
     if (y < lead_t)
-      for (int x = 0; x < kVideoWidth; x++) dst[x] = src[x + fx];
-    else
-      for (int x = 0; x < lead_l; x++) dst[x] = src[x + fx];
-    if (halve)
-      for (int x = x_from; x < s_video_w; x++) {
-        const uint32_t c = src[x + fx];
+      for (int x = 0; x < kVideoWidth; x++) dst[x] = src[x + fx + 8];
+    else if (halve)
+      for (int x = 0; x < left_cover; x++) {
+        const uint32_t c = src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = x_from; x < s_video_w; x++) dst[x] = src[x + fx];
+      for (int x = 0; x < left_cover; x++) dst[x] = src[x + fx + 8];
+    if (halve)
+      for (int x = x_start; x < s_video_w; x++) {
+        const uint32_t c = src[x + fx + 8];
+        dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
+      }
+    else
+      for (int x = x_start; x < s_video_w; x++) dst[x] = src[x + fx + 8];
   }
 }
 
