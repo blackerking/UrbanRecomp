@@ -116,6 +116,19 @@ void ppudma_record_dma(int ch, int fromB, uint8_t aBank, uint16_t aAdr,
   (void)ch; (void)fromB; (void)aBank; (void)aAdr; (void)bAdr; (void)size;
 }
 int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
+/* Upstream's snes.c now logs every direct WRAM write through
+ * wlog_addr_note_direct(), which lives in cpu_state.c -- and this target
+ * deliberately builds the interp816 core WITHOUT the CpuState runtime (see the
+ * SIMCITY_DEVICE_SOURCES note in CMakeLists.txt).
+ *
+ * Stubbing it is safe here in a way that stubbing sc_advance_until_input_ready
+ * would NOT have been: wlog_addr_note_via() returns immediately unless a WRAM
+ * write-address log has been configured, so the real function is a diagnostic
+ * and nothing else. This only means SNESRECOMP_WLOG_ADDR is unavailable in
+ * this target; no emulation behaviour changes. */
+void wlog_addr_note_direct(uint32_t wa, uint8_t v, const char *via) {
+  (void)wa; (void)v; (void)via;
+}
 #else
 /* Conversely, the runtime expects the GAME to supply these. The desktop
  * hosts define them in their host_main include; this host defines them here.
