@@ -893,6 +893,17 @@ static void handle_pos_stuff(void) {
         g_snes_ppu_dbg_layer_mask |= 0x10;
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
+      /* SC_PASS_DIAG: render the SAME line twice into two surfaces, with
+       * nothing changed between them, and see whether the pixels match. The
+       * seam repair's re-render approach assumes they do; its measured result
+       * (cloning got WORSE, not better) says they may not. */
+      if (getenv("SC_PASS_DIAG") && s_ws_scratch && s_ws_scratch_bg) {
+        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        PpuBeginDrawing(g_ppu, s_ws_scratch_bg, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
       ppu_runLine(g_ppu, snes->vPos);
       /* Blank the margins when nothing is entitled to draw there.
        *
@@ -1219,6 +1230,29 @@ static void handle_pos_stuff(void) {
       ws_hide_backdrop_furniture();
       ws_fill_flat_margins();
       ws_fill_margins();
+      if (getenv("SC_PASS_DIAG") && s_ws_scratch && s_ws_scratch_bg) {
+        static int nf;
+        long long diff = 0, tot = 0;
+        int first_y = -1, first_x = -1;
+        for (int y = 0; y < kVideoHeight; y++) {
+          const uint32_t *a =
+              (const uint32_t *)(s_ws_scratch + (size_t)y * s_video_pitch);
+          const uint32_t *b =
+              (const uint32_t *)(s_ws_scratch_bg + (size_t)y * s_video_pitch);
+          for (int x = 0; x < s_video_w; x++) {
+            tot++;
+            if (a[x] != b[x]) {
+              diff++;
+              if (first_y < 0) { first_y = y; first_x = x; }
+            }
+          }
+        }
+        if (++nf % 30 == 0)
+          fprintf(stderr,
+                  "[pass] f=%d two identical renders differ on %lld of %lld px"
+                  " first at (%d,%d)\n",
+                  nf, diff, tot, first_x, first_y);
+      }
       ws_fix_scroll_seam(); /* before compose: it copies the guest columns */
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;

@@ -46,17 +46,28 @@ Measured, it was worse on every axis:
 | diagonal, top 16 | 0.8% | 10.2% |
 | static pixels moved (cloning) | 3.9% | **14.5%** |
 
-Cloning got *worse*, which is the tell: the scratch pass does not reproduce the
-main render. The city view already renders each line twice (the OBJ-clip pass),
-and a third pass appears not to see the same sprite-evaluation state, so the
-scratch differs from the real picture in exactly the places that were supposed
-to be preserved. Reverted.
+Cloning got *worse*, not better. I first assumed the extra pass could not
+reproduce the main render.
 
-**Before trying again, settle that first**: render a line twice into two
-surfaces with NO tilemap swap and diff them. If they are not identical, the
-extra-pass approach cannot work as written, and that is the thing to fix --
-`docs/WIDESCREEN_HOST_MAP.md` already records that extra `ppu_runLine` passes
-are not free.
+**That assumption was wrong, and it has been measured.** `SC_PASS_DIAG=1`
+renders every line twice into two surfaces with nothing changed between them
+and diffs the result: **0 of 100352 pixels differ**, on every frame of a fast
+pan. Rendering a line again is exactly reproducible, even as the third pass of
+the frame. So the approach is sound and the fault was in my implementation of
+it -- it is worth retrying, not abandoning.
+
+The most likely culprit, and the thing to check first: that attempt moved the
+change detection AND the `host_map_screen_live()` gate from vblank to the top
+of the frame (`vPos == 0`). If the gate does not read the same at `vPos == 0`
+as it does at vblank, `s_seam_active` flickers frame to frame, the strip is
+patched on some frames and not others, and that alternation is exactly what the
+cloning metric counts. Evaluate the gate once at vblank and carry the result
+into the next frame, rather than re-deriving it at frame start.
+
+The second thing to check is the ordering. A rewrite detected at vblank of
+frame N describes a write that happened BEFORE frame N was drawn, so frame N
+itself has no scratch rendered with the old columns -- only N+1 onward do. Any
+retry has to decide what frame N uses.
 
 ## 1b. Original note on the clone
 
@@ -140,6 +151,13 @@ Before chasing the table address, resolve the contradiction recorded in
 `docs/WIDESCREEN_HOST_MAP.md`: the same read gives **36 distinct ids on both an
 empty map and a built-up one**, which cannot be true of two different cities.
 That reading is the more suspect of the two measurements.
+
+## Diagnostics available
+
+- `SC_SEAM_FIX=0` turns the repair off.
+- `SC_PASS_DIAG=1` renders each line twice into two scratch surfaces and reports
+  how many pixels differ. Confirms whether an extra `ppu_runLine` pass is
+  reproducible before anything is built on top of one.
 
 ## Also open, pre-existing
 
