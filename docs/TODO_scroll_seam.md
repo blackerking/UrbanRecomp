@@ -99,23 +99,41 @@ now". Both axes were moved, on the strength of the `-1,-1` in the format spec,
 but only the vertical error was ever reported. If roofs ever look a tile too
 far LEFT, that half is the suspect.
 
-### 3. Upstream submodule: a merge, not a bump
+### 3. DONE -- upstream merged; one inherited clone defect
 
-`origin/main` is 16 commits ahead, but our submodule carries **nine local
-commits** on top of merge base `9d6ad3c` -- COP modelling, `exit_mx_set`,
-deadline-unwind handling, diagnostics -- touching the Rust recompiler and the
-Python lowering as well as the runtime. Upstream's own commits include
-`runtime: return on scheduler deadline unwind` and `Deliver every raster IRQ`,
-independent solutions to problems some of ours address. Cherry-picking just the
-coverage hooks onto `origin/main` conflicts immediately.
+The nine local commits and upstream's sixteen merged with a single conflicted
+file, `runner/src/snes/interp_bridge.c`, in four hunks -- all the
+deadline-unwind machinery, where `s_lle_unwind_from_deadline` (ours) and
+`s_lle_unwind_is_deadline` / `s_lle_next_unwind_is_deadline` (upstream) are two
+answers to one question. Upstream's won: same behaviour on expiry, plus it
+clears `s_lle_unwind_active` and the owner depth, which ours did not. Kept only
+what is additive on our side -- the coverage hooks `src/main.c` wires, and
+`SNESRECOMP_DEADLINE_DIAG`.
 
-The prize is `PpuWsSetOamLeftHints` / `PpuWsSetOamRightHints`, which would let
-the OBJ-clip pass -- a second full render of every line -- be deleted. Wants
-its own session and its own regression pass.
+**Verified rendering-neutral**: 30 frames of scrolling gameplay from
+`savestate_5` are byte-identical before and after, 0 pixels differing. All five
+targets build; qualify PASS at 2000 and 6000.
 
-Both local commits are pushed to `blackerking/snesrecomp`, branch
-`simcity-host`, and `.gitmodules` points there. Before that they existed on no
-remote at all, so a clean clone could not fetch the submodule.
+Two build fixes were needed, both recorded in the merge commit: a stub for
+`wlog_addr_note_direct()` (upstream's `snes.c` now logs direct WRAM writes
+through a function in `cpu_state.c`, which this target deliberately excludes --
+safe to stub because it is purely a diagnostic), and MSVC portability for
+`__attribute__((constructor))`, which MSVC rejects outright.
+
+Submodule now at `blackerking/snesrecomp` branch `simcity-host-main`.
+
+#### Inherited: a nested submodule with no URL
+
+`snesrecomp/.gitmodules` declares `lib/retcomm-rbengine` with a `path` and a
+`branch` but **no `url`**, so `git clone --recurse-submodules` stops with
+"No url found for submodule path". Identical on `origin/main`, so it is
+upstream's defect, not the merge's -- but the pre-merge pointer did not carry
+that gitlink, so this is a regression in clone-ability that arrived with it.
+
+The outer submodule still checks out and the build is unaffected; only the
+recursive clone errors. Not filed yet. If it is fixed by supplying the URL, do
+not guess it -- `lib/recomp-net` points at TechnicallyComputers, but that is an
+inference, not knowledge.
 
 ### 4. Filed upstream, still open
 
