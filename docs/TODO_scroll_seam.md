@@ -209,6 +209,30 @@ edge is the frame's left edge and has no cover available.
 **On hardware this sliver sat in CRT overscan and was never visible.** Widescreen
 is what exposed it.
 
+## 3b. Left and top leading edges -- BUILT BUT UNVERIFIED
+
+The same cover extended to the other two leading edges (scrolling left, and up).
+**Neither has been reproduced, so neither is measured.** Plain Left and plain Up
+do not pan the map from any save state here -- the city is already at its
+boundary in those directions -- and the play capture contains only rightward and
+downward scrolling. The code is symmetric with the right edge, which is the only
+argument for it so far.
+
+Two things to check when a repro exists:
+
+- **These edges are where the HUD lives.** The right edge sits in open picture
+  next to the join; the left is the toolbar and the top is the status bar, so
+  the cover paints host terrain over them for the two or three frames it is
+  active. `SC_SEAM_LEAD_LT=0` disables both without touching the right edge.
+- Whether the artifact is even there. At 4 px/frame the leading column is
+  exposed for about one frame before the game rewrites it, which is why holding
+  A hides the right-hand seam; the same may make left and up a non-issue.
+
+The BOTTOM leading edge was measured in the capture and needs no cover: 113
+frames of downward scrolling give a median of 0.0% and a worst case of 12.8%,
+against 24-28% spikes on the right edge. Vertically the tilemap has 4 spare
+rows to stage into, so the row is normally written before it is exposed.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.

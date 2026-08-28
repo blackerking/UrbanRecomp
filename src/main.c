@@ -3092,7 +3092,11 @@ static int s_seam_dir_x = 1, s_seam_dir_y = 1, s_seam_idle_x, s_seam_idle_y;
  * which is why it reads as a defect now. */
 static int s_seam_lead_col = -1;
 static bool s_seam_lead_dirty;
-static int s_seam_lead_cover;
+static int s_seam_lead_cover;      /* right edge  */
+static int s_seam_lead_left;       /* left edge   */
+static int s_seam_lead_top;        /* top edge    */
+static int s_seam_lead_row = -1;
+static bool s_seam_lead_rdirty;
 
 static void ws_fix_scroll_seam(void) {
   static int enabled = -1;
@@ -3109,7 +3113,10 @@ static void ws_fix_scroll_seam(void) {
   if (!host_map_screen_live()) {
     s_seam_have_prev = false;
     s_seam_lead_cover = 0;
+    s_seam_lead_left = 0;
+    s_seam_lead_top = 0;
     s_seam_lead_col = -1;
+    s_seam_lead_row = -1;
     return;
   }
 
@@ -3140,14 +3147,25 @@ static void ws_fix_scroll_seam(void) {
     if (dx > 128) dx -= 256;
     if (dy > 128) dy -= 256;
 
-    /* Is the column now at the right edge still holding wrapped content?
-     * It goes suspect the moment it becomes the rightmost column, and is
-     * cleared the moment the game rewrites it. */
-    { const int rc = ((hs + kVideoWidth - 1) >> 3) & 31;
-      if (rc != s_seam_lead_col) { s_seam_lead_col = rc; s_seam_lead_dirty = true; }
-      if (col_changed[rc]) s_seam_lead_dirty = false;
+    /* Is the column now at the LEADING edge still holding wrapped content?
+     * It goes suspect the moment it becomes the leading column and is cleared
+     * the moment the game rewrites it. Which edge leads depends on the
+     * direction of travel: scrolling right it is the right edge, scrolling
+     * left the left one. Same again for the rows, vertically. */
+    { const int lc = dx > 0 ? (((hs + kVideoWidth - 1) >> 3) & 31)
+                            : ((hs >> 3) & 31);
+      if (lc != s_seam_lead_col) { s_seam_lead_col = lc; s_seam_lead_dirty = true; }
+      if (col_changed[lc]) s_seam_lead_dirty = false;
       s_seam_lead_cover = (dx > 0 && s_seam_lead_dirty)
-                              ? (((hs + kVideoWidth - 1) & 7) + 1) : 0; }
+                              ? (((hs + kVideoWidth - 1) & 7) + 1) : 0;
+      s_seam_lead_left = (dx < 0 && s_seam_lead_dirty)
+                              ? (8 - (hs & 7)) : 0; }
+    { const int lr = dy > 0 ? (((vs + kVideoHeight - 1) >> 3) & 31)
+                            : ((vs >> 3) & 31);
+      if (lr != s_seam_lead_row) { s_seam_lead_row = lr; s_seam_lead_rdirty = true; }
+      if (row_changed[lr]) s_seam_lead_rdirty = false;
+      s_seam_lead_top = (dy < 0 && s_seam_lead_rdirty)
+                            ? (8 - (vs & 7)) : 0; }
 
     const int gx0 = s_ws_extra;              /* guest's left edge, render coords */
     const int gx1 = gx0 + kVideoWidth;
@@ -3393,6 +3411,18 @@ static void host_map_compose(void) {
   const int lead = (s_seam_lead_cover > 0 && s_seam_lead_cover <= 8)
                        ? s_seam_lead_cover : 0;
   const int x_from = kVideoWidth - lead;
+  /* The same cover on the other two leading edges. Unlike the right edge --
+   * which widescreen puts in open picture next to the join -- these sit where
+   * the HUD lives, so they paint over the toolbar and the status bar for the
+   * two or three frames they are active. SC_SEAM_LEAD_LT=0 turns them off
+   * without disturbing the right edge. */
+  static int lt_on = -1;
+  if (lt_on < 0) { const char *e = getenv("SC_SEAM_LEAD_LT");
+                   lt_on = (e && *e) ? (atoi(e) != 0) : 1; }
+  const int lead_l = (lt_on && s_seam_lead_left > 0 && s_seam_lead_left <= 8)
+                         ? s_seam_lead_left : 0;
+  const int lead_t = (lt_on && s_seam_lead_top > 0 && s_seam_lead_top <= 8)
+                         ? s_seam_lead_top : 0;
   const int cols = (s_video_w + 8 + 7) / 8, rows = (kVideoHeight + 16 + 7) / 8;
   if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
@@ -3406,6 +3436,10 @@ static void host_map_compose(void) {
     const uint32_t *src =
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
+    if (y < lead_t)
+      for (int x = 0; x < kVideoWidth; x++) dst[x] = src[x + fx];
+    else
+      for (int x = 0; x < lead_l; x++) dst[x] = src[x + fx];
     if (halve)
       for (int x = x_from; x < s_video_w; x++) {
         const uint32_t c = src[x + fx];
