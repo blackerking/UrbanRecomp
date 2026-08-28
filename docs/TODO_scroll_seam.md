@@ -51,54 +51,45 @@ map pixels only, at every edge.
 
 ### Measured result
 
-| | median | peak |
-|---|---|---|
-| right cover, x248-255 | 0.0% | **0.0%** |
-| left cover, x0-7 | 11-34% | 39-50% |
-
-against a correctly translated previous frame, across normal, fast and diagonal
-panning. Reported from play as "map scrolling itself works flawlessly - best
-picture so far", so the left figure is below the visible threshold.
+Both covers are **exact**: 100.0% match against a correctly translated previous
+frame, every frame, on both edges, across normal, fast and diagonal panning.
+Reported from play as "map scrolling itself works flawlessly - best picture so
+far".
 
 ## Open
 
-### 1. The left cover dips every fourth frame
+### 1. RESOLVED -- the "left cover dip" was a measurement artifact
 
-The right cover matches at a flat 100.0%. The left manages 88-96% on most
-frames and drops to 67-78% **every fourth frame** -- the tile-column cadence at
-2 px/frame -- so it is a cell-boundary artifact in the left band, not general
-misalignment. Both bands sample the same buffer the same way, which is what
-makes it a puzzle.
+This section previously recorded the left cover as mismatching 11-34% with dips
+to 67-78% every fourth frame, against a flat 100.0% on the right, and called
+that an unexplained asymmetry. **It was my metric, not the picture.**
 
-Not visible in play. It matters anyway, because understanding it is the only
-route to trusting the host cover completely.
+The band test compared an 8 px cover against a window shifted by the scroll
+delta. Shifted by +2, `x0-7` reads `x2-9` -- and `x8, x9` are GUEST pixels, so
+two of the eight columns were comparing host content against guest content
+every frame. The right band never had the problem: shifted, `x248-255` reads
+`x250-257`, and `x256+` is more host strip, so it stayed host-vs-host. That
+asymmetry was the whole "puzzle".
 
-Ruled out: that the leftmost rendered cell lacked a neighbour to receive a roof
-overhang from, now that overlays extend a full cell. Rendering one cell further
-left (`sx - 1`, sampling `+8`) changed the numbers by **exactly nothing**. The
-extra cell was kept because it is more correct.
+Measured with a window that stays inside the cover (`x0-5` shifted by +2), the
+left band is **100.0% on every frame**, exactly like the right.
 
-**Narrowed 2026-08-27: the renderer is not at fault.** Dumping `s_hostmap_px`
-on consecutive frames via `SC_HOST_MAP_DUMP` shows it is cell-granular and
-exact -- frames 80->81 it does not move at all, 81->82 it jumps a full 8 px,
-and at its best shift it matches at **100.0%** in the left, middle and right
-regions alike:
+The dips clustering on `fx=6` frames was the same artifact seen through the
+fine-offset cycle, not a cell-boundary fault.
 
-```
-80->81  left +0 100.0%   right +0 100.0%   middle +0 100.0%
-81->82  left +8 100.0%   right +8 100.0%   middle +8 100.0%
-```
+Two things were ruled out along the way and are worth keeping, because both
+were plausible and both are now excluded:
 
-So all sub-cell motion comes from the compositor, which samples
-`src[x + fx + 8]` with `fx = hScroll[1] & 7`. The suspicion is a frame where
-the render's cell step and `fx`'s wrap disagree: if the origin advances a cell
-on a different frame from the one where `fx` returns to 0, the sampled window
-jumps 8 px and then back, at exactly the tile cadence the dip shows. The
-`adj_x` reconciliation, bounded to +/-1 cell, can move that origin too.
+- **The renderer.** `SC_HOST_MAP_DUMP` on consecutive frames shows it is
+  cell-granular and exact -- frames 80->81 it does not move, 81->82 it jumps a
+  full 8 px, matching at 100.0% in every region.
+- **The compositor's sampling.** `SC_COMPOSE_DIAG=1` prints `sx`, `fx` and the
+  combined origin per frame: it advances by exactly +2 every frame, with the
+  cell step (`dsx=1`) landing precisely when `fx` returns to 0. No jump.
 
-Why that would hit the left band and not the right, when both sample the same
-buffer with the same expression, is still the open part. Next: log `sx`, `fx`
-and `adj_x` per frame and correlate against the dipping frames.
+**Lesson for the next measurement:** a band metric that shifts its window must
+keep that window inside the region it is judging. Otherwise it reports the
+boundary between two correct things as a defect.
 
 ### 2. Roof overlay: the horizontal half is unverified
 

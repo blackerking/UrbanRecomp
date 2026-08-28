@@ -3142,10 +3142,12 @@ static void ws_fix_scroll_seam(void) {
    * That is the same root cause as the cloned cursor, and it is why this stands
    * down entirely rather than being narrowed again.
    *
-   * The trade is known and measured: on the left, the host cover mismatches a
-   * translated previous frame by 11-34%% where the repair was exact. That is a
-   * map-smoothness cost paid to remove a HUD defect, and it is the reason the
-   * switch below exists. */
+   * There is no quality cost. An earlier note here claimed the left cover
+   * mismatched a translated previous frame by 11-34%% where the repair was
+   * exact; that was a flaw in the measurement, not the picture. The band test
+   * shifted an 8 px window by the scroll delta, so it read two GUEST columns
+   * and compared them against host content. Measured with the window kept
+   * inside the cover, both edges are 100.0%% on every frame. */
   if (ws_passepartout()) {
     s_seam_lead_cover = 0;
     s_seam_lead_left = 0;
@@ -3509,6 +3511,16 @@ static void host_map_compose(void) {
    * receive an overhang from. Without it, roofs pop in at the left edge as
    * cells scroll into the render -- measured as the left 8 px failing to
    * translate on 11-34%% of frames while the rest of the picture was exact. */
+  /* SC_COMPOSE_DIAG: the compositor samples a CELL-granular render with a
+   * fine offset. If the cell step and the fx wrap ever land on different
+   * frames, the sampled window jumps 8 px and back at the tile cadence. */
+  { static int cd = -1;
+    if (cd < 0) { const char *e = getenv("SC_COMPOSE_DIAG"); cd = (e && *e) ? 1 : 0; }
+    if (cd) { static int nf; static int psx = -9999;
+      nf++;
+      fprintf(stderr, "[compose] f=%d sx=%d dsx=%d fx=%d origin=%d\n",
+              nf, sx, psx == -9999 ? 0 : sx - psx, fx, sx * 8 + fx);
+      psx = sx; } }
   const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
   if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
