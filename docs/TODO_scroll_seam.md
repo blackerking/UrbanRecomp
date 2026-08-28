@@ -437,8 +437,9 @@ correct and so no penalty to charge.
 **Not fixed here, on purpose.** Three plausible rules are in play -- never for
 reads (interpreter), on page-cross (AOT), or always at `x=0` (bsnes, which the
 docstring says the model was measured against). Picking one is the timing
-model's owner's call. Written up in
-`docs/upstream/ISSUE_aot_abs_indexed_pagecross.md`, not posted.
+model's owner's call. Filed upstream as
+[#39](https://github.com/mstan/snesrecomp/issues/39); see
+`docs/upstream/ISSUE_aot_abs_indexed_pagecross.md`.
 
 Tier accuracy, not correctness; nothing in the rendering work depends on it.
 

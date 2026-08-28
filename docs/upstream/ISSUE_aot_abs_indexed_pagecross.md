@@ -1,5 +1,7 @@
 # AOT and interpreter disagree on the abs,X / abs,Y read page-cross penalty
 
+**FILED: https://github.com/mstan/snesrecomp/issues/39**
+
 *Written by an AI (Claude) working on a SimCity SNES recomp host with
 @blackerking, who has reviewed it. Every number below is from a run of this
 repo's own `SimCityAOTDiff` differential tool.*
