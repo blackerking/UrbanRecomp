@@ -120,7 +120,18 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c
-        src/simcity_fiberdrive.c
+        # src/simcity_fiberdrive.c -- NOT linked here.
+        #
+        # Nothing in these targets uses the SimCityFiberDrive_* API; only
+        # src/main.c does, and that is not compiled into them. Linking it
+        # anyway dragged in sc_advance_until_input_ready(), which lives in
+        # main.c, so both targets failed with LNK2019.
+        #
+        # Stubbing that symbol would be wrong: it drains autoJoyTimer before
+        # the guest is handed a frame, and skipping it is exactly how the
+        # first fiber attempt deadlocked -- the game spins on $4212 at
+        # 00:9280 and nothing advances the beam while the guest holds the
+        # CPU. A stub would link and then hang.
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -218,7 +229,18 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c
-        src/simcity_fiberdrive.c
+        # src/simcity_fiberdrive.c -- NOT linked here.
+        #
+        # Nothing in these targets uses the SimCityFiberDrive_* API; only
+        # src/main.c does, and that is not compiled into them. Linking it
+        # anyway dragged in sc_advance_until_input_ready(), which lives in
+        # main.c, so both targets failed with LNK2019.
+        #
+        # Stubbing that symbol would be wrong: it drains autoJoyTimer before
+        # the guest is handed a frame, and skipping it is exactly how the
+        # first fiber attempt deadlocked -- the game spins on $4212 at
+        # 00:9280 and nothing advances the beam while the guest holds the
+        # CPU. A stub would link and then hang.
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c

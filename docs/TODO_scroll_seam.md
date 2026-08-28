@@ -361,15 +361,20 @@ simcity_fiberdrive.obj : error LNK2019: unresolved external symbol
 those targets do not compile -- they use `src/aot_probe.c` as their entry point
 while still pulling in `src/simcity_fiberdrive.c`, which calls it.
 
-**Do not stub it.** The function drains `autoJoyTimer` before handing the guest
-a frame, and its own comment records that skipping this is exactly how the first
-fiber attempt deadlocked: the game spins on `$4212` at 00:9280 and nothing
-advances the beam while the guest holds the CPU. A no-op stub would link and
-then hang. The fix is either to give the probe driver a real implementation or
-to stop linking `simcity_fiberdrive.c` into targets that cannot supply one.
+**FIXED** by the second route: nothing in either target uses the
+`SimCityFiberDrive_*` API -- only `src/main.c` does, and that is not compiled
+into them -- so `src/simcity_fiberdrive.c` was simply dead weight there and is
+no longer linked. All five targets now build and both tools run.
 
-Both targets are `EXCLUDE_FROM_ALL` diagnostics, so nothing else is affected --
-`SimCitySNESRecomp`, `SimCitySNESRecompAOT` and `SimCityFiberTest` all build.
+Stubbing the symbol would have been the wrong fix, and the CMakeLists comment
+says so: it drains `autoJoyTimer` before the guest is handed a frame, and
+skipping that is exactly how the first fiber attempt deadlocked -- the game
+spins on `$4212` at 00:9280 and nothing advances the beam while the guest holds
+the CPU. A stub links and then hangs.
+
+**First run of `SimCityAOTDiff` since it was repaired: cycle counts agree on
+51 of 64 trials.** Nobody has looked at the other 13. That is a tier-accuracy
+question, unrelated to rendering, and worth a session of its own.
 
 ## Upstream submodule: a merge, not a bump
 
