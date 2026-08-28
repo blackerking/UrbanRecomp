@@ -226,6 +226,34 @@ nothing -- and these defects only show while the map is moving, so they cannot
 be caught in a screenshot. Every diagnosis here that needed the user's own city
 depended on it.
 
+## OPEN -- title: the Maxis / SimCity building parts move wrongly
+
+Reported from play 2026-08-27, straight after the light-row fix below. Not yet
+investigated at all; this entry is the report and a starting point, nothing
+more.
+
+The title animates its logo out of building pieces. Those pieces are moving
+wrongly. Which way is wrong -- speed, direction, offset, or only in the
+widescreen margins -- is NOT recorded, so establish that first from a capture
+rather than guessing.
+
+Where to start:
+
+1. `SC_DUMP_DIR=<dir> SC_DUMP_INTERVAL=1` while the title plays, then measure
+   the pieces frame to frame. Interactive capture works now, so a real session
+   can be recorded and analysed.
+2. `SC_LAYER_MASK` to find out WHAT draws them -- bit0 BG1, bit1 BG2, bit2 BG3,
+   bit3 BG4, bit4 OBJ. The light row is OBJ; if the building pieces are OBJ too,
+   `widen_title_lights()` is the only host code touching title sprites and is
+   the first suspect. If they are a background, the margin/clamp path is.
+3. Compare against `SC_WIDESCREEN=0`. If the motion is correct at authentic
+   width, it is ours; if it is wrong there too, it is the guest or the device
+   model, and none of the widescreen code is implicated.
+
+Note the light-row bug found the same day was a host bug in title sprite
+handling, so step 2 is worth doing before anything else. But do not assume it:
+the two may be unrelated.
+
 ## Title lights: fixed 2026-08-27
 
 Reported from play: on the title, the widescreen light row was missing on the
