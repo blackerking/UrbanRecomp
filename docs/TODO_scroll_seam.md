@@ -348,6 +348,58 @@ The extra cell was kept because it is more correct.
 
 `SC_PASSEPARTOUT=0` goes back to the repair -- exact edges, ghosting HUD.
 
+## Build debt found while firming up rc1
+
+`SimCityAOTProbe` and `SimCityAOTDiff` do not link:
+
+```
+simcity_fiberdrive.obj : error LNK2019: unresolved external symbol
+    sc_advance_until_input_ready referenced in SimCityFiberDrive_RunGuestFrame
+```
+
+`sc_advance_until_input_ready()` is defined in `src/main.c` (line ~1580), which
+those targets do not compile -- they use `src/aot_probe.c` as their entry point
+while still pulling in `src/simcity_fiberdrive.c`, which calls it.
+
+**Do not stub it.** The function drains `autoJoyTimer` before handing the guest
+a frame, and its own comment records that skipping this is exactly how the first
+fiber attempt deadlocked: the game spins on `$4212` at 00:9280 and nothing
+advances the beam while the guest holds the CPU. A no-op stub would link and
+then hang. The fix is either to give the probe driver a real implementation or
+to stop linking `simcity_fiberdrive.c` into targets that cannot supply one.
+
+Both targets are `EXCLUDE_FROM_ALL` diagnostics, so nothing else is affected --
+`SimCitySNESRecomp`, `SimCitySNESRecompAOT` and `SimCityFiberTest` all build.
+
+## Upstream submodule: a merge, not a bump
+
+`origin/main` is 16 commits ahead, but our submodule carries **nine local
+commits** on top of the merge base `9d6ad3c` -- not just the coverage hooks:
+
+```
+bedf078 interp_bridge: optional host coverage hooks
+edc35da interp_bridge: bounce and interpreted-step counters
+8b08f0d interp_bridge: SNESRECOMP_REGWRITE_DIAG
+a6a037f interp_bridge: hand a deadline unwind back to the host
+2c06601 interp_bridge: report the deadline when it FIRES
+2a095a1 interp_bridge: pctrace markers, APU bisect switch
+93d4dd1 interp_bridge: two diagnostics for runs that never return
+3dbd292 cfg: add exit_mx_set for callees that exit in several widths
+0183d9a Model COP as a tier-to-LLE call instead of structural poison
+```
+
+They touch the Rust recompiler (`cfg.rs`), the Python lowering and the runtime.
+Upstream's own 16 include `runtime: return on scheduler deadline unwind` and
+`Deliver every raster IRQ, and run unresolved dispatch indices` -- independent
+solutions to the same problems `a6a037f` and friends address. A cherry-pick of
+just the hooks onto `origin/main` conflicts immediately.
+
+So this is a real merge with functional overlap in the runtime, and it wants
+its own regression pass (qualify plus the ten-state comparison) rather than
+being folded in beside rendering work. The prize is
+`PpuWsSetOamLeftHints`/`PpuWsSetOamRightHints`, which would let the OBJ-clip
+pass -- a second full render of every line -- be deleted.
+
 ## Diagnostics available
 
 - `SC_SEAM_FIX=0` turns the repair off.
