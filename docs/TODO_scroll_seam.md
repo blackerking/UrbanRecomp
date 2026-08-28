@@ -226,6 +226,50 @@ nothing -- and these defects only show while the map is moving, so they cannot
 be caught in a screenshot. Every diagnosis here that needed the user's own city
 depended on it.
 
+## OPEN -- audio desynchronises, and has since the project started
+
+Reported from play 2026-08-27 as long-standing: sound drifts out of sync. Never
+investigated. What follows is one cheap measurement and the directions it
+suggests -- not a diagnosis.
+
+### The one number already available
+
+`--qualify` counts emitted audio samples, so the rate can be read without
+building anything:
+
+```
+ 2000 frames: 1067814 samples -> 533.907 samples/frame
+ 6000 frames: 3203431 samples -> 533.905 samples/frame
+
+expected at 32040 Hz:  60.0988 Hz (NTSC SNES) = 533.122
+                       60.000  Hz             = 534.000
+```
+
+The rate is **extremely stable** -- the two runs agree to three decimals, so
+this is not jitter or dropout -- and it sits on 60.000 Hz, not on the SNES's
+60.0988 Hz. Against true NTSC timing that is **+0.147%**, about one second of
+drift every eleven minutes, which is the right order for "gets out of sync"
+rather than "is out of sync".
+
+Whether that is the fault depends on what paces presentation. If the host also
+presents at exactly 60.000 Hz the two agree and the drift is only against real
+hardware; if presentation follows 60.0988, audio and video pull apart at that
+rate. **Establish which before chasing anything else** -- the frame pacing is in
+the SDL loop around `next_frame_deadline`.
+
+### Other threads worth pulling
+
+- The upstream merge brought `Do not clamp APU guest time to one frame`
+  (67e285d) and `guest-time APU in interp tier`. Those are APU timing changes
+  that landed here today, so a before/after comparison is available and cheap:
+  the pre-merge submodule is `bedf078` on the fork.
+- Our own submodule carries `interp_bridge: pctrace markers around runOpcode,
+  and an APU bisect switch` (2a095a1) -- there is already a bisect switch for
+  exactly this class of question.
+- `audio_active_frames` is 1716 of 2000 and 5716 of 6000: 284 silent frames at
+  the start in both, then continuous. Consistent with boot, not a dropout, but
+  worth confirming rather than assuming.
+
 ## OPEN -- title: the Maxis / SimCity building parts move wrongly
 
 Reported from play 2026-08-27, straight after the light-row fix below. Not yet
