@@ -56,6 +56,34 @@ pan. Rendering a line again is exactly reproducible, even as the third pass of
 the frame. So the approach is sound and the fault was in my implementation of
 it -- it is worth retrying, not abandoning.
 
+### Retried with those fixed -- still worse. The pass is NOT the problem.
+
+The retry evaluated the gate once at vblank and carried it, and detected the
+rewrite at the top of the frame so the first affected frame also has a scratch.
+It measured better than the first attempt and still lost to translating:
+
+| | translate-previous | re-render v1 | re-render v2 |
+|---|---|---|---|
+| fast right, left 16 | **1.5%** | 4.0% | 4.0% |
+| diagonal, left 16 | **1.8%** | 10.9% | 8.1% |
+| diagonal, top 16 | **0.8%** | 10.2% | 7.1% |
+| static pixels moved | **3.9%** | 14.5% | 10.4% |
+
+`SC_PASS_DIAG=1` now compares an extra pass against the MAIN render (it used to
+diff two extra passes against each other, neither of them the first, which
+could not have caught a first-render difference). The result: **0 of 100352
+pixels differ**, every frame. The extra pass reproduces the main render
+exactly.
+
+So the rendering mechanism is sound and both failures are in the tilemap swap
+bookkeeping -- which values get restored, for how many frames, and whether the
+strip is sampled from a scratch whose columns were actually swapped. That is
+where a third attempt should look, and it should start by dumping the scratch
+surface next to the main frame and confirming they differ ONLY in the columns
+that were swapped. Do not spend more time on the pass itself.
+
+The older, superseded guess follows.
+
 The most likely culprit, and the thing to check first: that attempt moved the
 change detection AND the `host_map_screen_live()` gate from vblank to the top
 of the frame (`vPos == 0`). If the gate does not read the same at `vPos == 0`
