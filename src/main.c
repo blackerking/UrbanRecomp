@@ -3036,6 +3036,9 @@ static int s_seam_hs_prev, s_seam_vs_prev;
  * scrolled off, otherwise the picture simply snaps to the new content one
  * frame later and the seam reappears displaced rather than removed. */
 static int s_seam_hold_x, s_seam_hold_y;
+/* Which way the map was last travelling, so a paused frame still knows
+ * which edge is trailing, and how long it has been still. */
+static int s_seam_dir_x = 1, s_seam_dir_y = 1, s_seam_idle_x, s_seam_idle_y;
 
 static void ws_fix_scroll_seam(void) {
   static int enabled = -1;
@@ -3081,8 +3084,18 @@ static void ws_fix_scroll_seam(void) {
     const int gx0 = s_ws_extra;              /* guest's left edge, render coords */
     const int gx1 = gx0 + kVideoWidth;
 
-    /* Horizontal: trailing edge is the side the content is leaving by. */
-    if (dx != 0 && dx > -8 && dx < 8) {
+    /* Horizontal: trailing edge is the side the content is leaving by.
+     *
+     * A frame with no movement must NOT abandon the repair. Panning by pushing
+     * the cursor against the edge starts and stops constantly, so dx==0 frames
+     * are common mid-scroll; clearing the hold on one let the stale column pop
+     * straight back into view. Reported from play as the seam still being heavy
+     * when panning by cursor and on the diagonal. With no movement the strip
+     * simply holds its previous pixels -- dx is 0, so nothing translates and
+     * nothing decrements. */
+    if (dx != 0) { s_seam_dir_x = dx > 0 ? 1 : -1; s_seam_idle_x = 0; }
+    else if (++s_seam_idle_x > 12) s_seam_hold_x = 0;
+    if (dx > -8 && dx < 8) {
       /* Check BOTH edge columns, not just the trailing one. The two coincide
        * only when the scroll sits off a tile boundary; exactly at a boundary
        * they differ by one, and testing the wrong one missed the rewrite --
@@ -3094,17 +3107,26 @@ static void ws_fix_scroll_seam(void) {
        * trailing sliver. An 8 px repair left the second column showing through:
        * measured x0-7 at 0% but x8-15 still at 56%, which is why the seam was
        * still plainly visible in play after the first attempt. */
-      if (col_changed[left_col] || col_changed[right_col]) s_seam_hold_x = 16;
+      /* Only ARM a repair near actual movement. Letting dx==0 arm one meant
+       * ordinary map animation armed it on a still screen. */
+      if ((dx != 0 || s_seam_idle_x <= 3) &&
+          (col_changed[left_col] || col_changed[right_col])) s_seam_hold_x = 16;
       if (s_seam_hold_x > 0) {
         const int wdt = s_seam_hold_x;
-        const int x0 = dx > 0 ? gx0 : gx1 - wdt;
-        const int x1 = dx > 0 ? gx0 + wdt : gx1;
+        const int x0 = s_seam_dir_x > 0 ? gx0 : gx1 - wdt;
+        const int x1 = s_seam_dir_x > 0 ? gx0 + wdt : gx1;
         s_seam_hold_x -= dx > 0 ? dx : -dx;
         if (s_seam_hold_x < 0) s_seam_hold_x = 0;
         for (int y = 0; y < kVideoHeight; y++) {
+          /* BOTH axes. This block used to translate by dx only, so on a
+           * DIAGONAL pan it pulled pixels from the wrong row and the repair
+           * itself painted a seam along the top and left -- reported from play
+           * as the seam being clearly visible when scrolling right and down. */
+          const int sy = y + dy;
+          if (sy < 0 || sy >= kVideoHeight) continue;
           uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
           const uint32_t *src =
-              (const uint32_t *)(s_seam_prev + (size_t)y * s_video_pitch);
+              (const uint32_t *)(s_seam_prev + (size_t)sy * s_video_pitch);
           for (int x = x0; x < x1; x++) {
             const int sx = x + dx;
             if (sx >= gx0 && sx < gx1) dst[x] = src[sx];
@@ -3118,14 +3140,20 @@ static void ws_fix_scroll_seam(void) {
     /* Vertical: 32 rows is 256 px against 224 visible, so there is a little
      * slack here that the horizontal axis does not have -- but the game still
      * rewrites a visible row often enough to show the same seam. */
-    if (dy != 0 && dy > -8 && dy < 8) {
-      const int trailing_row = dy > 0 ? ((vs >> 3) & 31)
-                                      : (((vs + kVideoHeight - 1) >> 3) & 31);
-      if (row_changed[trailing_row]) s_seam_hold_y = 8;
+    if (dy != 0) { s_seam_dir_y = dy > 0 ? 1 : -1; s_seam_idle_y = 0; }
+    else if (++s_seam_idle_y > 12) s_seam_hold_y = 0;
+    if (dy > -8 && dy < 8) {
+      /* Symmetric with the horizontal block: sixteen pixels, both edge rows.
+       * This axis was left at eight and a single row when the horizontal one
+       * was widened -- the bottom seam seen when panning down by cursor. */
+      const int top_row = (vs >> 3) & 31;
+      const int bot_row = ((vs + kVideoHeight - 1) >> 3) & 31;
+      if ((dy != 0 || s_seam_idle_y <= 3) &&
+          (row_changed[top_row] || row_changed[bot_row])) s_seam_hold_y = 16;
       if (s_seam_hold_y > 0) {
         const int hgt = s_seam_hold_y;
-        const int y0 = dy > 0 ? 0 : kVideoHeight - hgt;
-        const int y1 = dy > 0 ? hgt : kVideoHeight;
+        const int y0 = s_seam_dir_y > 0 ? 0 : kVideoHeight - hgt;
+        const int y1 = s_seam_dir_y > 0 ? hgt : kVideoHeight;
         s_seam_hold_y -= dy > 0 ? dy : -dy;
         if (s_seam_hold_y < 0) s_seam_hold_y = 0;
         for (int y = y0; y < y1; y++) {
@@ -3134,7 +3162,10 @@ static void ws_fix_scroll_seam(void) {
           uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
           const uint32_t *src =
               (const uint32_t *)(s_seam_prev + (size_t)sy * s_video_pitch);
-          for (int x = gx0; x < gx1; x++) dst[x] = src[x];
+          for (int x = gx0; x < gx1; x++) {
+            const int sx = x + dx;   /* BOTH axes here too */
+            if (sx >= gx0 && sx < gx1) dst[x] = src[sx];
+          }
         }
       }
     } else {
