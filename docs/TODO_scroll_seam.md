@@ -78,9 +78,27 @@ overhang from, now that overlays extend a full cell. Rendering one cell further
 left (`sx - 1`, sampling `+8`) changed the numbers by **exactly nothing**. The
 extra cell was kept because it is more correct.
 
-Next: dump `s_hostmap_px` for consecutive frames via `SC_HOST_MAP_DUMP` and
-check whether the RENDER's left region translates, which separates renderer
-from compositor.
+**Narrowed 2026-08-27: the renderer is not at fault.** Dumping `s_hostmap_px`
+on consecutive frames via `SC_HOST_MAP_DUMP` shows it is cell-granular and
+exact -- frames 80->81 it does not move at all, 81->82 it jumps a full 8 px,
+and at its best shift it matches at **100.0%** in the left, middle and right
+regions alike:
+
+```
+80->81  left +0 100.0%   right +0 100.0%   middle +0 100.0%
+81->82  left +8 100.0%   right +8 100.0%   middle +8 100.0%
+```
+
+So all sub-cell motion comes from the compositor, which samples
+`src[x + fx + 8]` with `fx = hScroll[1] & 7`. The suspicion is a frame where
+the render's cell step and `fx`'s wrap disagree: if the origin advances a cell
+on a different frame from the one where `fx` returns to 0, the sampled window
+jumps 8 px and then back, at exactly the tile cadence the dip shows. The
+`adj_x` reconciliation, bounded to +/-1 cell, can move that origin too.
+
+Why that would hit the left band and not the right, when both sample the same
+buffer with the same expression, is still the open part. Next: log `sx`, `fx`
+and `adj_x` per frame and correlate against the dipping frames.
 
 ### 2. Roof overlay: the horizontal half is unverified
 
