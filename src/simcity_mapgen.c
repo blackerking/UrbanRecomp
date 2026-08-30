@@ -337,7 +337,7 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     sc_mapgen_feature_centre(p, st);    /* $f380 */
     sc_mapgen_feature_path(p, st);      /* $f5b9 */
     sc_mapgen_feature_clusters(p, st);  /* $f311 */
-    /* JSR $f444 -- 65 instructions, not decompiled. */
+    sc_mapgen_shoreline(p, st);         /* $f444 */
     sc_mapgen_feature_scatter(p, st);   /* $f3a3 */
 }
 
@@ -479,6 +479,69 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
             sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
+}
+
+/* ── 01:f444 implemented ───────────────────────────────────────────────────
+ *
+ * The loop structure, which the earlier note did not have:
+ *
+ *     LDA #$0077 / STA $043f          ; x = 119, OUTER
+ *   x_loop ($f44c):
+ *     LDA #$0063 / STA $0441          ; y = 99, INNER
+ *   y_loop ($f452):
+ *     JSR $f8e9 / CMP #$0003 / BNE next   ; only act on cells that are 3
+ *     ... build the 4-bit neighbour mask ...
+ *     LDX $045b / LDA $01f434,X
+ *     CMP #$0001 / BEQ +                  ; table value 1: no variant
+ *     JSL $00824b / LSR A / BCC +         ; else half the time
+ *     CLC / ADC #$0008                    ;   use tile+8
+ *     + JSR $f8af                         ; write it back
+ *   next: DEC $0441 / BPL y_loop
+ *         DEC $043f / BPL x_loop
+ *
+ * So it sweeps every cell and rewrites only the RIM value 3 -- the outline the
+ * disc brushes leave -- into a proper edge tile. Interiors (1) and centres (2)
+ * are untouched, which is why the brushes bother to distinguish rim from fill
+ * in the first place.
+ *
+ * A mask bit is set when the neighbour is EMPTY (0) **or off the map**, so the
+ * map border behaves like open space and coastlines close correctly along the
+ * edges. That equivalence is deliberate, not a bounds-check accident.
+ *
+ * SCAN ORDER MATTERS: x descends in the outer loop and y in the inner, so the
+ * sweep is column-major from the bottom-right. Since the pass both reads and
+ * writes the same buffer, a cell fitted early is visible to cells fitted later
+ * -- run it row-major, or ascending, and the result differs. It also consumes
+ * one PRNG step per rim cell whose table entry is not 1, so the order changes
+ * the stream as well as the map. */
+void sc_mapgen_shoreline(ScMapGenPrng *p, ScMapGenState *st) {
+    static const unsigned char fit[16] = {
+        0x01,0x07,0x0A,0x09,0x08,0x01,0x0B,0x01,
+        0x05,0x04,0x01,0x01,0x06,0x01,0x01,0x01,
+    };
+    static const int ndx[4] = { -1, 0, +1, 0 };   /* $01f42c */
+    static const int ndy[4] = {  0, +1, 0, -1 };  /* $01f430 */
+
+    for (int x = SC_MAPGEN_W - 1; x >= 0; x--) {
+        for (int y = SC_MAPGEN_H - 1; y >= 0; y--) {
+            if (sc_mapgen_read_cell(st, (unsigned)x, (unsigned)y) != 3) continue;
+
+            unsigned mask = 0;
+            for (int i = 3; i >= 0; i--) {        /* X = 3..0, ASL before each */
+                const int nx = x + ndx[i], ny = y + ndy[i];
+                mask <<= 1;
+                if (!sc_mapgen_in_bounds(nx, ny) ||
+                    sc_mapgen_read_cell(st, (unsigned)nx, (unsigned)ny) == 0)
+                    mask |= 1u;                    /* off-map counts as empty */
+            }
+
+            unsigned tile = fit[mask & 15u];
+            if (tile != 1) {
+                if (sc_mapgen_prng_step(p) & 1u) tile += 8u;   /* LSR / BCC */
+            }
+            sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, (uint16_t)tile);
+        }
+    }
 }
 
 /* ── The path walk ─────────────────────────────────────────────────────────
@@ -690,7 +753,7 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
     return y * SC_MAPGEN_W + x;
 }
 
-/* ── 01:f444 -- READ but not implemented ───────────────────────────────────
+/* ── 01:f444 -- the shoreline pass ─────────────────────────────────────────
  *
  * This one is a different kind of routine from the other four, and worth
  * writing down before it is coded, because implementing it as "another feature

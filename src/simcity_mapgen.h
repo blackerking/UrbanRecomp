@@ -106,4 +106,8 @@ void sc_mapgen_stamp_blob_small(ScMapGenState *st);
  * base bearing 1 step in 11, repeat until the disc would leave the map. */
 void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f444 -- sweep every cell, rewrite rim cells (3) as fitted edge tiles.
+ * Column-major from the bottom-right, and it reads the buffer it writes. */
+void sc_mapgen_shoreline(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif
