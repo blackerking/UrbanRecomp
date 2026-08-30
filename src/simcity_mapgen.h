@@ -97,4 +97,8 @@ void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy);
 uint16_t sc_mapgen_read_cell(const ScMapGenState *st, unsigned x, unsigned y);
 void sc_mapgen_write_cell(ScMapGenState *st, unsigned x, unsigned y, uint16_t v);
 
+/* 01:f794 -- the 6x6 disc, drawn 1 time in 4. Unlike the 9x9 it has no centre
+ * marker at all. */
+void sc_mapgen_stamp_blob_small(ScMapGenState *st);
+
 #endif

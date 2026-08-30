@@ -289,7 +289,7 @@ void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st) {
             st->cur_x = (uint16_t)(cx + sc_mapgen_rand_below(p, 0x000c) - 6u);
             st->cur_y = (uint16_t)(cy + sc_mapgen_rand_below(p, 0x000c) - 6u);
             if ((sc_mapgen_prng_step(p) & 0x0003u) == 0) {
-                /* JSR $f794 -- not decompiled. */
+                sc_mapgen_stamp_blob_small(st);   /* $f794: the 6x6 disc */
             } else {
                 sc_mapgen_stamp_blob(st);   /* $f71d: the 9x9 disc */
             }
@@ -456,8 +456,7 @@ void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy) {
  * anchor goes.
  *
  * Note the loops run 8 down to 0 INCLUSIVE (BPL, not BNE), so it really is
- * 9x9 and not 8x8. $f794, the 1-in-4 alternative draw, is still not
- * decompiled -- presumably a different brush. */
+ * 9x9 and not 8x8 -- and the same is true of $f794's 6x6 below. */
 enum { SC_MAPGEN_BRUSH = 9 };
 extern const unsigned char sc_mapgen_brush[81];
 const unsigned char sc_mapgen_brush[81] = {
@@ -478,6 +477,42 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
             sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
+}
+
+/* ── The small brush ───────────────────────────────────────────────────────
+ *
+ * 01:f794, the 1-in-4 alternative to the 9x9 disc. Identical in shape to
+ * 01:f71d but with 5 and 6 where that has 8 and 9, so a 6x6 brush indexed
+ * b*6 + a from a table at $01f770. Both index BYTE tables -- neither does the
+ * ASL that the map itself needs.
+ *
+ * That table is a circle too, and a perfectly balanced one:
+ *
+ *     . . o o . .        0  outside   12 cells
+ *     . o # # o .        3  rim       12
+ *     o # # # # o        1  interior  12
+ *     o # # # # o
+ *     . o # # o .
+ *     . . o o . .
+ *
+ * The difference that matters: THERE IS NO CENTRE MARKER. The 9x9 disc has a
+ * single value 2 at its centre; this one has none, so a small blob never plants
+ * the marker and never triggers the border-degradation rule in 01:f7e7. The
+ * two draws are not the same shape at different sizes -- they differ in kind. */
+extern const unsigned char sc_mapgen_brush_small[36];
+const unsigned char sc_mapgen_brush_small[36] = {
+    0,0,3,3,0,0,
+    0,3,1,1,3,0,
+    3,1,1,1,1,3,
+    3,1,1,1,1,3,
+    0,3,1,1,3,0,
+    0,0,3,3,0,0,
+};
+
+void sc_mapgen_stamp_blob_small(ScMapGenState *st) {
+    for (int a = 5; a >= 0; a--)
+        for (int b = 5; b >= 0; b--)
+            sc_mapgen_draw_cell(st, sc_mapgen_brush_small[b * 6 + a], a, b);
 }
 
 /* ── The 8-way move ────────────────────────────────────────────────────────
