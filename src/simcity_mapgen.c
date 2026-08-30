@@ -351,6 +351,27 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── Cell read and write ───────────────────────────────────────────────────
+ *
+ * 01:f8e9 reads and 01:f8af writes, and they are exact mirrors:
+ *
+ *     y * 120 via the hardware multiplier, + x, ASL for the word array
+ *     read:   LDA $7f0200,X / AND #$03ff
+ *     write:  STA $7f0200,X
+ *
+ * Note the ASYMMETRY: the read masks to 10 bits, the write does not. So the
+ * upper 6 bits are flag space that the generator never sets but the read
+ * always discards -- which is consistent with 03:cf82's later copy masking
+ * with AND #$03ff as it moves the map on. Anything reproducing this must mask
+ * on read only, or it will disagree the moment something else sets a flag. */
+uint16_t sc_mapgen_read_cell(const ScMapGenState *st, unsigned x, unsigned y) {
+    return (uint16_t)(st->map[sc_mapgen_cell_index(x, y)] & 0x03ffu);
+}
+
+void sc_mapgen_write_cell(ScMapGenState *st, unsigned x, unsigned y, uint16_t v) {
+    st->map[sc_mapgen_cell_index(x, y)] = v;      /* unmasked, as the ROM does */
+}
+
 /* ── The per-cell draw ─────────────────────────────────────────────────────
  *
  * 01:f7e7, which turns one brush value into one map cell. The whole routine:
@@ -380,8 +401,8 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *    is written as 1 instead. That is why the border cells never carry the
  *    marker, and it is a rule you would not guess from the brush table alone.
  *
- * $f8af is the cell store, the mirror of the $f8e9 read, and is the last piece
- * of this path still untranscribed. */
+ * With $f8af transcribed the blob path is complete and runnable end to end:
+ * cluster -> jittered point -> 9x9 disc -> this conditional write. */
 void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy) {
     if (brush == 0) return;                       /* outside the disc */
     const int x = (int)st->cur_x + ox;            /* $0447 + $043b */
@@ -393,10 +414,10 @@ void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy) {
         /* The centre marker is not placed on the border; it becomes a 1. */
         if (x == 0 || x == SC_MAPGEN_W || y == 0 || y == SC_MAPGEN_H) value = 1;
     } else {
-        const unsigned existing = 0;   /* JSR $f8e9 -- read $7F0200 */
+        const unsigned existing = sc_mapgen_read_cell(st, (unsigned)x, (unsigned)y);
         if (existing == 1 || existing == 2) return;   /* protected, leave it */
     }
-    (void)value;   /* JSR $f8af -- the store, not transcribed */
+    sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, (uint16_t)value);
 }
 
 /* ── The blob brush ────────────────────────────────────────────────────────

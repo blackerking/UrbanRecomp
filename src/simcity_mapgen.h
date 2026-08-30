@@ -41,6 +41,8 @@ typedef struct ScMapGenState {
     uint16_t dir;     /* $045f and $0461 -- eight-way direction */
     uint16_t cx;      /* $043f -- cluster centre */
     uint16_t cy;      /* $0441 */
+    /* The map itself, $7F0200 in the guest: 120 x 100 words, row-major. */
+    uint16_t map[SC_MAPGEN_CELLS];
 } ScMapGenState;
 
 /* 01:f877 -- 0..n inclusive, via the hardware multiplier. One PRNG step. */
@@ -89,5 +91,10 @@ void sc_mapgen_stamp_blob(ScMapGenState *st);
 /* 01:f7e7 -- write one brush value at (cur + offset). Existing 1 and 2 are
  * protected; a centre marker on the border degrades to 1. */
 void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy);
+
+/* 01:f8e9 / 01:f8af -- read and write a cell. The read masks to 10 bits and
+ * the write does not; that asymmetry is the ROM's, not an oversight. */
+uint16_t sc_mapgen_read_cell(const ScMapGenState *st, unsigned x, unsigned y);
+void sc_mapgen_write_cell(ScMapGenState *st, unsigned x, unsigned y, uint16_t v);
 
 #endif
