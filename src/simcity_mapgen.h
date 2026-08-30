@@ -67,4 +67,11 @@ void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st);
  * steps. */
 void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f843 -- the generator's own bounds test. Coordinates arrive jittered and
+ * can be negative, so the signed check is load-bearing. */
+int sc_mapgen_in_bounds(int x, int y);
+
+/* 01:f8e9's row-offset computation: the map is row-major, stride 120. */
+unsigned sc_mapgen_cell_index(unsigned x, unsigned y);
+
 #endif

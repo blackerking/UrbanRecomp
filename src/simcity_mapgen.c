@@ -341,6 +341,51 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── Bounds check ──────────────────────────────────────────────────────────
+ *
+ * 01:f843. Carry SET means out of range, which is the opposite of the usual
+ * reading and is what $f444 branches on:
+ *
+ *     LDA $0453 / BMI out          ; x negative
+ *     CMP #$0078 / BCS out         ; x >= 120
+ *     LDA $0455 / BMI out          ; y negative
+ *     CMP #$0064 / BCS out         ; y >= 100
+ *     CLC / RTS                    ; in range
+ *   out: SEC / RTS
+ *
+ * The map is 120 x 100 -- now confirmed a THIRD independent way. The power
+ * bitmap at 03:b0f8 bounds it at 12000 bits, the scatter feature draws
+ * rand(0..119) by rand(0..99), and here the bounds check itself uses 0x78 and
+ * 0x64. Three unrelated routines agreeing is about as settled as this gets.
+ *
+ * The signed test matters: coordinates reach here already jittered (the
+ * clustered-blob feature can push +/-6 past an edge), so negatives are
+ * expected, not defensive. */
+int sc_mapgen_in_bounds(int x, int y) {
+    return x >= 0 && x < SC_MAPGEN_W && y >= 0 && y < SC_MAPGEN_H;
+}
+
+/* ── Cell address ──────────────────────────────────────────────────────────
+ *
+ * 01:f8e9 begins by computing the row offset with the hardware multiplier:
+ *
+ *     SEP #$20 / REP #$10
+ *     LDA $0451 / STA $4202        ; WRMPYA = y
+ *     LDA #$78  / STA $4203        ; WRMPYB = 120  -> starts y * 120
+ *     PHA / PLA / NOP              ; the mandatory wait
+ *     LDA $4217 / XBA / LDA $4216  ; the 16-bit product
+ *
+ * So the map is row-major with a stride of 120, and the cell index is
+ * y * 120 + x. That is the same 8x8 multiplier trick 01:f877 uses for its
+ * range draw -- this ROM leans on it wherever a multiply is needed.
+ *
+ * The remainder of $f8e9 -- adding x and fetching the tile -- is not
+ * transcribed yet, which is why this is an index helper and not the classifier
+ * $f444 actually calls. */
+unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
+    return y * SC_MAPGEN_W + x;
+}
+
 /* ── 01:f444 -- READ but not implemented ───────────────────────────────────
  *
  * This one is a different kind of routine from the other four, and worth
