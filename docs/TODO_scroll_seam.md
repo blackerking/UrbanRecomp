@@ -268,13 +268,42 @@ in-game profile will look different, and the simulation routines that matter
 for "slow calculation" during play have NOT been profiled yet. Do that before
 choosing what to HLE second.
 
+### BLOCKER: save state + fiber hangs
+
+Loading a save state while the fiber tier is active hangs the guest. Isolated:
+
+| | result |
+|---|---|
+| AOT + save state, no fiber | PASS |
+| AOT + fiber, no save state | PASS |
+| **AOT + fiber + save state** | **hang at `$05935A`** |
+
+`qualify: opcode guard tripped at frame 60 (hang/runaway)`, with
+`[interp_cap] entry=$0080B2 last=$05935A op=$D0 m=1 x=0 db=$03 sp=$1FF5`. `$D0`
+is `BNE`, so it is spinning in a tight loop in the `05:93xx` block-copy region.
+
+**This matters beyond itself: it blocks in-game profiling**, because the only
+cheap way into gameplay is a save state. The boot profile below is therefore
+still the only valid one.
+
+A profile taken during the hang shows `05:93xx` at 97.7% of 62M interpreted
+opcodes. That is the runaway loop, NOT gameplay, and must not be used to choose
+HLE targets.
+
+Likely area: the save state restores guest CPU and WRAM, but the fiber tier
+carries its own resume state (`s_lle_resume_pc24`, the fiber stack, the paired
+return context) which the restore does not reconcile.
+
 ### Order of work
 
-1. Profile in-game, not just boot. Same switch, from a save state.
-2. HLE the decompressor -- highest measured share, and the native code exists.
-3. HLE the two `MVN` block copies -- trivial, and 27.7% at boot.
-4. Map generation (below) is the third candidate and the one that unlocks
-   *changing* generation rather than only speeding it up.
+1. Fix save state + fiber, or find another route into gameplay -- until then
+   no in-game profile is possible and HLE targets can only be chosen from boot.
+2. Profile in-game.
+3. HLE the decompressor -- highest measured share at boot, and the native code
+   already exists and is byte-exact.
+4. HLE the two `MVN` block copies -- trivial, and 27.7% at boot.
+5. Map generation (below) is the candidate that unlocks *changing* generation
+   rather than only speeding it up.
 
 ## OPEN -- map generation on decompiled code
 
