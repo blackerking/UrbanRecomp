@@ -1508,6 +1508,39 @@ static void apply_power_fix(void) {
  * bitmaps through the bridge PC hook. Takes the PC and widths as arguments
  * rather than reading g_cpu, because in fiber mode g_cpu never executes. */
 static void sc_note_executed_pc(uint32_t pc24, int mf, int xf) {
+  /* SC_INTERP_PROFILE=1: where does interpreted time actually go?
+   *
+   * With SC_FIBER the AOT tier runs compiled bodies, but a 600-frame qualify
+   * still interprets ~2.8M opcodes against 5263 bounces -- so the interpreter
+   * carries most of the work, and that mass is what a native HLE would remove.
+   * This buckets interpreted PCs by 256 bytes so the hot routines can be
+   * ranked and picked off. Only fires in AOT-linked targets; the interp816
+   * build never calls this hook. */
+  {
+    static int prof = -1;
+    if (prof < 0) { const char *e = getenv("SC_INTERP_PROFILE"); prof = (e && *e) ? 1 : 0; }
+    if (prof) {
+      static uint32_t bucket[256 * 256];   /* bank<<8 | (addr>>8) */
+      static unsigned long long total;
+      const unsigned idx = ((pc24 >> 16) & 0xffu) << 8 | ((pc24 >> 8) & 0xffu);
+      bucket[idx]++;
+      if (++total % 2000000ULL == 0) {
+        unsigned top[12] = {0};
+        for (unsigned i = 0; i < 256u * 256u; i++) {
+          for (int k = 0; k < 12; k++)
+            if (bucket[i] > bucket[top[k]]) {
+              for (int j = 11; j > k; j--) top[j] = top[j - 1];
+              top[k] = i; break;
+            }
+        }
+        fprintf(stderr, "[profile] %llu interpreted opcodes; hottest 256-byte pages:\n", total);
+        for (int k = 0; k < 12; k++)
+          fprintf(stderr, "   %02X:%02Xxx  %9u  %5.1f%%\n",
+                  top[k] >> 8, top[k] & 0xff, bucket[top[k]],
+                  100.0 * (double)bucket[top[k]] / (double)total);
+      }
+    }
+  }
   const uint8_t bank = (uint8_t)((pc24 >> 16) & 0xff);
   const uint16_t pc  = (uint16_t)(pc24 & 0xffff);
   if (s_pc_bitmap_bank >= 0 && bank == s_pc_bitmap_bank && pc >= 0x8000 &&

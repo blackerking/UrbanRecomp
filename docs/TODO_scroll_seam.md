@@ -226,6 +226,56 @@ nothing -- and these defects only show while the map is moving, so they cannot
 be caught in a screenshot. Every diagnosis here that needed the user's own city
 depended on it.
 
+## GOAL -- move the slow work off the emulated CPU, via fiber + HLE
+
+The mechanism already exists and is documented in `src/simcity_hle.c`: routines
+declared `hle_func` in the recompiler config are replaced by native C. Today
+exactly one is -- `00:930d`, wait-for-vblank.
+
+Two constraints shape everything:
+
+- **HLE is AOT-only.** `simcity_hle.c` is "shared by every AOT-linked target";
+  `SimCitySNESRecomp`, the interp816 build actually played, never sees it.
+- **Compiled bodies only run under `SC_FIBER=1`.** Without it the AOT target is
+  a pure interpreter and reports `bounces=0`. It is guarded to the US ROM by
+  fingerprint, so other regions stay playable on the interpreter.
+
+### Where the time actually goes (measured)
+
+`SC_INTERP_PROFILE=1` buckets interpreted PCs by 256-byte page. With
+`SC_FIBER=1` over 900 frames of boot -- `bounces=5263` against
+`interp_steps=2,790,629`, so the interpreter still carries almost everything:
+
+```
+00:91xx   45.3%      00:80xx    6.6%
+05:93xx   27.7%      00:90xx    3.8%
+00:92xx   16.2%      rest      <1%
+```
+
+Three pages are 89% of it, and both clusters are ideal HLE candidates:
+
+- **`00:90xx`-`92xx`, 65.3% together -- the LC_LZ5 decompressor.** `00:90dd` is
+  its entry and `00:926d` handles its source-bank crossing, so the hot pages
+  are its inner loops. **A byte-exact native reimplementation already exists**
+  in `tools/extract_graphics.py`, verified against a live run. See
+  `docs/REFERENCE_map_format.md`.
+- **`05:93xx`, 27.7% -- a block copy.** `05:9304` is `MVN $7f,$7e` moving 32768
+  bytes `$7E8000` -> `$7F0000`, with a second at `05:9329`. That is a `memcpy`
+  being executed one byte at a time on the emulated CPU.
+
+**Caveat: this profile is boot**, which is decompression-heavy by nature. An
+in-game profile will look different, and the simulation routines that matter
+for "slow calculation" during play have NOT been profiled yet. Do that before
+choosing what to HLE second.
+
+### Order of work
+
+1. Profile in-game, not just boot. Same switch, from a save state.
+2. HLE the decompressor -- highest measured share, and the native code exists.
+3. HLE the two `MVN` block copies -- trivial, and 27.7% at boot.
+4. Map generation (below) is the third candidate and the one that unlocks
+   *changing* generation rather than only speeding it up.
+
 ## OPEN -- map generation on decompiled code
 
 Goal: generate maps natively rather than by running guest code, so generation
