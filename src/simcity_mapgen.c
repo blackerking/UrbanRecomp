@@ -235,12 +235,49 @@ void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
     st->cur_y = st->y0;
 }
 
+/* ── The generator itself ──────────────────────────────────────────────────
+ *
+ * 01:f1ed is a JSL wrapper; 01:f1f1 is the body:
+ *
+ *     LDA $b3 / AND #$7f / STA $b1        ; clear bit 7 of $b1 while generating
+ *     JSL $00824b / AND #$00ff            ; one PRNG step, low byte
+ *     CMP #$0056 / BCS +                  ; 0x56 = 86 of 256
+ *     JSR $f22c / BRA done                ;   below -> the alternative map
+ *   + JSL $0094bc                         ;   at or above -> the feature chain
+ *     JSR $f380                           ;     centre point
+ *     JSR $f5b9                           ;     path through the centre
+ *     JSR $f311
+ *     JSR $f444
+ *     JSR $f3a3                           ;     scatter
+ *   done:
+ *     LDA $b3 / ORA #$80 / STA $b1        ; set bit 7 again
+ *
+ * So 86/256 = 33.6% of maps take the `$f22c` path and the other 66.4% are
+ * built from the five features IN THIS ORDER. That ordering matters as much as
+ * the routines: each one consumes PRNG steps, so running them in a different
+ * order gives a different map from the same seed even if every routine is
+ * individually right.
+ *
+ * The `$b1` bit-7 bracket around the whole thing looks like a
+ * generation-in-progress flag; it is reproduced because it is cheap, not
+ * because its effect is understood. */
+void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
+    const unsigned pick = sc_mapgen_prng_step(p) & 0x00ffu;
+    if (pick < 0x0056u) {
+        /* JSR $f22c -- the 33.6% alternative, 86 instructions, not decompiled. */
+        return;
+    }
+    /* JSL $0094bc -- not decompiled; runs before the chain. */
+    sc_mapgen_feature_centre(p, st);    /* $f380 */
+    sc_mapgen_feature_path(p, st);      /* $f5b9 */
+    /* JSR $f311 -- 45 instructions, not decompiled. */
+    /* JSR $f444 -- 65 instructions, not decompiled. */
+    sc_mapgen_feature_scatter(p, st);   /* $f3a3 */
+}
+
 /* ── Not yet decompiled ────────────────────────────────────────────────────
  *
- * 01:f1ed  dispatcher. Draws a byte from the PRNG and branches: roughly a
- *          third of the time to $f22c, otherwise through a chain of five
- *          feature routines. This is the evidence that generation is genuinely
- *          procedural rather than a table of prebuilt maps.
+ * 01:f1ed  DONE (sc_mapgen_generate). The split is 86/256 = 33.6% to $f22c.
  *
  *          01:f380   DONE (sc_mapgen_feature_centre)
  *          01:f877   DONE (sc_mapgen_rand_below)

@@ -55,4 +55,10 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st);
  * itself ($f600) is not decompiled yet. One PRNG step. */
 void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f1f1 -- the generator. One PRNG step decides the path: 86/256 of maps go
+ * to $f22c (not decompiled), the rest are built from the five features in a
+ * fixed order. The order is part of the contract, since each consumes PRNG
+ * steps. */
+void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif
