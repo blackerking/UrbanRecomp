@@ -38,7 +38,8 @@ typedef struct ScMapGenState {
     uint16_t count;   /* $043f -- scatter loop counter */
     uint16_t px;      /* $044b -- placement x */
     uint16_t py;      /* $044d -- placement y */
-    uint16_t dir;     /* $045f and $0461 -- eight-way direction */
+    uint16_t dir_base; /* $045f -- the bearing the walk returns to */
+    uint16_t dir_cur;  /* $0461 -- the wandering heading */
     uint16_t cx;      /* $043f -- cluster centre */
     uint16_t cy;      /* $0441 */
     /* The map itself, $7F0200 in the guest: 120 x 100 words, row-major. */
@@ -100,5 +101,9 @@ void sc_mapgen_write_cell(ScMapGenState *st, unsigned x, unsigned y, uint16_t v)
 /* 01:f794 -- the 6x6 disc, drawn 1 time in 4. Unlike the 9x9 it has no centre
  * marker at all. */
 void sc_mapgen_stamp_blob_small(ScMapGenState *st);
+
+/* 01:f600 -- stamp a 9x9 disc, wander +/-1 half the time, snap back to the
+ * base bearing 1 step in 11, repeat until the disc would leave the map. */
+void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st);
 
 #endif

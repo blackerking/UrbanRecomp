@@ -241,12 +241,14 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st) {
  * $0457/$0459 are the centre written by 01:f380, so this feature depends on
  * that one having run. */
 void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
-    st->dir = (uint16_t)(sc_mapgen_prng_step(p) & 0x0003u);
-    /* JSR $f600 -- the walk itself, not yet decompiled. */
+    st->dir_base = (uint16_t)(sc_mapgen_prng_step(p) & 0x0003u);
+    st->dir_cur = st->dir_base;
+    sc_mapgen_path_walk(p, st);                 /* JSR $f600 */
     st->cur_x = st->x0;
     st->cur_y = st->y0;
-    st->dir ^= 0x0004u;
-    /* JSR $f600 again. */
+    st->dir_base ^= 0x0004u;                    /* the exact reverse bearing */
+    st->dir_cur = st->dir_base;
+    sc_mapgen_path_walk(p, st);                 /* JSR $f600 again */
     st->cur_x = st->x0;
     st->cur_y = st->y0;
 }
@@ -477,6 +479,58 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
             sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
+}
+
+/* ── The path walk ─────────────────────────────────────────────────────────
+ *
+ * 01:f600, the walk 01:f5b9 runs twice (out, then back the opposite way):
+ *
+ *   loop:
+ *     x = $043b + 4 / y = $043d + 4 -> $0453,$0455
+ *     JSR $f843 / BCS done            ; stop when the DISC would leave the map
+ *     JSR $f71d                       ; stamp the 9x9 disc here
+ *     JSL $00824b / LSR A / BCC skip  ; bit 0: half the time, no turn
+ *       LSR A / BCS -                 ; bit 1: which way
+ *       INC $0461 / BRA skip          ;   turn one way
+ *     - DEC $0461                     ;   turn the other
+ *   skip:
+ *     LDA #$000a / JSR $f877 / BNE +  ; 1 in 11
+ *     LDA $045f / STA $0461           ;   snap the heading back to the base
+ *     + LDA $0461 / JSR $f6ae         ; step one cell
+ *     BRA loop
+ *
+ * So the path is a THICK line -- a 9x9 disc stamped at every step, not a
+ * one-cell trail -- that wanders by +/-1 compass point half the time and, one
+ * step in eleven, snaps back to the direction it started with. That is what
+ * keeps a river meandering without losing its way across the map.
+ *
+ * Two details worth pinning down:
+ *
+ * - The bounds check is on (x+4, y+4), the disc's far corner, NOT the walk
+ *   position. So it stops while the whole brush still fits, and the path never
+ *   gets clipped at the edge.
+ * - $045f is the BASE heading and $0461 the current one. 01:f5b9 sets both,
+ *   then flips both with EOR #$0004 for the return leg -- so the second pass
+ *   wanders around the exact reverse bearing.
+ *
+ * PRNG cost is 2 per step (the turn draw, and the 1-in-11 via $f877) and the
+ * step count is data-dependent, since it runs until the disc would leave the
+ * map. */
+void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st) {
+    for (;;) {
+        if (!sc_mapgen_in_bounds((int)st->cur_x + 4, (int)st->cur_y + 4)) return;
+        sc_mapgen_stamp_blob(st);                       /* JSR $f71d */
+
+        const uint16_t r = sc_mapgen_prng_step(p);
+        if (r & 1u) {                                   /* LSR / BCC skip */
+            if (r & 2u) st->dir_cur--;                  /* LSR / BCS -> DEC */
+            else        st->dir_cur++;                  /*             INC */
+        }
+        if (sc_mapgen_rand_below(p, 0x000a) == 0)       /* 1 in 11 */
+            st->dir_cur = st->dir_base;                 /* LDA $045f / STA $0461 */
+
+        sc_mapgen_move(st, st->dir_cur);                /* JSR $f6ae */
+    }
 }
 
 /* ── The small brush ───────────────────────────────────────────────────────
