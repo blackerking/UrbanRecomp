@@ -376,9 +376,27 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * shoreline / edge fitting -- the thing that makes coastlines join up -- with a
  * random variant for visual variety.
  *
- * $01f42c and $01f430 are the four dx/dy deltas; $01f434 is the 16-entry
- * mask-to-tile table. All three need reading out of the ROM before this can be
- * implemented, and none of them is in docs/ROM_MAP.md yet.
+ * THE THREE TABLES, read out of the US ROM (LoROM, no copier header):
+ *
+ *     $01f42c  dx   FF 00 01 00   =  -1  0 +1  0
+ *     $01f430  dy   00 01 00 FF   =   0 +1  0 -1
+ *
+ * so the four neighbours are W, S, E, N in table order. The scan runs X = 3
+ * down to 0 (DEC $0443 / BPL) and does ASL $045b BEFORE each possible INC, so
+ * the FIRST neighbour visited ends up in the HIGH bit: the mask reads N E S W
+ * from bit 3 down.
+ *
+ *     $01f434  mask -> tile, 16 entries indexed by that mask:
+ *
+ *       mask 0123456789ABCDEF
+ *       tile 01 07 0A 09 08 01 0B 01 05 04 01 01 06 01 01 01
+ *
+ * Eight of the sixteen map to tile 01, which reads as "nothing special here";
+ * the other eight are the genuine edge and corner pieces. Note masks 5 and A --
+ * the two diagonal-opposite pairs -- both fall back to 01, which is what a
+ * four-neighbour scheme has to do since it cannot express a diagonal.
+ *
+ * None of the three was in docs/ROM_MAP.md; they are added there too.
  *
  * The PRNG cost is DATA-DEPENDENT here, unlike every other routine so far: one
  * step per cell that reaches the coin toss, i.e. it depends on the map built so
