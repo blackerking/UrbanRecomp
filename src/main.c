@@ -5393,6 +5393,43 @@ static int run_qualification(uint64_t frames) {
 }
 
 int main(int argc, char **argv) {
+  /* SC_MAPGEN_SELFTEST=<index>: run the decompiled generator for one map index
+   * and write the 12000-cell result to SC_MAPGEN_OUT, then exit. No ROM, no
+   * emulation -- this is the native generator alone, so a match against a map
+   * dumped from the guest means the decompilation is right.
+   *
+   * SC_MAPGEN_CARRY and SC_MAPGEN_A exist because 03:d840's entry carry and
+   * its entry A are genuinely unknown -- the disassembly cannot show either --
+   * so they are swept rather than assumed. */
+  { const char *st = getenv("SC_MAPGEN_SELFTEST");
+    if (st && *st) {
+      const char *outp = getenv("SC_MAPGEN_OUT");
+      const char *cs = getenv("SC_MAPGEN_CARRY");
+      const char *as = getenv("SC_MAPGEN_A");
+      const unsigned idx = (unsigned)strtoul(st, NULL, 0);
+      static ScMapGenState gs;
+      ScMapGenPrng pr;
+      sc_mapgen_seed(&pr, (uint16_t)(as ? strtoul(as, NULL, 0) : 0u),
+                     (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
+                     (uint8_t)((idx >> 16) & 0xff),
+                     (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u));
+      sc_mapgen_generate(&pr, &gs);
+      if (outp && *outp) {
+        FILE *f = fopen(outp, "wb");
+        if (f) { fwrite(gs.map, 2, SC_MAPGEN_CELLS, f); fclose(f); }
+      }
+      { unsigned hist[64] = {0}, nz = 0;
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          const unsigned v = gs.map[i] & 0x3ffu;
+          if (v) nz++;
+          if (v < 64) hist[v]++;
+        }
+        fprintf(stderr, "[selftest] idx=%u nonzero=%u  0:%u 1:%u 2:%u 3:%u"
+                        " 20:%u 21:%u 24:%u 27:%u\n",
+                idx, nz, hist[0], hist[1], hist[2], hist[3],
+                hist[0x14], hist[0x15], hist[0x18], hist[0x1b]); }
+      return 0;
+    } }
   /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
    *
    * All five regions are 512KB and all five pass --qualify 600 unchanged on

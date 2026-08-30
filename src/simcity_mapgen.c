@@ -950,6 +950,48 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  *          upload side, not generation proper -- a native generator writes the
  *          cells directly and does not need it.
  *
+ * ── FIRST COMPARISON AGAINST A REAL MAP ───────────────────────────────────
+ *
+ * SC_MAPGEN_SELFTEST=<index> runs this generator alone -- no ROM, no
+ * emulation -- and writes the 12000 cells to SC_MAPGEN_OUT.
+ *
+ * For index 0, against savestate_5 read at $7F0200:
+ *
+ *              ours     golden
+ *     value 0   9303      7742
+ *     value 1   1987      1654
+ *     value 2    218       183
+ *     0x18         0       376
+ *     0x21         0       365
+ *
+ * The 0/1/2 counts are the right order of magnitude, and 2 -- the centre
+ * marker, written by exactly one rule -- is within 20%. So the blob machinery
+ * is doing something close to right.
+ *
+ * But WE NEVER PRODUCE ANY VALUE ABOVE 3, and the golden map has 37 distinct
+ * values including 0x18 and 0x21. Sweeping the two unknown seeding inputs
+ * (SC_MAPGEN_CARRY, SC_MAPGEN_A over 8 combinations) changes the counts and
+ * even flips which branch is taken -- carry=0 A=0x8570 takes the feature chain
+ * where the rest take the framed map -- but none produces a single cell above
+ * 3. That is not a tuning gap, it is a missing stage.
+ *
+ * The contradiction to resolve: 01:f502 fits cells in class 0x14..0x25, and
+ * the scatter feature calls it. So by the time it runs, cells in that range
+ * must already exist -- yet every write this file makes comes from a brush
+ * (1, 2, 3) or a fit table (1, 4..0x13 with the +8 variant). Nothing reaches
+ * 0x14.
+ *
+ * Two candidates, and they are distinguishable:
+ *
+ *  a) A translation stage between the generator's classes and terrain tile
+ *     ids, which the captured map is downstream of. 03:cf82's masked copy is
+ *     the obvious suspect, and $0094bc -- called by the dispatcher before the
+ *     chain, still not read -- is another.
+ *  b) The brushes do not write raw 1/2/3 after all, and 01:f7e7's TXA writes
+ *     something this transcription got wrong.
+ *
+ * Read $0094bc first; it is small and it runs at exactly the right moment.
+ *
  * ── Verification, which comes before any of that ───────────────────────────
  *
  * None of this is worth anything until a seed produces an identical map. The
