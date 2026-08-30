@@ -6,11 +6,10 @@
  * first; only once a seed yields an identical map does deviating from it mean
  * anything.
  *
- * STATUS: the PRNG and the seeding are done and are transcribed from the
- * disassembly below. The terrain feature routines are NOT started. Nothing
- * here is wired into the host yet, and nothing has been verified against the
- * guest -- see "Verification" at the bottom, which is the next piece of work
- * and the one that makes the rest trustworthy.
+ * STATUS: the PRNG is decompiled and VERIFIED against the running guest --
+ * 14 of 14 sampled state transitions reproduced exactly, one step apart. The
+ * seeding is decompiled but NOT verified (its entry carry is still unknown).
+ * The terrain feature routines are not started.
  *
  * Map geometry: 120 x 100 = 12000 cells. Confirmed independently by the power
  * bitmap at 03:b0f8, whose CPX #$05dc bounds it at 1500 bytes = 12000 bits.
@@ -41,8 +40,9 @@
  * advances state.
  *
  * The carry chaining between the two ADCs is load-bearing: the second one adds
- * the carry out of the first. Dropping it gives a stream that looks plausible
- * and diverges within a few draws. */
+ * the carry out of the first. Measured against the guest, dropping it drops
+ * the match from 14 of 14 sampled transitions to 8 of 14 -- so it is wrong,
+ * and it is wrong in the worst way, agreeing most of the time. */
 void sc_mapgen_prng_seed_from_spin(ScMapGenPrng *p, uint16_t spin_counter) {
     /* 00:823e: LDA $c7 / STA $59 / INC A / STA $5b / INC A / STA $5d.
      * $c7 counts vblank spin iterations, so the seed is how long the player
@@ -141,10 +141,16 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
  * None of this is worth anything until a seed produces an identical map. The
  * harness to build first:
  *
- *   1. Trace the guest. The coverage hook `g_interp_bridge_pc_hook` already
- *      fires per interpreted opcode, so watching for PC == $00824f and
- *      recording $59/$5b/$5d gives the reference PRNG stream, and settles the
- *      entry-carry question above by observation rather than assumption.
+ *   1. DONE for the PRNG, by SAMPLING rather than tracing. There is no
+ *      per-opcode hook in this target: the interp816 core never calls
+ *      interp816_opcode_hook, and interp_bridge.c -- which owns
+ *      g_interp_bridge_pc_hook -- is not compiled into it. Both were wired up
+ *      and produced no output whatever.
+ *
+ *      What works instead: SC_MAPGEN_VERIFY=1 logs $59/$5b once per frame, and
+ *      because the state is only 32 bits, a correct step must join consecutive
+ *      samples in a few iterations while a wrong one essentially never does.
+ *      That is the check above, and it discriminates: 14/14 against 8/14.
  *   2. Capture the map. Dump $7E0200 (12000 cells) after generation with the
  *      seed bytes $0b27-$0b29 alongside; that pair is the golden reference.
  *   3. Compare per routine, not just at the end. A whole-map mismatch says

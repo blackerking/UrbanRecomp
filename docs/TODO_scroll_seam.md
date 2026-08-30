@@ -233,12 +233,28 @@ can be CHANGED -- larger maps, new terrain rules, chosen seeds -- instead of
 only replayed. Started 2026-08-30 in `src/simcity_mapgen.c`; it compiles and is
 in the build, but nothing is wired in and **nothing is verified**.
 
-### Done
+### Done and VERIFIED: the PRNG
 
-The PRNG (`00:824f`) and the map seeding (`03:d840`), transcribed from
-`tools/dis_mx.py` output with the disassembly quoted in the source. The carry
-chaining between the two `ADC`s in the PRNG is load-bearing -- drop it and the
-stream looks plausible and diverges after a few draws.
+`00:824f`, transcribed with its disassembly quoted in the source, and checked
+against the running guest: **14 of 14 sampled state transitions reproduced
+exactly**, each one step apart. On 32-bit state that is conclusive.
+
+The check has power, which matters more than the pass: dropping the carry
+chaining between the two `ADC`s -- the easy mistake -- scores 8 of 14. It
+agrees most of the time, which is exactly how that bug would survive casual
+testing.
+
+**How it is verified, since neither obvious hook works.** The interp816 core
+never calls `interp816_opcode_hook`, and `interp_bridge.c`, which owns
+`g_interp_bridge_pc_hook`, is not compiled into the main target. Both were
+wired up and produced no output at all. `SC_MAPGEN_VERIFY=1` instead samples
+`$59`/`$5b` once per frame; because the state is 32 bits, a correct step joins
+consecutive samples in a few iterations and a wrong one essentially never does.
+
+### Decompiled, NOT verified: the seeding
+
+`03:d840`. Its entry carry is still unknown and is a parameter in the C rather
+than a guess -- the `ROL` chain and the `ADC #$1238` both consume it.
 
 ### The scope, which is small
 

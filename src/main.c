@@ -85,6 +85,7 @@ uint8_t    g_ram[0x20000];
  * returned false was observed as true, and the US-only gate silently passed on
  * a German ROM. It compiled and linked without a word. */
 #include "simcity_mapview.h"
+#include "simcity_mapgen.h"
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -1275,6 +1276,28 @@ static void handle_pos_stuff(void) {
                   "[pass] f=%d extra pass vs MAIN render differ on %lld of %lld px"
                   " first at (%d,%d)\n",
                   nf, diff, tot, first_x, first_y);
+      }
+      /* SC_MAPGEN_VERIFY=1: sample the guest's PRNG state once per frame.
+       *
+       * There is no per-opcode hook in this target -- the interp816 core does
+       * not call interp816_opcode_hook, and interp_bridge.c (which owns the
+       * coverage hooks) is not compiled here. Both were tried and produced no
+       * output at all.
+       *
+       * Sampling per frame is enough anyway: the state is 32 bits, so if
+       * sc_mapgen_prng_step() is correct then consecutive samples must be
+       * joined by a small number of iterations. A wrong step lands on the next
+       * sample essentially never. $59/$5b are direct page in bank 0. */
+      if (getenv("SC_MAPGEN_VERIFY")) {
+        static uint16_t p0, p1;
+        static int have;
+        const uint16_t g0 = (uint16_t)(g_ram[0x59] | (g_ram[0x5a] << 8));
+        const uint16_t g1 = (uint16_t)(g_ram[0x5b] | (g_ram[0x5c] << 8));
+        if (!have || g0 != p0 || g1 != p1) {
+          fprintf(stderr, "[prng] f=%llu %04X %04X\n",
+                  (unsigned long long)s_frames, g0, g1);
+          p0 = g0; p1 = g1; have = 1;
+        }
       }
       ws_fix_scroll_seam(); /* before compose: it copies the guest columns */
       host_map_compose();   /* all 224 visible lines are drawn by now */
