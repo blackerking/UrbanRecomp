@@ -228,47 +228,64 @@ depended on it.
 
 ## OPEN -- audio desynchronises, and has since the project started
 
-Reported from play 2026-08-27 as long-standing: sound drifts out of sync. Never
-investigated. What follows is one cheap measurement and the directions it
-suggests -- not a diagnosis.
+Reported from play as long-standing. Investigated 2026-08-30 and **not solved**.
+What follows is mostly a record of two wrong measurements, because both are
+easy to repeat.
 
-### The one number already available
+### `--qualify` cannot measure this. Twice fooled.
 
-`--qualify` counts emitted audio samples, so the rate can be read without
-building anything:
+**First attempt.** `--qualify` prints `audio_samples`, and the rate came out at
+533.906 samples/frame across 2000- and 6000-frame runs, stable to three
+decimals. That sits on 60.000 Hz rather than the SNES's 60.0988 (533.122), so
+it looked like a +0.147% drift -- about a second every eleven minutes, the
+right order for the symptom.
+
+It was the harness. `run_qualification()` drains a hardcoded 534 samples per
+frame (`if (available >= 534) dsp_getSamples(dsp, audio_buf, 534)`).
+
+**Second attempt.** `SC_APU_DIAG=1` prints a per-frame ledger of what the DSP
+actually wrote, which looked like the real thing: 533.908 samples/frame, with
+`avail` steady at ~959.
+
+Also the harness. `dsp_getSamples()` consumes a fixed 534 and the SPC is cycled
+to supply them, so **the consumer dictates production** and the number just
+echoes the drain. Proved by halving `kInterpApuPerMaster` and re-measuring:
+533.913, i.e. no effect at all.
+
+**So: no headless measurement of the audio rate is trustworthy.** The rate has
+to be measured in the interactive path, where consumption is
+`audio.freq / 60.0988` in the SDL loop and the SPC is cycled by the audio
+callback.
+
+### Still true, and still suspicious
+
+Three copies of the same ratio use 60.0 where an NTSC frame is 60.0988:
 
 ```
- 2000 frames: 1067814 samples -> 533.907 samples/frame
- 6000 frames: 3203431 samples -> 533.905 samples/frame
-
-expected at 32040 Hz:  60.0988 Hz (NTSC SNES) = 533.122
-                       60.000  Hz             = 534.000
+common_rtl.c:973       kApuPerMaster       = (32040*32) / (1364*262*60.0)
+interp_bridge.c:38     kInterpApuPerMaster = (32040*32) / (1364*262*60.0)
+snes.c:25              apuCyclesPerMaster  = (32040*32) / (1364*262*60.0)   <- UNUSED
 ```
 
-The rate is **extremely stable** -- the two runs agree to three decimals, so
-this is not jitter or dropout -- and it sits on 60.000 Hz, not on the SNES's
-60.0988 Hz. Against true NTSC timing that is **+0.147%**, about one second of
-drift every eleven minutes, which is the right order for "gets out of sync"
-rather than "is out of sync".
+That makes the master clock 21,442,080 instead of 21,477,272 -- the constant is
+0.1647% fast. Upstream `origin/main` has them identically, so it is not ours.
 
-Whether that is the fault depends on what paces presentation. If the host also
-presents at exactly 60.000 Hz the two agree and the drift is only against real
-hardware; if presentation follows 60.0988, audio and video pull apart at that
-rate. **Establish which before chasing anything else** -- the frame pacing is in
-the SDL loop around `next_frame_deadline`.
+**They were corrected and the change reverted**, because nothing could be shown
+to change: the headless rate is harness-dictated, so there was no way to
+demonstrate a benefit, and shipping unverified timing changes is how the
+left/top covers went wrong. The arithmetic is still wrong and worth fixing --
+but only alongside a measurement that can see the difference.
 
-### Other threads worth pulling
+`snes.c`'s copy is referenced by nothing at all; changing it first cost a build
+to discover.
 
-- The upstream merge brought `Do not clamp APU guest time to one frame`
-  (67e285d) and `guest-time APU in interp tier`. Those are APU timing changes
-  that landed here today, so a before/after comparison is available and cheap:
-  the pre-merge submodule is `bedf078` on the fork.
-- Our own submodule carries `interp_bridge: pctrace markers around runOpcode,
-  and an APU bisect switch` (2a095a1) -- there is already a bisect switch for
-  exactly this class of question.
-- `audio_active_frames` is 1716 of 2000 and 5716 of 6000: 284 silent frames at
-  the start in both, then continuous. Consistent with boot, not a dropout, but
-  worth confirming rather than assuming.
+### How to actually measure it
+
+Instrument the interactive path, not `--qualify`: log the audio callback's
+consumption against the DSP's production over a real session, with
+`SC_DUMP_DIR` running so video frames are timestamped alongside. The question
+to answer first is whether production and consumption differ at all in that
+path -- everything above leaves it genuinely unknown.
 
 ## OPEN -- title: the Maxis / SimCity building parts move wrongly
 
