@@ -6,10 +6,16 @@
  * first; only once a seed yields an identical map does deviating from it mean
  * anything.
  *
- * STATUS: the PRNG is decompiled and VERIFIED against the running guest --
- * 14 of 14 sampled state transitions reproduced exactly, one step apart. The
- * seeding is decompiled but NOT verified (its entry carry is still unknown).
- * The terrain feature routines are not started.
+ * STATUS: two pieces are decompiled and VERIFIED against the running guest.
+ *
+ *   00:824f  the PRNG step -- 14 of 14 sampled transitions reproduced exactly.
+ *   00:823e  seed-from-spin -- caught live: $c7 read C4, and the next frame
+ *            $59 = 00C4 and $5b = 00C5, exactly LDA $c7 / STA $59 / INC A /
+ *            STA $5b. Slot 5 independently shows 0081/0082, the same shape.
+ *
+ * 03:d840 (the map seeding) and the feature routines are decompiled but NOT
+ * verified -- see the note at the bottom on why a golden map is still
+ * missing.
  *
  * Map geometry: 120 x 100 = 12000 cells. Confirmed independently by the power
  * bitmap at 03:b0f8, whose CPX #$05dc bounds it at 1500 bytes = 12000 bits.
@@ -331,8 +337,18 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *      Conclusion: map-select shows prebuilt scenario maps (there is a 9-entry
  *      map pointer table at 03:ce70), and procedural generation belongs to the
- *      FREE PLAY path. A save state taken just after a freshly generated map
- *      appears would give the golden pair outright.
+ *      FREE PLAY path.
+ *
+ *      Free-play states were then captured (slots 4 and 5) and a real seeding
+ *      event caught at the frame boundary -- $c7 = C4 becoming $59/$5b =
+ *      00C4/00C5, with $0b2a flipping to FF0000, which only 03:d873 does and
+ *      only after generating. So the generation path DID run.
+ *
+ *      But the PRNG does not advance afterwards: it sits at 00C4/00C5 while
+ *      the map region changes only a handful of bytes per frame. A generator
+ *      that draws no randomness is not the procedural path, so the map being
+ *      shown is still coming from somewhere else. That is the open question,
+ *      and it is now a narrow one: find what consumes 00C4/00C5 and when.
  *   3. Compare per routine, not just at the end. A whole-map mismatch says
  *      nothing about WHICH of six routines is wrong.
  *
