@@ -110,4 +110,9 @@ void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st);
  * Column-major from the bottom-right, and it reads the buffer it writes. */
 void sc_mapgen_shoreline(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f502 -- second fitting pass over class 0x14..0x25. Unlike f444, a mask
+ * bit means the neighbour is the SAME class and off-map sets nothing. Run
+ * twice by the scatter feature, and it reads the buffer it writes. */
+void sc_mapgen_fit_pass(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif

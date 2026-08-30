@@ -216,7 +216,8 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st) {
         count--;
     }
     st->count = 0;
-    /* JSR $f502 twice -- not yet decompiled. */
+    sc_mapgen_fit_pass(p, st);   /* JSR $f502 */
+    sc_mapgen_fit_pass(p, st);   /* JSR $f502 again -- sees the first's output */
 }
 
 /* ── Feature: path through the centre ──────────────────────────────────────
@@ -479,6 +480,71 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
             sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
+}
+
+/* ── 01:f502 -- the second fitting pass ────────────────────────────────────
+ *
+ * The scatter feature calls this TWICE in a row. Same sweep shape as $f444 --
+ * x 119..0 outer, y 99..0 inner -- but every rule differs:
+ *
+ *     JSR $f8e9 / CMP #$0014 / BCC next / CMP #$0026 / BCS next
+ *                                     ; act on a RANGE, 0x14..0x25, not one value
+ *     mask = 0; X = 3..0:
+ *       ASL $045d
+ *       (nx,ny) = (x,y) + (dx[X], dy[X])
+ *       JSR $f843 / BCS +             ; OFF-MAP DOES NOT SET THE BIT
+ *       JSR $f8e9 / CMP #$0014 / BCC + / CMP #$0026 / BCS +
+ *       INC $045d                     ; neighbour in the SAME class sets it
+ *     LDX $045d / LDA $01f4f2,X / BEQ write
+ *     JSL $00824b / LSR A / BCS write / ADC #$0009    ; else half the time, +9
+ *   write: JSR $f8af
+ *
+ * Two inversions against $f444, and getting either backwards produces a map
+ * that looks fine and is wrong:
+ *
+ * 1. $f444 sets a mask bit when the neighbour is EMPTY or OFF-MAP. This sets it
+ *    when the neighbour is in the SAME class, and off-map sets NOTHING. So the
+ *    border reads as open space in one pass and as foreign material in the
+ *    other.
+ * 2. $f444 skips its variant when the table entry is 1; this skips when the
+ *    entry is 0, and its variant is +9, not +8.
+ *
+ * The table at $01f4f2 is: 00 00 00 16 00 00 14 15 00 1C 00 19 1A 1B 17 18.
+ * Ten of the sixteen are 0, i.e. most neighbour patterns write nothing new.
+ *
+ * Being called twice matters: the pass reads and writes one buffer, so the
+ * second run sees the first run's output. */
+void sc_mapgen_fit_pass(ScMapGenPrng *p, ScMapGenState *st) {
+    static const unsigned char fit2[16] = {
+        0x00,0x00,0x00,0x16,0x00,0x00,0x14,0x15,
+        0x00,0x1C,0x00,0x19,0x1A,0x1B,0x17,0x18,
+    };
+    static const int ndx[4] = { -1, 0, +1, 0 };
+    static const int ndy[4] = {  0, +1, 0, -1 };
+    #define IN_CLASS(v) ((v) >= 0x14u && (v) < 0x26u)
+
+    for (int x = SC_MAPGEN_W - 1; x >= 0; x--) {
+        for (int y = SC_MAPGEN_H - 1; y >= 0; y--) {
+            const unsigned v = sc_mapgen_read_cell(st, (unsigned)x, (unsigned)y);
+            if (!IN_CLASS(v)) continue;
+
+            unsigned mask = 0;
+            for (int i = 3; i >= 0; i--) {
+                const int nx = x + ndx[i], ny = y + ndy[i];
+                mask <<= 1;
+                if (!sc_mapgen_in_bounds(nx, ny)) continue;   /* off-map: no bit */
+                if (IN_CLASS(sc_mapgen_read_cell(st, (unsigned)nx, (unsigned)ny)))
+                    mask |= 1u;
+            }
+
+            unsigned tile = fit2[mask & 15u];
+            if (tile != 0) {
+                if ((sc_mapgen_prng_step(p) & 1u) == 0) tile += 9u;   /* BCS skips */
+            }
+            sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, (uint16_t)tile);
+        }
+    }
+    #undef IN_CLASS
 }
 
 /* ── 01:f444 implemented ───────────────────────────────────────────────────
