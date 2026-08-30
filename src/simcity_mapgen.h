@@ -86,4 +86,8 @@ void sc_mapgen_move(ScMapGenState *st, unsigned dir);
  * 3 rim, 1 interior, 2 the single centre cell. */
 void sc_mapgen_stamp_blob(ScMapGenState *st);
 
+/* 01:f7e7 -- write one brush value at (cur + offset). Existing 1 and 2 are
+ * protected; a centre marker on the border degrades to 1. */
+void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy);
+
 #endif

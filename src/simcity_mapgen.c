@@ -351,6 +351,54 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── The per-cell draw ─────────────────────────────────────────────────────
+ *
+ * 01:f7e7, which turns one brush value into one map cell. The whole routine:
+ *
+ *     PHA / CMP #$0000 / BEQ out         ; brush 0 = outside, draw nothing
+ *     x = $0447 + $043b -> $0453,$044f   ; brush offset + blob position
+ *     y = $0449 + $043d -> $0455,$0451
+ *     JSR $f843 / BCS out                ; off the map, draw nothing
+ *     JSR $f8e9                          ; A = the cell that is already there
+ *     PLX / CPX #$0002 / BEQ centre      ; brush 2 is the centre, special
+ *     CMP #$0001 / BEQ out               ; existing 1 -> leave it
+ *     CMP #$0002 / BEQ out               ; existing 2 -> leave it
+ *     BNE write
+ *   centre:
+ *     x == 0 or x == 120 or y == 0 or y == 100 -> LDX #$0001   ; degrade
+ *   write:
+ *     TXA / JSR $f8af                    ; store
+ *
+ * Two rules fall out, and both matter for reproducing a map:
+ *
+ * 1. EXISTING 1 AND 2 ARE PROTECTED. A later blob cannot overwrite an earlier
+ *    blob's interior or its centre; it can only write into 0 and 3. So the
+ *    order features run in changes the result even when every draw is correct
+ *    -- overlapping blobs are decided by who got there first.
+ *
+ * 2. THE CENTRE MARKER DEGRADES AT THE BORDER. Brush value 2 on the map edge
+ *    is written as 1 instead. That is why the border cells never carry the
+ *    marker, and it is a rule you would not guess from the brush table alone.
+ *
+ * $f8af is the cell store, the mirror of the $f8e9 read, and is the last piece
+ * of this path still untranscribed. */
+void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy) {
+    if (brush == 0) return;                       /* outside the disc */
+    const int x = (int)st->cur_x + ox;            /* $0447 + $043b */
+    const int y = (int)st->cur_y + oy;            /* $0449 + $043d */
+    if (!sc_mapgen_in_bounds(x, y)) return;       /* JSR $f843 / BCS */
+
+    unsigned value = brush;
+    if (brush == 2) {
+        /* The centre marker is not placed on the border; it becomes a 1. */
+        if (x == 0 || x == SC_MAPGEN_W || y == 0 || y == SC_MAPGEN_H) value = 1;
+    } else {
+        const unsigned existing = 0;   /* JSR $f8e9 -- read $7F0200 */
+        if (existing == 1 || existing == 2) return;   /* protected, leave it */
+    }
+    (void)value;   /* JSR $f8af -- the store, not transcribed */
+}
+
 /* ── The blob brush ────────────────────────────────────────────────────────
  *
  * 01:f71d, the 3-in-4 draw the clustered-blob feature calls:
@@ -387,9 +435,8 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * anchor goes.
  *
  * Note the loops run 8 down to 0 INCLUSIVE (BPL, not BNE), so it really is
- * 9x9 and not 8x8. $f7e7, the per-cell draw that turns 0/1/2/3 into a tile,
- * is not decompiled. Neither is $f794, the 1-in-4 alternative -- presumably a
- * different brush. */
+ * 9x9 and not 8x8. $f794, the 1-in-4 alternative draw, is still not
+ * decompiled -- presumably a different brush. */
 enum { SC_MAPGEN_BRUSH = 9 };
 extern const unsigned char sc_mapgen_brush[81];
 const unsigned char sc_mapgen_brush[81] = {
@@ -408,9 +455,8 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
     for (int a = 8; a >= 0; a--)
         for (int b = 8; b >= 0; b--) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
-            (void)v;   /* JSR $f7e7 -- the per-cell draw, not decompiled */
+            sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
-    (void)st;
 }
 
 /* ── The 8-way move ────────────────────────────────────────────────────────
