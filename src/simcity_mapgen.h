@@ -39,6 +39,8 @@ typedef struct ScMapGenState {
     uint16_t px;      /* $044b -- placement x */
     uint16_t py;      /* $044d -- placement y */
     uint16_t dir;     /* $045f and $0461 -- eight-way direction */
+    uint16_t cx;      /* $043f -- cluster centre */
+    uint16_t cy;      /* $0441 */
 } ScMapGenState;
 
 /* 01:f877 -- 0..n inclusive, via the hardware multiplier. One PRNG step. */
@@ -54,6 +56,10 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st);
 /* 01:f5b9 -- walk from the centre one way, then the opposite way. The walk
  * itself ($f600) is not decompiled yet. One PRNG step. */
 void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st);
+
+/* 01:f311 -- 1..11 clusters of 2..14 blobs each, jittered +/-6 about the
+ * cluster centre. The blob draws ($f71d, $f794) are not decompiled. */
+void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st);
 
 /* 01:f1f1 -- the generator. One PRNG step decides the path: 86/256 of maps go
  * to $f22c (not decompiled), the rest are built from the five features in a

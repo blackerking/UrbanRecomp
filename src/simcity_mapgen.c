@@ -241,6 +241,54 @@ void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
     st->cur_y = st->y0;
 }
 
+/* ── Feature: clustered blobs ──────────────────────────────────────────────
+ *
+ * 01:f311. A nested loop, and the tail is what gives it away:
+ *
+ *     LDA #$000a / JSR $f877 / INC A          / STA $0445   ; clusters 1..11
+ *   outer ($f31d):
+ *     LDA #$0063 / JSR $f877 / ADC #$000a     / STA $043f   ; cx = 10 + r(99)
+ *     LDA #$0050 / JSR $f877 / ADC #$000a     / STA $0441   ; cy = 10 + r(80)
+ *     LDA #$000c / JSR $f877 / INC A / INC A  / STA $0443   ; blobs 2..14
+ *   inner ($f342):
+ *     LDA #$000c / JSR $f877 / ADC $043f / SBC #$0006 / STA $043b  ; x = cx +r(12)-6
+ *     LDA #$000c / JSR $f877 / ADC $0441 / SBC #$0006 / STA $043d  ; y = cy +r(12)-6
+ *     JSL $00824b / AND #$0003
+ *     BEQ -> JSR $f794    (1 in 4)
+ *     else    JSR $f71d   (3 in 4)
+ *     DEC $0443 / BNE inner
+ *     DEC $0445 / BNE outer
+ *
+ * So 1..11 clusters, each of 2..14 blobs scattered within +/-6 of the cluster
+ * centre, and each blob drawn by one of two routines on a 1-in-4 split. The
+ * cluster centres are held away from the edges (10..109 by 10..90 on a 120x100
+ * map), which the blob jitter of +/-6 can still push outside -- so whatever
+ * $f71d and $f794 do must cope with out-of-range coordinates.
+ *
+ * PRNG cost: 1 for the cluster count, then per cluster 3 (cx, cy, blob count),
+ * then per blob 3 (x, y, and the direct draw for the 1-in-4). The direct draw
+ * happens EVERY blob, not only when it branches. */
+void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st) {
+    unsigned clusters = sc_mapgen_rand_below(p, 0x000a) + 1u;      /* $0445 */
+    while (clusters) {
+        const uint16_t cx = (uint16_t)(sc_mapgen_rand_below(p, 0x0063) + 0x000au);
+        const uint16_t cy = (uint16_t)(sc_mapgen_rand_below(p, 0x0050) + 0x000au);
+        unsigned blobs = sc_mapgen_rand_below(p, 0x000c) + 2u;     /* $0443 */
+        st->cx = cx; st->cy = cy;
+        while (blobs) {
+            st->cur_x = (uint16_t)(cx + sc_mapgen_rand_below(p, 0x000c) - 6u);
+            st->cur_y = (uint16_t)(cy + sc_mapgen_rand_below(p, 0x000c) - 6u);
+            if ((sc_mapgen_prng_step(p) & 0x0003u) == 0) {
+                /* JSR $f794 -- not decompiled. */
+            } else {
+                /* JSR $f71d -- not decompiled. */
+            }
+            blobs--;
+        }
+        clusters--;
+    }
+}
+
 /* ── The generator itself ──────────────────────────────────────────────────
  *
  * 01:f1ed is a JSL wrapper; 01:f1f1 is the body:
@@ -276,7 +324,7 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     /* JSL $0094bc -- not decompiled; runs before the chain. */
     sc_mapgen_feature_centre(p, st);    /* $f380 */
     sc_mapgen_feature_path(p, st);      /* $f5b9 */
-    /* JSR $f311 -- 45 instructions, not decompiled. */
+    sc_mapgen_feature_clusters(p, st);  /* $f311 */
     /* JSR $f444 -- 65 instructions, not decompiled. */
     sc_mapgen_feature_scatter(p, st);   /* $f3a3 */
 }
@@ -291,8 +339,9 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *          01:f3a3   DONE (scatter), except its $f3d3 placement and $f502
  *          01:f5b9   DONE (path),    except its $f600 walk
  *
+ *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
+ *
  *          01:f22c   86 instructions
- *          01:f311   45
  *          01:f444   65
  *
  * 02:923f  zero-fills $7EA400-$7EBFFF (7168 bytes), then sets up the DMA. The
