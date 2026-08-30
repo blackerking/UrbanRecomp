@@ -202,7 +202,7 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st) {
     while (count) {
         st->px = sc_mapgen_rand_below(p, 0x0077);   /* $044b, 0..119 */
         st->py = sc_mapgen_rand_below(p, 0x0063);   /* $044d, 0..99  */
-        /* JSR $f3d3 -- the placement itself, not yet decompiled. */
+        sc_mapgen_walk(p, st);   /* $f3d3: each placement spawns a walk */
         count--;
     }
     st->count = 0;
@@ -341,6 +341,51 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── The walk: what a scattered point actually draws ───────────────────────
+ *
+ * 01:f3d3, called once per scatter placement. It is not a stamp -- it is a
+ * random walk, and that is where the terrain gets its organic shape:
+ *
+ *     LDA #$0096 / JSR $f877 / ADC #$0032 / STA $0443   ; steps = 50 + r(150)
+ *     LDA $044b / STA $043b                             ; start at the
+ *     LDA $044d / STA $043d                             ; placement point
+ *   loop:
+ *     JSL $00824b / AND #$0007 / JSR $f6ae               ; dir = rand & 7, step
+ *     LDA $043b / STA $0453 / LDA $043d / STA $0455
+ *     JSR $f843 / BCS stop                               ; walked off the map
+ *     LDA $043b / STA $044f / LDA $043d / STA $0451
+ *     JSR $f8e9 / CMP #$0000 / BNE ...                   ; look at this cell
+ *     ...
+ *
+ * So each of the scatter feature's 50..150 placements spawns a walk of 50..200
+ * steps taking random 8-way moves, stopping early if it leaves the map. That
+ * composition -- many short random walks from scattered seeds -- is what makes
+ * coastlines and rivers look natural rather than blobby, and it explains why
+ * the tile fitting in 01:f444 has to run afterwards to tidy the edges.
+ *
+ * PRNG cost: 1 for the step count, then 1 per step for the direction. The walk
+ * can stop early on the bounds check, so THE COST IS DATA-DEPENDENT -- the same
+ * property 01:f444 has. Two of the routines now consume a variable number of
+ * steps, which means the stream cannot be predicted without running the walk
+ * itself.
+ *
+ * $f6ae is the 8-way single-cell move and is not decompiled. Note the
+ * direction here is `& 7` -- eight ways -- while 01:f5b9's path uses `& 3` plus
+ * an EOR #$0004 flip. Same encoding, different halves of it. */
+void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st) {
+    unsigned steps = sc_mapgen_rand_below(p, 0x0096) + 0x0032u;   /* $0443 */
+    int x = (int)st->px, y = (int)st->py;                          /* $044b/$044d */
+    while (steps) {
+        const unsigned dir = sc_mapgen_prng_step(p) & 0x0007u;
+        (void)dir;   /* JSR $f6ae -- the 8-way move, not decompiled */
+        if (!sc_mapgen_in_bounds(x, y)) break;   /* JSR $f843 / BCS */
+        /* JSR $f8e9 then the write -- not decompiled */
+        steps--;
+    }
+    st->cur_x = (uint16_t)x;
+    st->cur_y = (uint16_t)y;
+}
+
 /* ── Bounds check ──────────────────────────────────────────────────────────
  *
  * 01:f843. Carry SET means out of range, which is the opposite of the usual

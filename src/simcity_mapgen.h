@@ -74,4 +74,8 @@ int sc_mapgen_in_bounds(int x, int y);
 /* 01:f8e9's row-offset computation: the map is row-major, stride 120. */
 unsigned sc_mapgen_cell_index(unsigned x, unsigned y);
 
+/* 01:f3d3 -- a 50..200 step random 8-way walk from the placement point,
+ * stopping early if it leaves the map. Its PRNG cost is data-dependent. */
+void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif
