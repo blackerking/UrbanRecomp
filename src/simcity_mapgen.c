@@ -341,6 +341,51 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── 01:f444 -- READ but not implemented ───────────────────────────────────
+ *
+ * This one is a different kind of routine from the other four, and worth
+ * writing down before it is coded, because implementing it as "another feature
+ * that scatters things" would be wrong.
+ *
+ * It is a NEIGHBOURHOOD SCAN -- tile fitting, not placement:
+ *
+ *     LDA #$0077 / STA $043f      ; 119 -- the full map width
+ *     LDA #$0063 / STA $0441      ; 99  -- the full map height
+ *     copy both to $044f / $0451
+ *     JSR $f8e9 / CMP #$0003 / BNE out      ; classify this cell; only act on 3
+ *     STZ $045b                              ; the neighbour mask
+ *     LDA #$0003 / STA $0443                 ; four neighbours, X = 3..0
+ *   loop ($f472):
+ *     ASL $045b                              ; shift the mask up one bit
+ *     LDX $0443
+ *     LDA $01f42c,X / ADC $043f / STA $0453,$044f    ; neighbour x = x + dx[X]
+ *     LDA $01f430,X / ADC $0441 / ...                ; neighbour y = y + dy[X]
+ *     JSR $f843 / BCS +                      ; bounds check, carry = out of range
+ *     JSR $f8e9 / CMP #$0000 / BNE ++        ; classify the neighbour
+ *   + INC $045b                              ; set the low bit of the mask
+ *   ++ DEC $0443 / BPL loop                  ; four times
+ *     LDX $045b / LDA $01f434,X              ; mask -> tile id, 16-entry table
+ *     CMP #$0001 / BEQ +
+ *     STA $79 / JSL $00824b / LSR A / LDA $79
+ *     BCC + / CLC / ADC #$0008               ; one random bit picks a +8 variant
+ *   + ...
+ *
+ * So: for each cell of a given class, build a 4-bit mask of which neighbours
+ * are of another class, look the mask up in a 16-entry table at $01f434, and
+ * for most results toss a coin to choose between that tile and tile+8. That is
+ * shoreline / edge fitting -- the thing that makes coastlines join up -- with a
+ * random variant for visual variety.
+ *
+ * $01f42c and $01f430 are the four dx/dy deltas; $01f434 is the 16-entry
+ * mask-to-tile table. All three need reading out of the ROM before this can be
+ * implemented, and none of them is in docs/ROM_MAP.md yet.
+ *
+ * The PRNG cost is DATA-DEPENDENT here, unlike every other routine so far: one
+ * step per cell that reaches the coin toss, i.e. it depends on the map built so
+ * far. Any implementation has to reproduce the scan order exactly or the stream
+ * desynchronises even with correct tile choices.
+ */
+
  *          01:f22c   86 instructions
  *          01:f444   65
  *
