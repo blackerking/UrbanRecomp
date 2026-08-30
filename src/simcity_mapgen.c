@@ -447,8 +447,7 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  * step per cell that reaches the coin toss, i.e. it depends on the map built so
  * far. Any implementation has to reproduce the scan order exactly or the stream
  * desynchronises even with correct tile choices.
- */
-
+ *
  *          01:f22c   86 instructions
  *          01:f444   65
  *
