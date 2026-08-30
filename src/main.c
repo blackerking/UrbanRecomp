@@ -1525,16 +1525,27 @@ static void sc_note_executed_pc(uint32_t pc24, int mf, int xf) {
       const unsigned idx = ((pc24 >> 16) & 0xffu) << 8 | ((pc24 >> 8) & 0xffu);
       bucket[idx]++;
       if (++total % 2000000ULL == 0) {
-        unsigned top[12] = {0};
-        for (unsigned i = 0; i < 256u * 256u; i++) {
-          for (int k = 0; k < 12; k++)
-            if (bucket[i] > bucket[top[k]]) {
-              for (int j = 11; j > k; j--) top[j] = top[j - 1];
-              top[k] = i; break;
-            }
+        /* Pick the top 12 by repeated max, EXCLUDING what is already picked.
+         * The insertion version this replaced never excluded, so one hot
+         * bucket filled most of the list -- a profile showing the same page
+         * and the same count a dozen times, which is nonsense that looks like
+         * data. */
+        unsigned top[12];
+        int ntop = 0;
+        for (int k = 0; k < 12; k++) {
+          unsigned best = 0; uint32_t bestv = 0;
+          for (unsigned i = 0; i < 256u * 256u; i++) {
+            if (!bucket[i]) continue;
+            int taken = 0;
+            for (int j = 0; j < ntop; j++) if (top[j] == i) { taken = 1; break; }
+            if (taken) continue;
+            if (bucket[i] > bestv) { bestv = bucket[i]; best = i; }
+          }
+          if (!bestv) break;
+          top[ntop++] = best;
         }
         fprintf(stderr, "[profile] %llu interpreted opcodes; hottest 256-byte pages:\n", total);
-        for (int k = 0; k < 12; k++)
+        for (int k = 0; k < ntop; k++)
           fprintf(stderr, "   %02X:%02Xxx  %9u  %5.1f%%\n",
                   top[k] >> 8, top[k] & 0xff, bucket[top[k]],
                   100.0 * (double)bucket[top[k]] / (double)total);
@@ -5846,6 +5857,15 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "loaded state '%s', now at frame %llu\n",
             load_state_path, (unsigned long long)s_frames);
+
+#ifdef SIMCITY_AOT_TIER
+    /* The fiber executes its own CpuState, which load_state does not touch --
+     * and Init() pinned it to the reset contract during env parsing, before
+     * any state existed. Left alone, the fiber runs boot registers over
+     * restored WRAM: measured as a hang at $05935A inside 60 frames, while the
+     * same state is fine on the interpreter and the fiber is fine from boot. */
+    if (sc_fiber_active()) SimCityFiberDrive_AdoptInterpState(g_cpu);
+#endif
   }
 
   if (qualify_frames) {

@@ -78,6 +78,7 @@
 #include "snes/snes.h"
 #include "snes/interp_bridge.h"
 #include "simcity_fiberdrive.h"
+#include "interp816.h"
 
 /* src/simcity_hle.c */
 extern unsigned long g_simcity_vblank_hle_calls;
@@ -146,6 +147,43 @@ bool SimCityFiberDrive_Init(void) {
     s_resume_pc24 = SC_RESET_PC24;
     s_started = true;
     return true;
+}
+
+/* Adopt a loaded save state.
+ *
+ * load_state() restores g_snes and the INTERP816 cpu; it knows nothing about
+ * this file's `static CpuState s_cpu`, which is what the fiber actually
+ * executes. Worse, Init() runs during env parsing -- long before the state is
+ * loaded -- and pins the 65816 reset contract: PB=0, DB=0, D=0, S=$01ff, 8-bit
+ * A and index, resume at the reset vector.
+ *
+ * So without this the fiber ran boot registers over mid-game WRAM: measured as
+ * a hang at $05935A within 60 frames, spinning on a BNE in the block-copy
+ * region, while the same state loaded fine on the interpreter and the fiber
+ * booted fine without a state.
+ *
+ * Copies the architectural registers across and republishes the resume PC.
+ * Nothing else in CpuState is guest-visible state -- host_return_valid is the
+ * paired-call bookkeeping and must start clean, exactly as after Init. */
+void SimCityFiberDrive_AdoptInterpState(const Interp816 *in) {
+    if (!s_started || !in) return;
+    s_cpu.A  = in->a;
+    s_cpu.X  = in->x;
+    s_cpu.Y  = in->y;
+    s_cpu.S  = in->sp;
+    s_cpu.D  = in->dp;
+    s_cpu.PB = in->k;
+    s_cpu.DB = in->db;
+    s_cpu.m_flag = in->mf ? 1 : 0;
+    s_cpu.x_flag = in->xf ? 1 : 0;
+    s_cpu.emulation = in->e ? 1 : 0;
+    s_cpu.P = (uint8_t)((in->c ? 0x01 : 0) | (in->z ? 0x02 : 0) |
+                        (in->i ? 0x04 : 0) | (in->d ? 0x08 : 0) |
+                        (in->xf ? 0x10 : 0) | (in->mf ? 0x20 : 0) |
+                        (in->v ? 0x40 : 0) | (in->n ? 0x80 : 0));
+    cpu_p_to_mirrors(&s_cpu);
+    s_cpu.host_return_valid = 0;
+    s_resume_pc24 = ((uint32_t)in->k << 16) | in->pc;
 }
 
 bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending) {

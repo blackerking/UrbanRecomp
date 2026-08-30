@@ -12,6 +12,10 @@
 /* Creates the game fiber with the compiled reset handler as its entry and
  * installs the vblank yield. Returns true on success. Idempotent. */
 bool SimCityFiberDrive_Init(void);
+/* Re-point the fiber's CpuState at a just-loaded save state. Without this
+ * the fiber keeps Init()'s reset registers over restored WRAM. */
+struct Interp816;
+void SimCityFiberDrive_AdoptInterpState(const struct Interp816 *in);
 
 /* Switches into the guest and runs until it yields at the vblank wait.
  * Returns false if the guest stopped making progress -- the reset handler

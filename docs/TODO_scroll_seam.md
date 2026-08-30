@@ -268,7 +268,47 @@ in-game profile will look different, and the simulation routines that matter
 for "slow calculation" during play have NOT been profiled yet. Do that before
 choosing what to HLE second.
 
-### BLOCKER: save state + fiber hangs
+### FIXED: save state + fiber hung
+
+`load_state()` restores `g_snes` and the INTERP816 cpu. It knows nothing about
+`simcity_fiberdrive.c`'s `static CpuState s_cpu`, which is what the fiber
+actually executes -- and `SimCityFiberDrive_Init()` runs during env parsing,
+long before any state is loaded, pinning the 65816 reset contract (PB=0, DB=0,
+D=0, S=$01ff, 8-bit A/index, resume at the reset vector).
+
+So the fiber ran BOOT registers over MID-GAME WRAM.
+
+`SimCityFiberDrive_AdoptInterpState()` now copies the architectural registers
+across after a load and republishes the resume PC. Save state + fiber passes,
+and the tier ratio in-game is far healthier than at boot: bounces=51732 against
+interp_steps=1,302,787, versus 5263 against 2,790,629.
+
+### Still open: a later hang, and what the in-game profile really shows
+
+The same run still trips the opcode guard at frame 529 (was 60), with
+`[frame] bridge bailed 31 frames running at frame 5671 (resume=00930D)`.
+
+The in-game profile is dominated by `00:93xx` at 90.8% of 68M interpreted
+opcodes -- and that is **not** stray work to delete. `00:930d` is the
+wait-for-vblank spin, and `recomp/bank00.cfg` disables its HLE deliberately:
+
+> Disabled for the run_loop frame model. The HLE existed for the FIBER design,
+> where it was the only way to hand a frame back from arbitrary call depth. The
+> bridge detects the same wait itself via yield_pc (00:9311 on $b9), but only
+> in INTERPRETED code -- an HLE'd 00:930d in a compiled body returns
+> immediately and the frame is never paced.
+
+So the spin IS the frame-pacing seam. Enabling `hle_func 930d` would break
+pacing, and `g_simcity_yield_to_host` is NULL anyway -- nothing sets it.
+
+That said, ~123k interpreted opcodes per frame spent busy-waiting is real
+wall-clock waste even when it is functionally correct. The tractable idea is to
+short-circuit the spin in the INTERPRETER -- recognise the wait on `$b9` at
+00:9311 and advance to the NMI instead of interpreting the loop -- which is the
+same shape as `sc_advance_until_input_ready()` for the input latch. That keeps
+pacing while removing the opcodes.
+
+### Superseded blocker note (kept for the isolation table)
 
 Loading a save state while the fiber tier is active hangs the guest. Isolated:
 
