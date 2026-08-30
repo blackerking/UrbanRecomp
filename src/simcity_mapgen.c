@@ -118,6 +118,58 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
     for (unsigned i = 0; i < steps; i++) sc_mapgen_prng_step(p);
 }
 
+/* ── Random below N ────────────────────────────────────────────────────────
+ *
+ * 01:f877. The generator's range primitive, and the reason the PRNG had to be
+ * exact before anything else could be:
+ *
+ *     REP #$20
+ *     INC A / STA $79        ; keep N+1
+ *     JSL $00824b            ; one PRNG step, result in A (16-bit)
+ *     SEP #$20 / XBA         ; take the HIGH byte of that result
+ *     LDA $79 / PHA
+ *     LDA $b3 / AND #$7f / STA $b1      ; unrelated: $b1/$b3 housekeeping
+ *     PLA  / STA $4202       ; WRMPYA = (N+1) low byte
+ *     XBA  / STA $4203       ; WRMPYB = the random byte -> starts the multiply
+ *     PHA / PLA / NOP        ; the mandatory 8-cycle wait
+ *     LDA $4217 / XBA / LDA $4216 / PHA
+ *     ...
+ *     PLA / XBA / REP #$20 / AND #$00ff / RTS
+ *
+ * It runs the SNES hardware multiplier over (N+1) x rand8 and returns the HIGH
+ * byte of the 16-bit product -- the standard trick for scaling a byte into
+ * 0..N without a divide. The final `AND #$00ff` clears the high half, so the
+ * result really is 0..N inclusive.
+ *
+ * The `$b1`/`$b3` traffic in the middle is not part of the computation; it is
+ * preserved here only because reproducing the PRNG consumption exactly is what
+ * matters, and that is one step per call. */
+uint16_t sc_mapgen_rand_below(ScMapGenPrng *p, uint16_t n) {
+    const uint16_t r = sc_mapgen_prng_step(p);       /* JSL $00824b */
+    const unsigned rand8 = (r >> 8) & 0xffu;         /* XBA: the high byte */
+    const unsigned mul = (unsigned)((n + 1u) & 0xffu) * rand8;   /* 8x8 -> 16 */
+    return (uint16_t)((mul >> 8) & 0xffu);           /* RDMPYH, then AND #$00ff */
+}
+
+/* ── Feature: centre point ─────────────────────────────────────────────────
+ *
+ * 01:f380, the smallest of the six:
+ *
+ *     LDA #$0028 / JSR $f877 / CLC / ADC #$0028   ; 40 + rand(0..40)
+ *     STA $0457 / STA $043b
+ *     LDA #$0021 / JSR $f877 / CLC / ADC #$0021   ; 33 + rand(0..33)
+ *     STA $0459 / STA $043d
+ *
+ * On a 120 x 100 map that is x in 40..80 and y in 33..66 -- a point in the
+ * middle third of each axis, written to two pairs of variables at once.
+ *
+ * NOTE the operand order: the range call happens BEFORE the add, so it draws
+ * with N = 40 and N = 33, not with the sum. Two PRNG steps per call. */
+void sc_mapgen_feature_centre(ScMapGenPrng *p, ScMapGenState *st) {
+    st->x0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0028) + 0x0028u);   /* $0457/$043b */
+    st->y0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0021) + 0x0021u);   /* $0459/$043d */
+}
+
 /* ── Not yet decompiled ────────────────────────────────────────────────────
  *
  * 01:f1ed  dispatcher. Draws a byte from the PRNG and branches: roughly a
@@ -125,8 +177,10 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
  *          feature routines. This is the evidence that generation is genuinely
  *          procedural rather than a table of prebuilt maps.
  *
+ *          01:f380   DONE (sc_mapgen_feature_centre)
+ *          01:f877   DONE (sc_mapgen_rand_below)
+ *
  *          01:f22c   86 instructions
- *          01:f380   14
  *          01:f5b9   24
  *          01:f311   45
  *          01:f444   65

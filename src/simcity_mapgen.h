@@ -29,4 +29,16 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
                     uint8_t seed0, uint8_t seed1, uint8_t seed2,
                     unsigned entry_carry);
 
+/* Generator working state. Named for the guest variables it mirrors. */
+typedef struct ScMapGenState {
+    uint16_t x0;   /* $0457 and $043b */
+    uint16_t y0;   /* $0459 and $043d */
+} ScMapGenState;
+
+/* 01:f877 -- 0..n inclusive, via the hardware multiplier. One PRNG step. */
+uint16_t sc_mapgen_rand_below(ScMapGenPrng *p, uint16_t n);
+
+/* 01:f380 -- pick a point in the middle third of each axis. Two PRNG steps. */
+void sc_mapgen_feature_centre(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif
