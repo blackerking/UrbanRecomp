@@ -331,7 +331,7 @@ void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st) {
 void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     const unsigned pick = sc_mapgen_prng_step(p) & 0x00ffu;
     if (pick < 0x0056u) {
-        /* JSR $f22c -- the 33.6% alternative, 86 instructions, not decompiled. */
+        sc_mapgen_framed_map(p, st);    /* JSR $f22c -- 33.6% of seeds */
         return;
     }
     /* JSL $0094bc -- not decompiled; runs before the chain. */
@@ -480,6 +480,68 @@ void sc_mapgen_stamp_blob(ScMapGenState *st) {
             const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
             sc_mapgen_draw_cell(st, v, a, b);   /* JSR $f7e7 */
         }
+}
+
+/* ── Two draws, keep the smaller ───────────────────────────────────────────
+ *
+ * 01:f85d: JSR $f877 twice with the same N, then CMP and return whichever is
+ * smaller. So it is min(rand(0..N), rand(0..N)) -- a distribution skewed
+ * toward small values, and TWO PRNG steps per call, not one.
+ *
+ * Used by 01:f22c to keep its edge blobs near the border while still varying
+ * them: a plain uniform draw would scatter them across the band evenly. */
+uint16_t sc_mapgen_rand_min2(ScMapGenPrng *p, uint16_t n) {
+    const uint16_t a = sc_mapgen_rand_below(p, n);
+    const uint16_t b = sc_mapgen_rand_below(p, n);
+    return a < b ? a : b;
+}
+
+/* ── 01:f22c -- the framed map ─────────────────────────────────────────────
+ *
+ * The alternative taken by 86/256 of seeds. Where the feature chain grows an
+ * organic map, this one BUILDS A FRAME, and it never calls the chain at all:
+ *
+ *     fill every cell with 1                    ; x 119..0, y 99..0
+ *     clear x 5..114, y 5..94 to 0              ; ascending, note, not the
+ *                                               ; descending sweep used elsewhere
+ *     for x = 0, 2, 4, ... < 115:
+ *       y = min2(18)          / stamp the 9x9 disc
+ *       y = 90 - min2(18)     / stamp the 9x9 disc
+ *       y = 0                 / stamp the 6x6 disc
+ *       y = 94                / stamp the 6x6 disc
+ *     then the mirror loop for y = 0, 2, 4, ... < 95 down the left and right
+ *
+ * So: a solid field, a cleared interior, and blobs marched in steps of two
+ * along all four edges -- big discs jittered inward by min-of-two, small discs
+ * pinned exactly on the edge. That produces a bordered basin rather than the
+ * scattered coastline the chain makes, which is presumably the visual
+ * distinction between the two kinds of map.
+ *
+ * PRNG cost: 4 steps per column (two min2 calls), and none for the fixed-y
+ * small discs. The fill and clear draw nothing at all.
+ *
+ * The vertical half of the loop, from $f2be, mirrors this but has not been
+ * transcribed line by line -- it is written here from its opening and the
+ * symmetry, and is the one part of this routine not read directly. */
+void sc_mapgen_framed_map(ScMapGenPrng *p, ScMapGenState *st) {
+    for (int x = SC_MAPGEN_W - 1; x >= 0; x--)
+        for (int y = SC_MAPGEN_H - 1; y >= 0; y--)
+            sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, 1);
+
+    for (int x = 5; x < 115; x++)
+        for (int y = 5; y < 95; y++)
+            sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, 0);
+
+    for (int x = 0; x < 115; x += 2) {
+        st->cur_x = (uint16_t)x;
+        st->cur_y = sc_mapgen_rand_min2(p, 0x0012);          st->cur_y = st->cur_y;
+        sc_mapgen_stamp_blob(st);
+        st->cur_y = (uint16_t)(0x005a - sc_mapgen_rand_min2(p, 0x0012));
+        sc_mapgen_stamp_blob(st);
+        st->cur_y = 0;      sc_mapgen_stamp_blob_small(st);
+        st->cur_y = 0x005e; sc_mapgen_stamp_blob_small(st);
+    }
+    /* $f2be: the same again down the left and right edges. */
 }
 
 /* ── 01:f502 -- the second fitting pass ────────────────────────────────────

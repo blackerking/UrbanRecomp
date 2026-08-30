@@ -115,4 +115,11 @@ void sc_mapgen_shoreline(ScMapGenPrng *p, ScMapGenState *st);
  * twice by the scatter feature, and it reads the buffer it writes. */
 void sc_mapgen_fit_pass(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f85d -- min of two draws below n. TWO PRNG steps. */
+uint16_t sc_mapgen_rand_min2(ScMapGenPrng *p, uint16_t n);
+
+/* 01:f22c -- the framed map: fill, clear the interior, march blobs along all
+ * four edges. Taken by 86/256 of seeds instead of the feature chain. */
+void sc_mapgen_framed_map(ScMapGenPrng *p, ScMapGenState *st);
+
 #endif
