@@ -291,7 +291,7 @@ void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st) {
             if ((sc_mapgen_prng_step(p) & 0x0003u) == 0) {
                 /* JSR $f794 -- not decompiled. */
             } else {
-                /* JSR $f71d -- not decompiled. */
+                sc_mapgen_stamp_blob(st);   /* $f71d: the 9x9 disc */
             }
             blobs--;
         }
@@ -351,6 +351,68 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── The blob brush ────────────────────────────────────────────────────────
+ *
+ * 01:f71d, the 3-in-4 draw the clustered-blob feature calls:
+ *
+ *     LDA #$0008 / STA $0447            ; a = 8
+ *   outer ($f725):
+ *     LDA #$0008 / STA $0449            ; b = 8
+ *   inner ($f72b):
+ *     LDA $0449 / STA $4202             ; b
+ *     LDA #$09  / STA $4203             ; x 9   -- hardware multiplier again
+ *     LDA $4217/$4216 / CLC / ADC $0447 ; index = b*9 + a
+ *     TAX / LDA $01f6cc,X / AND #$00ff
+ *     JSR $f7e7                         ; draw that value at this offset
+ *     DEC $0449 / BPL inner
+ *     DEC $0447 / BPL outer
+ *
+ * So it stamps a 9x9 brush, and the table at $01f6cc IS A CIRCLE -- which is
+ * about as clear a confirmation as reverse engineering offers, because the
+ * data draws itself:
+ *
+ *     . . . o o o . . .        0  outside   (24 cells)
+ *     . . o # # # o . .        3  rim       (20)
+ *     . o # # # # # o .        1  interior  (36)
+ *     o # # # # # # # o        2  centre    (1, dead centre)
+ *     o # # # 2 # # # o
+ *     o # # # # # # # o
+ *     . o # # # # # o .
+ *     . . o # # # o . .
+ *     . . . o o o . . .
+ *
+ * A radius-4 disc with a distinguished rim and a marked centre. The rim value
+ * being separate from the interior is what lets the caller draw a shoreline
+ * and a fill in one pass; the single centre cell is presumably where a feature
+ * anchor goes.
+ *
+ * Note the loops run 8 down to 0 INCLUSIVE (BPL, not BNE), so it really is
+ * 9x9 and not 8x8. $f7e7, the per-cell draw that turns 0/1/2/3 into a tile,
+ * is not decompiled. Neither is $f794, the 1-in-4 alternative -- presumably a
+ * different brush. */
+enum { SC_MAPGEN_BRUSH = 9 };
+extern const unsigned char sc_mapgen_brush[81];
+const unsigned char sc_mapgen_brush[81] = {
+    0,0,0,3,3,3,0,0,0,
+    0,0,3,1,1,1,3,0,0,
+    0,3,1,1,1,1,1,3,0,
+    3,1,1,1,1,1,1,1,3,
+    3,1,1,1,2,1,1,1,3,
+    3,1,1,1,1,1,1,1,3,
+    0,3,1,1,1,1,1,3,0,
+    0,0,3,1,1,1,3,0,0,
+    0,0,0,3,3,3,0,0,0,
+};
+
+void sc_mapgen_stamp_blob(ScMapGenState *st) {
+    for (int a = 8; a >= 0; a--)
+        for (int b = 8; b >= 0; b--) {
+            const unsigned char v = sc_mapgen_brush[b * SC_MAPGEN_BRUSH + a];
+            (void)v;   /* JSR $f7e7 -- the per-cell draw, not decompiled */
+        }
+    (void)st;
+}
+
 /* ── The 8-way move ────────────────────────────────────────────────────────
  *
  * 01:f6ae:

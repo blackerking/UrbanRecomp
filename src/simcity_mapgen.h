@@ -82,4 +82,8 @@ void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st);
  * so dir ^ 4 is the reverse, which is what 01:f5b9 relies on. */
 void sc_mapgen_move(ScMapGenState *st, unsigned dir);
 
+/* 01:f71d -- stamp the 9x9 disc brush at $01f6cc. Values are 0 outside,
+ * 3 rim, 1 interior, 2 the single centre cell. */
+void sc_mapgen_stamp_blob(ScMapGenState *st);
+
 #endif
