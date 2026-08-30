@@ -20,9 +20,19 @@
  * Map geometry: 120 x 100 = 12000 cells. Confirmed independently by the power
  * bitmap at 03:b0f8, whose CPX #$05dc bounds it at 1500 bytes = 12000 bits.
  *
- * The generated map lands at $7E0200 and is later masked with AND #$03FF into
- * $7E8000 by the copy loop at 03:cf82-cf9d, which strips flag bits from each
- * tile. See docs/ROM_MAP.md. */
+ * THE MAP IS AT $7F0200 -- bank 7F, not 7E. 01:f8e9, which the generator uses
+ * to read a cell, ends:
+ *
+ *     CLC / ADC $044f      ; index = y*120 + x
+ *     ASL A / TAX          ; word array
+ *     LDA $7f0200,X
+ *     AND #$03ff
+ *
+ * docs/ROM_MAP.md says the generated map lands at $7e0200; that is a different
+ * buffer, and reading it wastes time. Measured on a real terrain state,
+ * $7F0200 holds 37 distinct tile values across the 12000 cells -- a plausible
+ * terrain vocabulary -- while $7E0200 holds 411, which is far too many to be
+ * tiles. Corrected in ROM_MAP.md too. */
 
 #include "simcity_mapgen.h"
 
@@ -588,16 +598,20 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  *      generation goes through 03:d840, which folds the index in. Both were
  *      caught live and read as contradictory until this.
  *
- *      GOLDEN REFERENCE: savestate_5 holds a real map at $7E0200 for index
- *      00 00 00 -- 12000 words, each masked with 0x03FF. Terrain-shaped
- *      (000 x7780, 300 x1051, 2A5 x825, 14B x755), and row 50 is a long
- *      uniform run of 2A5 broken by a single 301. Slots 2 and 3 are EMPTY at
- *      that address, which is why driving them produced nothing however they
- *      were poked.
+ *      GOLDEN REFERENCE: savestate_5, read at $7F0200 -- 12000 words, each
+ *      masked with 0x03FF. It holds 37 distinct tile values, dominated by
+ *      000 (7742 cells) and 001 (1654), with 018 and 021 next. savestate_3
+ *      holds the same map. savestate_2 has 958 distinct values there, which
+ *      is a built-up scenario city rather than raw terrain.
+ *
+ *      An earlier version of this note pointed at $7E0200 and called ITS
+ *      contents the golden map. That was the wrong buffer -- 411 distinct
+ *      values, far too many to be tiles.
  *
  *      To extract it:
  *        SC_WRAM_DUMP_PATH=<out> SC_DUMP_AT=5 --load-state savestate_5.bin
- *        then read 12000 words from offset 0x0200, masking each with 0x03FF.
+ *        then read 12000 words from offset 0x10200 ($7F0200 in a 128K dump,
+ *        since $7E0000 is offset 0), masking each with 0x03FF.
  *
  *      The dump is ROM-derived and is deliberately NOT committed.
  *   3. Compare per routine, not just at the end. A whole-map mismatch says
