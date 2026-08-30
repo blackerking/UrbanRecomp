@@ -170,6 +170,71 @@ void sc_mapgen_feature_centre(ScMapGenPrng *p, ScMapGenState *st) {
     st->y0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0021) + 0x0021u);   /* $0459/$043d */
 }
 
+/* ── Feature: scatter ──────────────────────────────────────────────────────
+ *
+ * 01:f3a3:
+ *
+ *     LDA #$0064 / JSR $f877 / CLC / ADC #$0032   ; count = 50 + rand(0..100)
+ *     STA $043f
+ *   loop:
+ *     LDA #$0077 / JSR $f877 / STA $044b          ; x = rand(0..119)
+ *     LDA #$0063 / JSR $f877 / STA $044d          ; y = rand(0..99)
+ *     JSR $f3d3                                   ; place at (x,y)
+ *     DEC $043f / BNE loop
+ *     JSR $f502 / JSR $f502
+ *
+ * 50..150 placements at cells drawn across the FULL map -- 0..119 by 0..99 is
+ * exactly the 120 x 100 bounds, which is a useful confirmation of the geometry
+ * from a second direction.
+ *
+ * Three PRNG steps per iteration (one for the count, then two per placement),
+ * so the stream position depends on the count drawn first. Getting that order
+ * wrong desynchronises everything after it. */
+void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st) {
+    uint16_t count = (uint16_t)(sc_mapgen_rand_below(p, 0x0064) + 0x0032u);
+    st->count = count;
+    while (count) {
+        st->px = sc_mapgen_rand_below(p, 0x0077);   /* $044b, 0..119 */
+        st->py = sc_mapgen_rand_below(p, 0x0063);   /* $044d, 0..99  */
+        /* JSR $f3d3 -- the placement itself, not yet decompiled. */
+        count--;
+    }
+    st->count = 0;
+    /* JSR $f502 twice -- not yet decompiled. */
+}
+
+/* ── Feature: path through the centre ──────────────────────────────────────
+ *
+ * 01:f5b9:
+ *
+ *     JSL $00824b / AND #$0003 / STA $045f / STA $0461   ; dir = rand & 3
+ *     JSR $f600                                          ; walk that way
+ *     LDA $0457 / STA $043b / LDA $0459 / STA $043d      ; back to the centre
+ *     LDA $045f / EOR #$0004 / STA $045f / STA $0461     ; dir ^= 4
+ *     JSR $f600                                          ; walk the other way
+ *     LDA $0457 / STA $043b / LDA $0459 / STA $043d      ; back to the centre
+ *
+ * Draws from the centre point in one of four directions, then from the same
+ * point in the opposite one -- so the feature crosses the middle rather than
+ * starting there. `EOR #$0004` is what makes 0..3 and 4..7 opposite halves of
+ * an eight-way direction encoding.
+ *
+ * Note it steps the PRNG DIRECTLY rather than through 01:f877, so this call
+ * costs exactly one step regardless of the direction drawn.
+ *
+ * $0457/$0459 are the centre written by 01:f380, so this feature depends on
+ * that one having run. */
+void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
+    st->dir = (uint16_t)(sc_mapgen_prng_step(p) & 0x0003u);
+    /* JSR $f600 -- the walk itself, not yet decompiled. */
+    st->cur_x = st->x0;
+    st->cur_y = st->y0;
+    st->dir ^= 0x0004u;
+    /* JSR $f600 again. */
+    st->cur_x = st->x0;
+    st->cur_y = st->y0;
+}
+
 /* ── Not yet decompiled ────────────────────────────────────────────────────
  *
  * 01:f1ed  dispatcher. Draws a byte from the PRNG and branches: roughly a
@@ -180,11 +245,12 @@ void sc_mapgen_feature_centre(ScMapGenPrng *p, ScMapGenState *st) {
  *          01:f380   DONE (sc_mapgen_feature_centre)
  *          01:f877   DONE (sc_mapgen_rand_below)
  *
+ *          01:f3a3   DONE (scatter), except its $f3d3 placement and $f502
+ *          01:f5b9   DONE (path),    except its $f600 walk
+ *
  *          01:f22c   86 instructions
- *          01:f5b9   24
  *          01:f311   45
  *          01:f444   65
- *          01:f3a3   18
  *
  * 02:923f  zero-fills $7EA400-$7EBFFF (7168 bytes), then sets up the DMA. The
  *          upload side, not generation proper -- a native generator writes the
