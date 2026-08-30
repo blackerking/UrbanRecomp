@@ -344,11 +344,30 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *      00C4/00C5, with $0b2a flipping to FF0000, which only 03:d873 does and
  *      only after generating. So the generation path DID run.
  *
- *      But the PRNG does not advance afterwards: it sits at 00C4/00C5 while
- *      the map region changes only a handful of bytes per frame. A generator
- *      that draws no randomness is not the procedural path, so the map being
- *      shown is still coming from somewhere else. That is the open question,
- *      and it is now a narrow one: find what consumes 00C4/00C5 and when.
+ *      RESOLVED, by game knowledge rather than measurement: there are roughly
+ *      1000-2000 maps and EACH INDEX GIVES THE SAME MAP ON EVERY RESTART. So
+ *      $0b27-$0b29 is a map NUMBER, not entropy -- which is why B on the map
+ *      screen walks it 01, 02, 03 -- and generation is deterministic from it
+ *      by construction. One index, one map, forever. That is what makes this
+ *      whole exercise checkable.
+ *
+ *      It also explains the seeding confusion above: 00:823e, seeding from the
+ *      $c7 spin counter, is IN-GAME randomness and not the map path. Map
+ *      generation goes through 03:d840, which folds the index in. Both were
+ *      caught live and read as contradictory until this.
+ *
+ *      GOLDEN REFERENCE: savestate_5 holds a real map at $7E0200 for index
+ *      00 00 00 -- 12000 words, each masked with 0x03FF. Terrain-shaped
+ *      (000 x7780, 300 x1051, 2A5 x825, 14B x755), and row 50 is a long
+ *      uniform run of 2A5 broken by a single 301. Slots 2 and 3 are EMPTY at
+ *      that address, which is why driving them produced nothing however they
+ *      were poked.
+ *
+ *      To extract it:
+ *        SC_WRAM_DUMP_PATH=<out> SC_DUMP_AT=5 --load-state savestate_5.bin
+ *        then read 12000 words from offset 0x0200, masking each with 0x03FF.
+ *
+ *      The dump is ROM-derived and is deliberately NOT committed.
  *   3. Compare per routine, not just at the end. A whole-map mismatch says
  *      nothing about WHICH of six routines is wrong.
  *
