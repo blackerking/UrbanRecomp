@@ -35,6 +35,7 @@ endif()
 add_executable(SimCitySNESRecomp
     src/main.c
     src/simcity_mapview.c
+    src/simcity_mapgen.c
 )
 
 target_include_directories(SimCitySNESRecomp PRIVATE

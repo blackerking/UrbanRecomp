@@ -226,6 +226,56 @@ nothing -- and these defects only show while the map is moving, so they cannot
 be caught in a screenshot. Every diagnosis here that needed the user's own city
 depended on it.
 
+## OPEN -- map generation on decompiled code
+
+Goal: generate maps natively rather than by running guest code, so generation
+can be CHANGED -- larger maps, new terrain rules, chosen seeds -- instead of
+only replayed. Started 2026-08-30 in `src/simcity_mapgen.c`; it compiles and is
+in the build, but nothing is wired in and **nothing is verified**.
+
+### Done
+
+The PRNG (`00:824f`) and the map seeding (`03:d840`), transcribed from
+`tools/dis_mx.py` output with the disassembly quoted in the source. The carry
+chaining between the two `ADC`s in the PRNG is load-bearing -- drop it and the
+stream looks plausible and diverges after a few draws.
+
+### The scope, which is small
+
+The generator is about 250 instructions in six routines, all reachable from
+`01:f1ed`:
+
+```
+01:f22c   86 instructions      01:f311   45
+01:f444   65                   01:f5b9   24
+01:f3a3   18                   01:f380   14
+```
+
+`02:923f` is the DMA upload side, not generation -- a native generator writes
+cells directly and does not need it.
+
+### Verification comes first, and is the whole game
+
+Nothing above is worth anything until a seed produces an identical map. The
+map is fully determined by the three bytes `$0b27`-`$0b29` (`03:d873` copies
+them to `$0b2a`-`$0b2c` immediately after generating, i.e. the game treats them
+as the map's identity), so a seed/map pair is a complete test case.
+
+1. **Trace the guest's PRNG.** `g_interp_bridge_pc_hook` already fires per
+   interpreted opcode, so watching for PC == `$00824f` and recording
+   `$59`/`$5b`/`$5d` gives the reference stream.
+2. **Settle the entry carry.** `03:d840`'s `ROL` chain and its `ADC #$1238`
+   both consume the caller's carry, which the disassembly cannot show. It is a
+   PARAMETER in the C, not a guess, precisely so the trace can decide it.
+3. **Capture a golden map**: dump `$7E0200` (12000 cells) with its seed bytes.
+4. **Compare per routine.** A whole-map mismatch does not say which of six is
+   wrong.
+
+Two traps this project has already paid for apply directly: use `dis_mx.py`,
+never `dis65816.py`, which does not track SEP/REP and mis-sizes operands after
+a width change; and do not trust a harness-side number as if it came from the
+emulator -- the audio work below measured the harness twice before noticing.
+
 ## OPEN -- audio desynchronises, and has since the project started
 
 Reported from play as long-standing. Investigated 2026-08-30 and **not solved**.
