@@ -308,8 +308,31 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *      because the state is only 32 bits, a correct step must join consecutive
  *      samples in a few iterations while a wrong one essentially never does.
  *      That is the check above, and it discriminates: 14/14 against 8/14.
- *   2. Capture the map. Dump $7E0200 (12000 cells) after generation with the
- *      seed bytes $0b27-$0b29 alongside; that pair is the golden reference.
+ *   2. Capture the map -- NOT YET DONE, and harder than it looks. What was
+ *      learned trying, 2026-08-30:
+ *
+ *      - **Inputs are blocked until the screen has rendered.** Scripted
+ *        `--input` at a fixed early frame is simply swallowed, which made the
+ *        same button appear to work sometimes and not others. Press late, or
+ *        hold.
+ *      - On the map-select screen, `B` (mask 0x0001 here) increments `$0b27`;
+ *        it was the only one of nine inputs that touched it.
+ *      - **The previews are decompressed, not generated.** Loading the map
+ *        screen writes 1702 then 3205 bytes into `$7E0200` across two frames
+ *        while the PRNG state is still `0000/0000` -- a bulk load with no
+ *        randomness drawn is a prebuilt map being decompressed.
+ *      - PRNG bursts of 89-130 steps per frame DO occur later, with direct
+ *        writes (seeding) among them, but `$0b27` and `$0b2a` never change
+ *        across any of it.
+ *
+ *      `$0b2a`-`$0b2c` is the marker that matters: 03:d873 copies the seed
+ *      there immediately after generating, so while it stays put, the
+ *      generation path has NOT run. It never moved in any capture.
+ *
+ *      Conclusion: map-select shows prebuilt scenario maps (there is a 9-entry
+ *      map pointer table at 03:ce70), and procedural generation belongs to the
+ *      FREE PLAY path. A save state taken just after a freshly generated map
+ *      appears would give the golden pair outright.
  *   3. Compare per routine, not just at the end. A whole-map mismatch says
  *      nothing about WHICH of six routines is wrong.
  *
