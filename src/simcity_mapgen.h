@@ -78,4 +78,8 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y);
  * stopping early if it leaves the map. Its PRNG cost is data-dependent. */
 void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st);
 
+/* 01:f6ae -- step one cell. Directions are a compass rose from N clockwise,
+ * so dir ^ 4 is the reverse, which is what 01:f5b9 relies on. */
+void sc_mapgen_move(ScMapGenState *st, unsigned dir);
+
 #endif

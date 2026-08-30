@@ -341,6 +341,35 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
  *
+/* ── The 8-way move ────────────────────────────────────────────────────────
+ *
+ * 01:f6ae:
+ *
+ *     AND #$0007 / ASL A / TAX          ; word-indexed
+ *     LDA $01f68e,X / ADC $043b / STA $043b     ; x += dx[dir]
+ *     LDA $01f69e,X / ADC $043d / STA $043d     ; y += dy[dir]
+ *
+ * The two 8-entry WORD tables, read from the US ROM:
+ *
+ *     $01f68e dx: 0000 0001 0001 0001 0000 FFFF FFFF FFFF
+ *     $01f69e dy: FFFF FFFF 0000 0001 0001 0001 0000 FFFF
+ *
+ *     0 N (0,-1)   1 NE (+1,-1)   2 E (+1,0)   3 SE (+1,+1)
+ *     4 S (0,+1)   5 SW (-1,+1)   6 W (-1,0)   7 NW (-1,-1)
+ *
+ * A compass rose from N, clockwise. And it CONFIRMS the reading of 01:f5b9:
+ * `dir ^ 4` is exactly the opposite direction here, so that feature's
+ * EOR #$0004 really does walk back the way it came. That was inferred from the
+ * bit pattern before these tables were read; now it is established. */
+static const int kMapGenDx[8] = {  0, +1, +1, +1,  0, -1, -1, -1 };
+static const int kMapGenDy[8] = { -1, -1,  0, +1, +1, +1,  0, -1 };
+
+void sc_mapgen_move(ScMapGenState *st, unsigned dir) {
+    dir &= 7u;
+    st->cur_x = (uint16_t)(st->cur_x + kMapGenDx[dir]);
+    st->cur_y = (uint16_t)(st->cur_y + kMapGenDy[dir]);
+}
+
 /* ── The walk: what a scattered point actually draws ───────────────────────
  *
  * 01:f3d3, called once per scatter placement. It is not a stamp -- it is a
@@ -369,7 +398,7 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * steps, which means the stream cannot be predicted without running the walk
  * itself.
  *
- * $f6ae is the 8-way single-cell move and is not decompiled. Note the
+ * Note the
  * direction here is `& 7` -- eight ways -- while 01:f5b9's path uses `& 3` plus
  * an EOR #$0004 flip. Same encoding, different halves of it. */
 void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st) {
@@ -377,7 +406,9 @@ void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st) {
     int x = (int)st->px, y = (int)st->py;                          /* $044b/$044d */
     while (steps) {
         const unsigned dir = sc_mapgen_prng_step(p) & 0x0007u;
-        (void)dir;   /* JSR $f6ae -- the 8-way move, not decompiled */
+        st->cur_x = (uint16_t)x; st->cur_y = (uint16_t)y;
+        sc_mapgen_move(st, dir);                 /* JSR $f6ae */
+        x = (int16_t)st->cur_x; y = (int16_t)st->cur_y;
         if (!sc_mapgen_in_bounds(x, y)) break;   /* JSR $f843 / BCS */
         /* JSR $f8e9 then the write -- not decompiled */
         steps--;
