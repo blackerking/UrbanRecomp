@@ -1061,8 +1061,33 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  * (which consumes 3s) at a point where the ROM has not yet reached it. The
  * ordering is the next thing to check, not the individual routines.
  *
- * Still unknown and still parameters, not guesses: 03:d840's entry carry and
- * entry A. Neither can be settled from the disassembly.
+ * ── WHERE THE COMPARISON ACTUALLY STANDS ──────────────────────────────────
+ *
+ * After the walk's 0x18 write was added, against the golden generated map
+ * (savestate_3 + Up, f=685):
+ *
+ *   - THE VOCABULARY MATCHES EXACTLY: 37 distinct values in both.
+ *   - Value 0 lands at 7869 against 7898 -- within 0.4%.
+ *   - Most other counts are roughly HALF the golden's (0x04: 35 vs 70,
+ *     0x07: 19 vs 35, 0x08: 19 vs 37, 0x18: 351 vs 943).
+ *   - 4639 of 12000 cells match, 38.7%.
+ *
+ * That 38.7% should not be read as "nearly 40% right". The map is dominated by
+ * zeros, and two maps with 7869 and 5131 zeros would share about 3364 cells by
+ * chance alone. So the agreement is only modestly above coincidence, and
+ * cell-for-cell we are NOT close.
+ *
+ * The factor-of-two pattern suggested the reference had accumulated two
+ * generation passes, since the preview regenerates while the button is held.
+ * TESTED AND WRONG: SC_MAPGEN_REPEAT=2 drops the match to 27.1% and 3 to
+ * 21.6%, and at 2 the fitted values vanish entirely because the second pass
+ * takes the framed branch and wipes the walk's output. One pass is right.
+ *
+ * What remains is almost certainly the seeding. 03:d840's entry carry and
+ * entry A are still unknown -- neither can be settled from the disassembly --
+ * and without the correct stream start every draw after the first diverges,
+ * which produces exactly this: right rules, right vocabulary, wrong map. Pin
+ * those two down before touching any of the routines.
  *
  * ── Verification, which comes before any of that ───────────────────────────
  *

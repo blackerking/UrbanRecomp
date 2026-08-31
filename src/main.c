@@ -5413,7 +5413,12 @@ int main(int argc, char **argv) {
                      (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
                      (uint8_t)((idx >> 16) & 0xff),
                      (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u));
-      sc_mapgen_generate(&pr, &gs);
+      { const char *rp = getenv("SC_MAPGEN_REPEAT");
+        const unsigned reps = rp && *rp ? (unsigned)strtoul(rp, NULL, 0) : 1u;
+        /* The captured reference accumulated more than one pass -- the preview
+         * regenerates while the button is held -- so the count is a parameter
+         * rather than 1. */
+        for (unsigned r = 0; r < reps; r++) sc_mapgen_generate(&pr, &gs); }
       if (outp && *outp) {
         FILE *f = fopen(outp, "wb");
         if (f) { fwrite(gs.map, 2, SC_MAPGEN_CELLS, f); fclose(f); }
