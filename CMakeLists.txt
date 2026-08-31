@@ -120,6 +120,7 @@ if(SIMCITY_GEN_SOURCES)
         src/aot_probe.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_mapgen.c
         src/simcity_fiber.c
         # src/simcity_fiberdrive.c -- NOT linked here.
         #
@@ -188,6 +189,7 @@ if(SIMCITY_GEN_SOURCES)
         src/simcity_mapview.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_mapgen.c
         src/simcity_fiber.c
         src/simcity_fiberdrive.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
@@ -229,6 +231,7 @@ if(SIMCITY_GEN_SOURCES)
         src/aot_diff.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
+        src/simcity_mapgen.c
         src/simcity_fiber.c
         # src/simcity_fiberdrive.c -- NOT linked here.
         #

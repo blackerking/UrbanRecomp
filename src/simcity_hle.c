@@ -9,6 +9,7 @@
 
 #include "cpu_state.h"
 #include "common_rtl.h"
+#include "simcity_mapgen.h"
 
 /* Set by the host once it is actually driving frames. Until then the yield has
  * nowhere to go -- see the long note in SimCity_WaitForVblank. */
@@ -86,5 +87,77 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
         }
     }
 
+    return RECOMP_RETURN_NORMAL;
+}
+
+/*
+ * 01:f1ed -- the map generator, replaced wholesale by the decompiled one.
+ *
+ * This is the point of the whole exercise. 03:d840 runs generation as a single
+ * synchronous JSL, and the SNES CPU takes about 800 frames of wall clock to
+ * grind through it -- roughly thirteen seconds of the player watching a map
+ * appear a few cells at a time. src/simcity_mapgen.c does the same work
+ * natively in well under a frame.
+ *
+ * Safe to substitute only because it is verified bit-exact, not merely
+ * plausible: three maps covering BOTH branches reproduce the guest's map on
+ * all 12000 cells, consume the guest's exact draw count, and leave the PRNG in
+ * the guest's exact final state. See the long note in simcity_mapgen.c.
+ *
+ * WHAT THIS MUST GET RIGHT BESIDES THE MAP:
+ *
+ * 1. THE PRNG STATE. 03:d840 does not touch $59/$5b after this returns, but
+ *    everything else in the game draws from the same generator, so leaving it
+ *    at the wrong value would desynchronise every later random event. We
+ *    write back the state our generator ends on, which is the guest's.
+ *
+ * 2. THE RETURN. f1ed is reached by JSL, so three bytes come off the stack,
+ *    not the two that a JSR-reached HLE like SimCity_WaitForVblank pops.
+ *
+ * 3. NOT THE NMI SHADOW. f1f5 masks $b1 from $b3 on entry and f225 restores it
+ *    on exit. Replacing the whole routine skips both, which is correct --
+ *    the pair cancels, and we never disabled anything to restore.
+ *
+ * The caller has already seeded and pre-stepped the PRNG by the time it gets
+ * here (03:d84d through the d862 loop), so there is no seeding to redo: the
+ * state in $59/$5b IS the starting point.
+ */
+unsigned long g_simcity_mapgen_hle_calls = 0;
+
+RecompReturn SimCity_MapGen(CpuState *cpu) {
+    static ScMapGenState gs;
+    ScMapGenPrng pr;
+
+    g_simcity_mapgen_hle_calls++;
+
+    pr.s0 = (uint16)(g_ram[0x59] | (g_ram[0x5a] << 8));
+    pr.s1 = (uint16)(g_ram[0x5b] | (g_ram[0x5c] << 8));
+    pr.t  = (uint16)(g_ram[0x5d] | (g_ram[0x5e] << 8));
+
+    sc_mapgen_generate(&pr, &gs);
+
+    /* The map is at $7F0200 -- bank 7F, so 0x10200 into WRAM. This offset was
+     * wrong once (7E, not 7F) and cost a whole reference built on the wrong
+     * buffer, so it is worth stating rather than assuming. */
+    for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+        g_ram[0x10200 + 2 * i]     = (uint8)(gs.map[i] & 0xff);
+        g_ram[0x10200 + 2 * i + 1] = (uint8)((gs.map[i] >> 8) & 0xff);
+    }
+
+    g_ram[0x59] = (uint8)(pr.s0 & 0xff);  g_ram[0x5a] = (uint8)(pr.s0 >> 8);
+    g_ram[0x5b] = (uint8)(pr.s1 & 0xff);  g_ram[0x5c] = (uint8)(pr.s1 >> 8);
+    g_ram[0x5d] = (uint8)(pr.t  & 0xff);  g_ram[0x5e] = (uint8)(pr.t  >> 8);
+
+    if (getenv("SC_MAPGEN_HLE_DIAG")) {
+        unsigned nz = 0;
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
+            if (gs.map[i] & 0x3ff) nz++;
+        fprintf(stderr, "[mapgen_hle] call %lu: %u cells, %lu draws, "
+                        "prng %04X/%04X\n",
+                g_simcity_mapgen_hle_calls, nz, g_sc_mapgen_prng_steps,
+                (unsigned)pr.s0, (unsigned)pr.s1);
+    }
+
+    cpu->S = (uint16)(cpu->S + 3);        /* JSL: three bytes, not two */
     return RECOMP_RETURN_NORMAL;
 }

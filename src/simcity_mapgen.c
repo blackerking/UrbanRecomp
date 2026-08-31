@@ -475,8 +475,11 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
         sc_mapgen_framed_map(p, st);    /* JSR $f22c -- 33.6% of seeds */
         return;
     }
-    /* JSL $0094bc -- clears the map to zero; see the status block above.
-     * Our caller zero-inits, so there is nothing to call. */
+    /* JSL $0094bc -- clears the map to zero. Done here rather than left to the
+     * caller, so a generate() into a dirty buffer is correct: the HLE path
+     * hands us whatever the guest's map held. The framed branch does not need
+     * it, because $f22c writes every cell before carving. */
+    memset(st->map, 0, sizeof st->map);
     /* Snapshot around each routine. The nonzero total alone cannot tell a pass
      * that rewrites existing cells from one that writes nothing at all --
      * which is exactly the open question about $f444. */
