@@ -5519,10 +5519,12 @@ int main(int argc, char **argv) {
                                        "scatter f3a3" };
           unsigned long prev = 0;
           for (int k = 0; k < 5; k++) {
-            fprintf(stderr, "[phase] %-12s steps=%6lu  cells=%5lu (%+ld)\n",
+            fprintf(stderr, "[phase] %-12s steps=%6lu  cells=%5lu (%+ld)"
+                            "  changed=%lu cleared=%lu\n",
                     nm[k], g_sc_mapgen_phase_steps[k],
                     g_sc_mapgen_phase_cells[k],
-                    (long)g_sc_mapgen_phase_cells[k] - (long)prev);
+                    (long)g_sc_mapgen_phase_cells[k] - (long)prev,
+                    g_sc_mapgen_phase_changed[k], g_sc_mapgen_phase_cleared[k]);
             prev = g_sc_mapgen_phase_cells[k];
           } } }
       return 0;

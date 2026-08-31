@@ -35,6 +35,7 @@
  * tiles. Corrected in ROM_MAP.md too. */
 
 #include "simcity_mapgen.h"
+#include <string.h>
 
 /* ── PRNG ──────────────────────────────────────────────────────────────────
  *
@@ -76,6 +77,8 @@ unsigned long g_sc_mapgen_prng_steps = 0;
  * step-vs-cells profile recovered from WRAM dumps. */
 unsigned long g_sc_mapgen_phase_steps[5] = {0};
 unsigned long g_sc_mapgen_phase_cells[5] = {0};
+unsigned long g_sc_mapgen_phase_changed[5] = {0};
+unsigned long g_sc_mapgen_phase_cleared[5] = {0};
 
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p) {
     g_sc_mapgen_prng_steps++;
@@ -346,7 +349,11 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     }
     /* JSL $0094bc -- clears the map to zero; see the status block above.
      * Our caller zero-inits, so there is nothing to call. */
-#define SC_PHASE(slot, call) do {                                                      const unsigned long s_ = g_sc_mapgen_prng_steps;                               unsigned c_ = 0, i_;                                                           call;                                                                          for (i_ = 0; i_ < SC_MAPGEN_CELLS; i_++) if (st->map[i_] & 0x3ffu) c_++;        g_sc_mapgen_phase_steps[slot] = g_sc_mapgen_prng_steps - s_;                   g_sc_mapgen_phase_cells[slot] = c_;                                        } while (0)
+    /* Snapshot around each routine. The nonzero total alone cannot tell a pass
+     * that rewrites existing cells from one that writes nothing at all --
+     * which is exactly the open question about $f444. */
+    static uint16_t sc_before[SC_MAPGEN_CELLS];
+#define SC_PHASE(slot, call) do {                                                      const unsigned long s_ = g_sc_mapgen_prng_steps;                               unsigned c_ = 0, ch_ = 0, cl_ = 0, i_;                                         memcpy(sc_before, st->map, sizeof sc_before);                                  call;                                                                          for (i_ = 0; i_ < SC_MAPGEN_CELLS; i_++) {                                         if (st->map[i_] & 0x3ffu) c_++;                                                if ((st->map[i_] & 0x3ffu) != (sc_before[i_] & 0x3ffu)) {                          ch_++;                                                                         if (!(st->map[i_] & 0x3ffu)) cl_++;                                        }                                                                          }                                                                              g_sc_mapgen_phase_steps[slot]   = g_sc_mapgen_prng_steps - s_;                 g_sc_mapgen_phase_cells[slot]   = c_;                                          g_sc_mapgen_phase_changed[slot] = ch_;                                         g_sc_mapgen_phase_cleared[slot] = cl_;                                     } while (0)
     SC_PHASE(0, sc_mapgen_feature_centre(p, st));    /* $f380 */
     SC_PHASE(1, sc_mapgen_feature_path(p, st));      /* $f5b9 */
     SC_PHASE(2, sc_mapgen_feature_clusters(p, st));  /* $f311 */
@@ -482,16 +489,51 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * routines together spend 749 steps for 1681 cells where the guest's fast
  * phase spends 2156 for 4225: about a third of the work.
  *
- * Two concrete leads, in order:
+ * ── THE PHASES MAP ONTO THE ROUTINES ─────────────────────────────
  *
- *   1. $f444 consumes 293 draws and changes the nonzero count by ZERO. Either
- *      it only rewrites existing cells (possible -- it is a shoreline pass) or
- *      it is drawing into nowhere. Worth confirming before anything else,
- *      because 293 wasted draws desynchronise everything after it.
- *   2. Nothing we do ever REMOVES a cell, but the guest's last 4606 draws take
- *      726 cells away, and the map visibly peaks at 7352 before settling at
- *      6626. No routine in our chain models that.
+ * Histogramming each WRAM dump by value class shows the guest producing them
+ * in strict sequence, which pins each phase to a routine:
+ *
+ *   steps      0.. 2156   ONLY values 1 and 2, growing to 3217 + 403 = 3620
+ *   steps   ~2156.. 4629   values 04-13 appear, 605 of them, then frozen
+ *   steps   ~2156..15771   values 14-25 grow to 3127; 1, 2 and 04-13 frozen
+ *   steps  15771..20377   values 14-25 SHRINK by 726, back to zero
+ *
+ * so: centre+path+clusters draw the 1/2 terrain, $f444 draws the 04-13 band,
+ * and $f3a3 both grows and then erodes the 14-25 class.
+ *
+ * Ours against those, at the correct seed:
+ *
+ *   path+clusters    456 steps, 1681 cells   guest 2156 steps, 3620 cells
+ *   shore  f444      293 steps,  303 cells   guest             605 cells
+ *   scatter f3a3   21592 steps, 3771 cells   guest ~13615, +3127 then -726
+ *
+ * ── THE DIAGNOSTIC ───────────────────────────────────────────
+ *
+ * Our early routines draw 3.7 cells per PRNG step; the guest draws 1.68. We
+ * are not drawing too few cells because we loop too few times -- we are
+ * drawing them TOO CHEAPLY. The ROM consumes about twice as many random
+ * numbers per cell as we do, which means a draw inside the path walk or the
+ * cluster blob is reading values we never read. That also explains the shape
+ * of the final histogram, where we are 2022 short on value 01 and 374/379
+ * long on 18 and 21: the terrain pass ends early, so scatter finds an emptier
+ * map and fills it with its own class.
+ *
+ * Find the missing reads before touching loop bounds. Raising an iteration
+ * count would move the cell totals toward the guest while making the stream
+ * divergence worse, which is the kind of change that looks like progress on
+ * the histogram and is wrong.
+ *
+ * The other confirmed gap: nothing we do ever clears a cell (measured --
+ * cleared=0 in every routine), while the guest's last 4606 draws turn 726
+ * cells of the 14-25 class back to zero. $f3a3 has an erosion stage we have
+ * not found.
+ *
+ * $f444 is NOT the problem -- it was suspected of drawing into nowhere, but it
+ * rewrites 303 existing cells nonzero-to-nonzero, which is what a shoreline
+ * pass should do. Its 303 against the guest's 605 is the same factor-of-two.
  */
+
 
 
 /* ── Cell read and write ───────────────────────────────────────────────────
