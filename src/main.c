@@ -5443,6 +5443,9 @@ int main(int argc, char **argv) {
       { const unsigned idx =
             (unsigned)strtoul(getenv("SC_MAPGEN_SELFTEST")
                                   ? getenv("SC_MAPGEN_SELFTEST") : "3", NULL, 0);
+        /* $0b2a, the previous map's kept index -- part of the seeding. */
+        const uint8_t sweep_prev = (uint8_t)(getenv("SC_MAPGEN_PREV")
+            ? strtoul(getenv("SC_MAPGEN_PREV"), NULL, 0) : 0u);
         static ScMapGenState gs;
         unsigned best[4] = {0, 0, 0, 0}, bestc[4] = {0, 0, 0, 0};
         unsigned besta[4] = {0, 0, 0, 0};
@@ -5453,7 +5456,7 @@ int main(int argc, char **argv) {
             memset(gs.map, 0, sizeof gs.map);
             sc_mapgen_seed(&pr, (uint16_t)a, (uint8_t)(idx & 0xff),
                            (uint8_t)((idx >> 8) & 0xff),
-                           (uint8_t)((idx >> 16) & 0xff), carry);
+                           (uint8_t)((idx >> 16) & 0xff), sweep_prev, carry);
             sc_mapgen_generate(&pr, &gs);
             { unsigned m = 0;
               for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
@@ -5486,10 +5489,12 @@ int main(int argc, char **argv) {
       const unsigned idx = (unsigned)strtoul(st, NULL, 0);
       static ScMapGenState gs;
       ScMapGenPrng pr;
-      sc_mapgen_seed(&pr, (uint16_t)(as ? strtoul(as, NULL, 0) : 0u),
-                     (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
-                     (uint8_t)((idx >> 16) & 0xff),
-                     (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u));
+      { const char *pv = getenv("SC_MAPGEN_PREV");
+        sc_mapgen_seed(&pr, (uint16_t)(as ? strtoul(as, NULL, 0) : 0u),
+                       (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
+                       (uint8_t)((idx >> 16) & 0xff),
+                       (uint8_t)(pv ? strtoul(pv, NULL, 0) : 0u),
+                       (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u)); }
       { const char *sa = getenv("SC_MAPGEN_SNAP_AT");
         if (sa && *sa) g_sc_mapgen_snap_at = strtoul(sa, NULL, 0); }
       { const char *rp = getenv("SC_MAPGEN_REPEAT");

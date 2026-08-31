@@ -139,10 +139,24 @@ uint16_t sc_mapgen_prng_step(ScMapGenPrng *p) {
  * and it is why `entry_carry` is a parameter rather than an assumption. */
 void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
                     uint8_t seed0, uint8_t seed1, uint8_t seed2,
-                    unsigned entry_carry) {
+                    uint8_t prev0, unsigned entry_carry) {
     p->s0 = a_on_entry;                       /* STA $59 */
 
-    uint32_t v = (uint16_t)~((uint16_t)seed1);    /* LDA $0b28 / EOR #$ffff */
+    /* THESE ARE WORD READS. 03:d842 onward runs with m=0, so LDA $0b27 fetches
+     * $0b27 AND $0b28, and LDA $0b29 fetches $0b29 and $0b2a. $0b2a is the
+     * KEPT copy of the previous map's index, so the seeding depends on which
+     * map was generated before this one -- generation is not a pure function
+     * of the selected index.
+     *
+     * Reading them as bytes gave the right answer for map 3 by luck (the high
+     * halves did not reach the low 5 bits) and the wrong one for map 0, where
+     * $0b2a = FF makes the ASL carry out and the pre-step count 2 rather than
+     * 1. */
+    const uint16_t w27 = (uint16_t)(seed0 | (seed1 << 8));
+    const uint16_t w28 = (uint16_t)(seed1 | (seed2 << 8));
+    const uint16_t w29 = (uint16_t)(seed2 | (prev0 << 8));
+
+    uint32_t v = (uint16_t)~w28;                  /* LDA $0b28 / EOR #$ffff */
     unsigned c = entry_carry & 1u;
     for (int i = 0; i < 5; i++) {                 /* ROL A x5, through carry */
         const unsigned out = (v >> 15) & 1u;
@@ -155,14 +169,12 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
     p->t = 0;                                     /* STZ $5d */
 
     /* LDA $0b29 / ASL A / ADC $0b28 / ADC $0b27 / AND #$001f.
-     * ASL clears carry into the first ADC only if bit 15 was 0; seed2 is a
-     * byte here, so the high byte is whatever $0b29's word read gives -- the
-     * harness has to confirm this is a byte read, not a word read. */
-    uint32_t n = (uint32_t)seed2 << 1;
-    unsigned c2 = (n >> 16) & 1u;
+     * Confirmed a WORD read, not a byte read -- see the note above. */
+    uint32_t n = (uint32_t)w29 << 1;              /* LDA $0b29 / ASL A */
+    unsigned c2 = (n >> 16) & 1u;                 /* the ASL's carry OUT */
     n = (uint16_t)n;
-    n = n + seed1 + c2;  c2 = (n >> 16) & 1u;  n = (uint16_t)n;
-    n = n + seed0 + c2;                        n = (uint16_t)n;
+    n = n + w28 + c2;  c2 = (n >> 16) & 1u;  n = (uint16_t)n;   /* ADC $0b28 */
+    n = n + w27 + c2;                        n = (uint16_t)n;   /* ADC $0b27 */
     unsigned steps = (unsigned)(n & 0x1fu) + 1u;         /* DEX/BPL: X+1 times */
     /* SC_MAPGEN_PRESTEP overrides the count. The whole stream shifts with it,
      * so if this reading of $0b29/$0b28/$0b27 is off by even one the map is
@@ -504,13 +516,27 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  * ── THE GENERATOR IS EXACT ───────────────────────────────────
  *
- * For map 3, seeded with entry carry 0 and entry A 5CEE, this code reproduces
- * the guest's map on all 12000 cells, consumes the same 20373 PRNG draws, and
- * leaves the PRNG in the guest's exact final state 346D/529F. Sweeping all
- * 131072 seedings puts that pair at 100% with the next best at 48.1%, and
- * every intermediate snapshot from 16 draws onward agrees to 99.9-100%. The
- * residue there is not error: the guest dumps are taken at a vblank rather
- * than a draw boundary, so one stamp can be caught half-finished.
+ * Verified exact on TWO maps, with different seed bytes and different
+ * pre-step counts:
+ *
+ *     map 3  carry 0, A 5CEE, prev 02   12000/12000, next best 48.1%
+ *     map 0  carry 0, A 5CD6, prev FF   12000/12000, next best 57.1%
+ *
+ * For map 3 it also consumes the guest's exact 20373 draws and leaves the PRNG
+ * in its exact final state 346D/529F, and every intermediate snapshot across
+ * the whole generation -- 16 draws through 20373, including the late phase
+ * where the map erodes from 7352 cells back to 6626 -- agrees to 99.9-100%.
+ * That residue is not error: the guest dumps are taken at a vblank rather than
+ * a draw boundary, so one stamp can be caught half-finished.
+ *
+ * The two entry A values, 5CEE and 5CD6, are suspiciously close. A is just
+ * whatever the caller left in the register, so it is probably a pointer or
+ * counter rather than anything meaningful -- but it is not constant, and it
+ * cannot be assumed.
+ *
+ * STILL UNVALIDATED: the framed branch $f22c, taken on 33.6% of seeds. Both
+ * maps checked here take the feature chain, so nothing in that path has ever
+ * been compared against a real map.
  *
  * ── WHAT WAS ACTUALLY WRONG ──────────────────────────────────
  *
@@ -520,6 +546,14 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * while leaving all the structure plausible. See the note on the register
  * moves in sc_mapgen_rand_below; the XBA at $f882 looks like it selects the
  * high byte, but LDA $79 overwrites A before the multiply.
+ *
+ * THE SEED BYTES ARE WORD READS. 03:d842 onward runs with m=0, so LDA $0b27
+ * fetches $0b27 and $0b28 together, and LDA $0b29 fetches $0b29 and $0b2a --
+ * and $0b2a is the KEPT index of the PREVIOUS map. Generation is therefore not
+ * a pure function of the selected index: it depends on which map was generated
+ * before it. Reading them as bytes gave the right answer for map 3 by luck,
+ * and the wrong one for map 0, where $0b2a = FF makes the ASL carry out and
+ * the pre-step count 2 rather than 1.
  *
  * Two more, both real:
  *

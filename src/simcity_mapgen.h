@@ -37,7 +37,7 @@ uint16_t sc_mapgen_prng_step(ScMapGenPrng *p);
  * us. The verification harness settles it. */
 void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
                     uint8_t seed0, uint8_t seed1, uint8_t seed2,
-                    unsigned entry_carry);
+                    uint8_t prev0, unsigned entry_carry);
 
 /* Generator working state. Named for the guest variables it mirrors. */
 typedef struct ScMapGenState {
