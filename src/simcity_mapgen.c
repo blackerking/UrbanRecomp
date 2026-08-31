@@ -1014,10 +1014,47 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  * 0x13. On a freshly generated map 01:f502 therefore does nothing at all --
  * which fits a routine meant for maps that already carry real tile ids.
  *
- * So the next step is NOT more decompiling. It is a reference map that was
- * genuinely generated, from the free-play path, which is the capture that has
- * eluded every attempt so far. Until then the self-test can only be compared
- * against itself.
+ * ── A REAL GENERATED MAP, AND THE PIPELINE IT REVEALS ─────────────────────
+ *
+ * Captured at last: savestate_3 with Up held from frame 60 (inputs are blocked
+ * until the screen has rendered, so it must be pressed late). The map seeding
+ * is identifiable in the PRNG log because its reseed is NOT consecutive --
+ * 5B19/426F -- where 00:823e's spin seed always leaves $59/$5b one apart.
+ *
+ * GENERATION IS NOT ATOMIC. It is spread over hundreds of frames, which is why
+ * every earlier attempt to spot it as a per-frame PRNG burst failed: the
+ * per-frame deltas stay small throughout. Watching the distinct-value count
+ * instead makes the phases obvious:
+ *
+ *     frames  85..410   4 distinct (0,1,2,3)   the feature chain
+ *     frames 435..560  20 distinct (4..0x13)   the fitting passes
+ *     frames 585+      37 distinct             a THIRD stage
+ *
+ * At f=410, just before the fitting runs, the map holds 0:7898 1:3046 2:397
+ * 3:659 -- exactly the four values this file writes. So the chain modelled
+ * here IS the first phase, and it ends where the fitting begins.
+ *
+ * The third stage is the answer to the 0x14 puzzle. 01:f502 fits class
+ * 0x14..0x25 and nothing in phases 1 or 2 can reach it -- because those values
+ * only appear at f=585, after a stage this file does not model at all. That
+ * also means 01:f502 as implemented here can never fire on phase-1 output,
+ * which is consistent rather than a bug.
+ *
+ * Comparison against the real thing, for the same seed byte 03:
+ *
+ *                golden f=410      ours (carry 0)
+ *     value 0        7898              9857
+ *     value 1        3046              1591
+ *     value 2         397               146
+ *     value 3         659                 0
+ *
+ * So we under-draw by roughly half, and we end with no 3s where the golden
+ * still has 659 -- consistent with this file running 01:f444 inside the chain
+ * (which consumes 3s) at a point where the ROM has not yet reached it. The
+ * ordering is the next thing to check, not the individual routines.
+ *
+ * Still unknown and still parameters, not guesses: 03:d840's entry carry and
+ * entry A. Neither can be settled from the disassembly.
  *
  * ── Verification, which comes before any of that ───────────────────────────
  *
