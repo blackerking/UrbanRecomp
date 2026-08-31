@@ -110,6 +110,8 @@ void sc_mapgen_stamp_blob_small(ScMapGenState *st);
 /* 01:f600 -- stamp a 9x9 disc, wander +/-1 half the time, snap back to the
  * base bearing 1 step in 11, repeat until the disc would leave the map. */
 void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st);
+/* 01:f647 -- the narrow third walk. */
+void sc_mapgen_path_walk_narrow(ScMapGenPrng *p, ScMapGenState *st);
 
 /* 01:f444 -- sweep every cell, rewrite rim cells (3) as fitted edge tiles.
  * Column-major from the bottom-right, and it reads the buffer it writes. */

@@ -265,6 +265,46 @@ void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
     sc_mapgen_path_walk(p, st);                 /* JSR $f600 again */
     st->cur_x = st->x0;
     st->cur_y = st->y0;
+
+    /* 01:f5f2  JSL $00824b / AND #$0003 / STA $045f
+     * 01:f5fc  JSR $f647
+     *
+     * A THIRD walk, which this routine was missing entirely. It is what the
+     * cells-per-draw rate was pointing at: the ROM spends about two random
+     * numbers per cell in the terrain phase and we were spending one, because
+     * a whole walk's worth of reads was absent.
+     *
+     * Note f5f9 stores ONLY to $045f, the base bearing. $0461, the live one,
+     * is not reloaded -- so the third walk starts on whatever bearing the
+     * second one happened to end on, not on the fresh base. */
+    st->dir_base = (uint16_t)(sc_mapgen_prng_step(p) & 0x0003u);
+    sc_mapgen_path_walk_narrow(p, st);          /* JSR $f647 */
+}
+
+/* 01:f647 -- the third walk. Identical in shape to $f600 with exactly three
+ * differences, all of which matter:
+ *
+ *     the bounds probe is +3 rather than +4      ($f64d / $f657 ADC #$0003)
+ *     it stamps the small disc, not the 9x9      ($f662 JSR $f794)
+ *     the bearing resets on 1 in 13, not 1 in 11 ($f677 LDA #$000c)
+ *
+ * so it lays a narrower path with the smaller brush and wanders slightly
+ * further before snapping back to its base bearing. */
+void sc_mapgen_path_walk_narrow(ScMapGenPrng *p, ScMapGenState *st) {
+    for (;;) {
+        if (!sc_mapgen_in_bounds((int)st->cur_x + 3, (int)st->cur_y + 3)) return;
+        sc_mapgen_stamp_blob_small(st);                 /* JSR $f794 */
+
+        const uint16_t r = sc_mapgen_prng_step(p);
+        if (r & 1u) {                                   /* LSR / BCC skip */
+            if (r & 2u) st->dir_cur--;                  /* LSR / BCS -> DEC */
+            else        st->dir_cur++;
+        }
+        if (sc_mapgen_rand_below(p, 0x000c) == 0)       /* 1 in 13 */
+            st->dir_cur = st->dir_base;
+
+        sc_mapgen_move(st, st->dir_cur);                /* JSR $f6ae */
+    }
 }
 
 /* ── Feature: clustered blobs ──────────────────────────────────────────────
