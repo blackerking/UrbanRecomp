@@ -519,8 +519,9 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * Verified exact on TWO maps, with different seed bytes and different
  * pre-step counts:
  *
- *     map 3  carry 0, A 5CEE, prev 02   12000/12000, next best 48.1%
- *     map 0  carry 0, A 5CD6, prev FF   12000/12000, next best 57.1%
+ *     map 3  carry 0, A 5CEE, prev 02   12000/12000, next best 48.1%  chain
+ *     map 0  carry 0, A 5CD6, prev FF   12000/12000, next best 57.1%  chain
+ *     map 4  carry 0, A 5CF6, prev 02   12000/12000, next best 67.7%  FRAMED
  *
  * For map 3 it also consumes the guest's exact 20373 draws and leaves the PRNG
  * in its exact final state 346D/529F, and every intermediate snapshot across
@@ -534,9 +535,10 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * counter rather than anything meaningful -- but it is not constant, and it
  * cannot be assumed.
  *
- * STILL UNVALIDATED: the framed branch $f22c, taken on 33.6% of seeds. Both
- * maps checked here take the feature chain, so nothing in that path has ever
- * been compared against a real map.
+ * Both branches are now covered. The framed map was reached by holding $0b27
+ * at an index with SC_FREEZE, since nothing on the map screen moves the
+ * selection -- Up only triggers generation of whatever is already selected,
+ * which is why injecting more presses regenerated the same map.
  *
  * ── WHAT WAS ACTUALLY WRONG ──────────────────────────────────
  *
@@ -554,6 +556,14 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * before it. Reading them as bytes gave the right answer for map 3 by luck,
  * and the wrong one for map 0, where $0b2a = FF makes the ASL carry out and
  * the pre-step count 2 rather than 1.
+ *
+ * THE FRAMED BRANCH IS NOT A SHORTCUT. 01:f22c ends with JSR $f444 and
+ * JSR $f3a3 -- it runs the shoreline and the scatter itself. Stopping at the
+ * frame left us emitting 4 distinct values against the guest's 37, and 233
+ * draws against thousands. Its vertical edge loop at $f2be was also only a
+ * comment saying "the same again", inferred from the horizontal one; it is
+ * the same shape but not the same numbers ($006e/$0072 where the horizontal
+ * pass uses $005a/$005e, and a limit of $005f rather than $0073).
  *
  * Two more, both real:
  *
@@ -784,16 +794,39 @@ void sc_mapgen_framed_map(ScMapGenPrng *p, ScMapGenState *st) {
         for (int y = 5; y < 95; y++)
             sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, 0);
 
+    /* $f276: along the top and bottom edges. x steps by 2 to CMP #$0073. */
     for (int x = 0; x < 115; x += 2) {
         st->cur_x = (uint16_t)x;
-        st->cur_y = sc_mapgen_rand_min2(p, 0x0012);          st->cur_y = st->cur_y;
+        st->cur_y = sc_mapgen_rand_min2(p, 0x0012);            /* $f28d */
         sc_mapgen_stamp_blob(st);
         st->cur_y = (uint16_t)(0x005a - sc_mapgen_rand_min2(p, 0x0012));
         sc_mapgen_stamp_blob(st);
         st->cur_y = 0;      sc_mapgen_stamp_blob_small(st);
         st->cur_y = 0x005e; sc_mapgen_stamp_blob_small(st);
     }
-    /* $f2be: the same again down the left and right edges. */
+
+    /* $f2be: the same down the left and right edges, axes swapped. This was a
+     * comment saying "the same again" -- inferred from the horizontal loop,
+     * never read. It is the same SHAPE but not the same numbers: y steps by 2
+     * to CMP #$005f, and the far edge is $006e and $0072 where the horizontal
+     * pass uses $005a and $005e. The loop is also entered mid-body (BRA $f2d3)
+     * so the first iteration runs at y = 0. */
+    for (int y = 0; y < 95; y += 2) {
+        st->cur_y = (uint16_t)y;                               /* $043d */
+        st->cur_x = sc_mapgen_rand_min2(p, 0x0012);            /* $f2d9 */
+        sc_mapgen_stamp_blob(st);                              /* $f2df */
+        st->cur_x = (uint16_t)(0x006e - sc_mapgen_rand_min2(p, 0x0012));
+        sc_mapgen_stamp_blob(st);                              /* $f2f3 */
+        st->cur_x = 0;      sc_mapgen_stamp_blob_small(st);    /* $f2fc */
+        st->cur_x = 0x0072; sc_mapgen_stamp_blob_small(st);    /* $f305 */
+    }
+
+    /* $f30a / $f30d. The framed branch is NOT a shortcut past the chain: it
+     * runs the shoreline and the scatter itself, at the end. Stopping at the
+     * frame left us emitting only values 0-3 where the guest has all 37, and
+     * 233 draws where it takes thousands. */
+    sc_mapgen_shoreline(p, st);            /* JSR $f444 */
+    sc_mapgen_feature_scatter(p, st);      /* JSR $f3a3 */
 }
 
 /* ── 01:f502 -- the second fitting pass ────────────────────────────────────
