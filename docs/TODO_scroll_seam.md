@@ -528,6 +528,43 @@ rather than relying on the permissive default.
 `SC_LIGHTS_DIAG=1` prints the row the extender found: member count, y, lo, hi,
 pitch, and how many sprites it placed each side.
 
+## OPEN -- the mapgen turbo boosts the wrong thing
+
+Reported from play: the mapgen turbo appears to speed up the SIMULATION on the
+normal map rather than map generation.
+
+Measured, and the mechanism is visible even though the effect is not
+reproducible headlessly:
+
+- The boost is `frames_this_iter = generating ? s_mapgen_turbo : ...` and lives
+  ONLY in the SDL loop. `--qualify` counts the flag but never multiplies, so a
+  headless run can confirm when the flag is set and nothing about how it feels.
+- `s_generating` is bounded by two PCs: set at `03:d862`, cleared at `03:d871`.
+- **Starting a map trips it.** On savestate_6 (press B to start), the flag is
+  active for **71 frames after the press**, with `trigger_hits=4`. In the
+  interactive loop those 71 frames run at 16x -- about a second of visibly
+  fast simulation right as the city appears, which is exactly what was
+  reported.
+- During generation proper the flag does work: 638 boosted frames of 700 on
+  savestate_3 + Up.
+
+So the pair does not bound what it claims to. `03:d862` is the PRNG call inside
+`03:d840`'s seeding loop, and that path is evidently entered when a map is
+started, not only when one is generated.
+
+Two candidate fixes, neither implemented because neither can be verified
+without interactive play:
+
+1. Also clear `s_generating` when the screen index `$14` changes to the city --
+   the boost has no business surviving a screen transition.
+2. Cap the boost with a frame budget, so a stuck flag degrades to a brief
+   speed-up rather than an unbounded one.
+
+Related: generation is genuinely slow even when boosted. On savestate_3 + Up it
+was still running at frame 700 (`final_pc=01:f53b`, inside the fitting pass)
+with 638 frames boosted at 16x. The turbo is working and generation is simply
+long -- worth knowing before raising the factor further.
+
 ## Also open, pre-existing
 
 The host strip moves a different distance from the guest on ~25 of 106 frames
