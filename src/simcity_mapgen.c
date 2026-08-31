@@ -387,7 +387,7 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * chance hits were expected over that depth anyway. They are noise.
  *
  * Then the whole space was swept: both carries by all 65536 entry values,
- * 131072 full generations, against the golden map (SC_MAPGEN_SWEEP).
+ * 131072 full generations, against the true final map (SC_MAPGEN_SWEEP).
  *
  *     mean match 3686/12000 = 30.7%
  *     best       carry=0 A=5782  5547/12000 = 46.2%
@@ -398,14 +398,61 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * pair would reproduce the map and stand near 100%, unmistakably. It does not
  * exist in the space.
  *
- * So the error is in the generator, not in how it is seeded, and hunting the
- * entry values further is wasted effort. The 12246 PRNG steps a full run
- * consumes (g_sc_mapgen_prng_steps) is the more useful handle now: it is a
- * fixed fingerprint of the whole chain, so if the guest's own step count can
- * be measured for one generation, comparing it localises which routine draws
- * the wrong number of times -- which the per-value counts already hint at,
- * since we under-draw most features by roughly half.
- */
+ * So the error is in the generator, not in how it is seeded.
+ *
+ * ── THE SEEDING, NOW KNOWN ───────────────────────────────────────
+ *
+ *     entry carry = 0,  entry A = 5CEE,  and one whole generation of map 3
+ *     consumes exactly 20377 PRNG steps.
+ *
+ * Recovered by walking the PRNG backwards from a state sampled off the guest
+ * to the seeding signature ($5b = 1228 or 1238, the only two values the
+ * ROL/ADC at 03:d84d can produce when $0b28 is zero). It shows up at depth 66
+ * from an early frame and at depth 20377 from the final state -- the same
+ * chain seen at two points, and the depths are consistent.
+ *
+ * This did NOT rescue the comparison. With the correct seeding our output
+ * matches the real map on 33.1% of cells, which is BELOW the 31.8% mean of a
+ * 131072-point sweep -- the correct seed does slightly worse than average.
+ * That is itself the signal: the divergence is early and structural, not a
+ * matter of starting offset.
+ *
+ * ── THE REFERENCE MAP WAS MID-GENERATION ───────────────────────────
+ *
+ * A methodology error worth recording, because every earlier number in this
+ * file was measured against the wrong target. 03:d840 runs generation as ONE
+ * synchronous JSL $01f1ed -- but the SNES CPU takes about 800 frames of wall
+ * clock to grind through it, which is exactly the slowness the fiber work
+ * exists to remove. The capture that produced the first reference stopped at
+ * frame 685, so it caught the map PART-BUILT.
+ *
+ * The completion marker is 03:d873, which copies $0b27-29 to $0b2a-2c only
+ * after f1ed returns. Watching it across 2600 frames:
+ *
+ *     f60..f810   kept = 02 00 00, map still changing, nonzero rising to 7352
+ *                 then FALLING -- a late phase removes cells
+ *     f860        kept = 03 00 00, PRNG frozen at 346D/529F, nonzero 6626,
+ *                 and nothing changes for the next 1700 frames
+ *
+ * So the true final map is f860, not f685, and nonzero is 6626 rather than the
+ * 6869 of the part-built one. The PRNG freezing on completion also proves that
+ * NOTHING but generation steps it, which is what makes the step count a clean
+ * measurement rather than a contaminated one.
+ *
+ * ── WHAT IS ACTUALLY WRONG ───────────────────────────────────
+ *
+ * We consume 12246 steps against the guest's 20377 -- 60% of the draws, 8131
+ * short. That is the concrete defect now, and it lines up with the per-value
+ * counts, where we under-draw most features by roughly half. Some routine, or
+ * several, loops far fewer times than the ROM's does.
+ *
+ * The way to localise it is the per-window step counts, which the dumps give
+ * for free: stepping the PRNG forward from one dump's $59/$5b until it reaches
+ * the next dump's gives the exact draws consumed in between, with no
+ * instrumentation at all. Across the generation those windows run ~88 steps
+ * per 25 frames early, ~200 in the middle, then 1600-3200 in the late phases.
+ * Matching that profile against our routines pins down which one is short.
+  */
 
 /* ── Cell read and write ───────────────────────────────────────────────────
  *

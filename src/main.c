@@ -5409,7 +5409,15 @@ int main(int argc, char **argv) {
    * This is decisive in BOTH directions. If the decompilation is right, the
    * true pair reproduces the map and stands far above every other; if nothing
    * rises above chance, the seeding is not what is wrong and no amount of
-   * guessing at it will help. */
+   * guessing at it will help. It came out the second way, twice.
+   *
+   * SC_MAPGEN_GOLD MUST BE A COMPLETED GENERATION. 03:d840 runs the whole map
+   * as one synchronous JSL, but the SNES CPU needs ~800 frames of wall clock
+   * to finish it, so a capture that stops earlier catches a part-built map --
+   * which is what the first reference here did, invalidating every number
+   * measured against it. The completion marker is $0b2a-2c (03:d873 copies the
+   * selection there only after the generation returns) matching $0b27-29, with
+   * the PRNG frozen. */
   { const char *sw = getenv("SC_MAPGEN_SWEEP");
     const char *gp = getenv("SC_MAPGEN_GOLD");
     if (sw && *sw && gp && *gp) {
