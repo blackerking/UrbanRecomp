@@ -829,7 +829,15 @@ void sc_mapgen_walk(ScMapGenPrng *p, ScMapGenState *st) {
         sc_mapgen_move(st, dir);                 /* JSR $f6ae */
         x = (int16_t)st->cur_x; y = (int16_t)st->cur_y;
         if (!sc_mapgen_in_bounds(x, y)) break;   /* JSR $f843 / BCS */
-        /* JSR $f8e9 then the write -- not decompiled */
+        /* JSR $f8e9 / CMP #$0000 / BNE + / LDA #$0018 / JSR $f8af
+         *
+         * THE WALK DRAWS 0x18, and only onto an EMPTY cell. This is where the
+         * 0x14..0x25 class comes from -- the one 01:f502 fits and which nothing
+         * else in the generator can produce. An earlier version of this file
+         * left the write "not decompiled" and concluded a whole pipeline stage
+         * was missing; it was this one line. */
+        if (sc_mapgen_read_cell(st, (unsigned)x, (unsigned)y) == 0)
+            sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, 0x0018);
         steps--;
     }
     st->cur_x = (uint16_t)x;
