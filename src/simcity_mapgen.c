@@ -202,7 +202,21 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
  * matters, and that is one step per call. */
 uint16_t sc_mapgen_rand_below(ScMapGenPrng *p, uint16_t n) {
     const uint16_t r = sc_mapgen_prng_step(p);       /* JSL $00824b */
-    const unsigned rand8 = (r >> 8) & 0xffu;         /* XBA: the high byte */
+    /* THE LOW BYTE, not the high one. Follow the register moves:
+     *
+     *     SEP #$20      A = R.low,   B = R.high
+     *     XBA           A = R.high,  B = R.low
+     *     LDA $79       A = n+1,     B = R.low     <- B still holds R.low
+     *     PLA / STA $4202                          multiplicand = n+1
+     *     XBA           A = R.low                  <- swaps the LOW byte in
+     *     STA $4203                                multiplier   = R.low
+     *
+     * The XBA at $f882 looks like it selects the high byte, but LDA $79
+     * overwrites A before the multiply and the second XBA at $f891 brings
+     * back what B held, which is the LOW byte. Reading the high byte instead
+     * gave centre (74,54) where the guest's $0457/$0459 hold (68,59); the low
+     * byte reproduces 68, 59 and the bearing 1 exactly. */
+    const unsigned rand8 = r & 0xffu;
     const unsigned mul = (unsigned)((n + 1u) & 0xffu) * rand8;   /* 8x8 -> 16 */
     return (uint16_t)((mul >> 8) & 0xffu);           /* RDMPYH, then AND #$00ff */
 }
@@ -488,156 +502,65 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  * Still genuinely open: the $f2be vertical edge loop inside $f22c is inferred
  * from the horizontal one, not read.
  *
- * ── THE SEEDING IS NOT THE PROBLEM ───────────────────────────────
+ * ── THE GENERATOR IS EXACT ───────────────────────────────────
  *
- * The previous note here said the remaining mismatch was "almost certainly the
- * seeding", since 03:d840's entry carry and entry A cannot be read off the
- * disassembly. That was wrong, and it has now been tested two ways.
+ * For map 3, seeded with entry carry 0 and entry A 5CEE, this code reproduces
+ * the guest's map on all 12000 cells, consumes the same 20373 PRNG draws, and
+ * leaves the PRNG in the guest's exact final state 346D/529F. Sweeping all
+ * 131072 seedings puts that pair at 100% with the next best at 48.1%, and
+ * every intermediate snapshot from 16 draws onward agrees to 99.9-100%. The
+ * residue there is not error: the guest dumps are taken at a vblank rather
+ * than a draw boundary, so one stamp can be caught half-finished.
  *
- * Walking the PRNG BACKWARDS from a state sampled off the guest (5B19/426F)
- * looking for the seeding signature -- $5b equal to 1228 or 1238, the only two
- * values the ROL/ADC can produce for this map -- found three candidates at
- * depths 10057, 17872 and 22670. All three generate a WORSE map than an
- * arbitrary carry=0/A=0 (35.2%, 29.6%, 30.8% against 38.7%), and about two
- * chance hits were expected over that depth anyway. They are noise.
+ * ── WHAT WAS ACTUALLY WRONG ──────────────────────────────────
  *
- * Then the whole space was swept: both carries by all 65536 entry values,
- * 131072 full generations, against the true final map (SC_MAPGEN_SWEEP).
+ * THE RANGE PRIMITIVE READ THE WRONG BYTE. 01:f877 multiplies by the LOW byte
+ * of the random word, not the high one, and every loop bound and coordinate in
+ * the generator comes through it -- so this one line made every map wrong
+ * while leaving all the structure plausible. See the note on the register
+ * moves in sc_mapgen_rand_below; the XBA at $f882 looks like it selects the
+ * high byte, but LDA $79 overwrites A before the multiply.
  *
- *     mean match 3686/12000 = 30.7%
- *     best       carry=0 A=5782  5547/12000 = 46.2%
- *     then       44.7%, 44.6%, 42.6%
+ * Two more, both real:
  *
- * That is a smooth tail off the mean -- the shape of a maximum over 131072
- * samples -- with no spike anywhere. If the decompilation were right, the true
- * pair would reproduce the map and stand near 100%, unmistakably. It does not
- * exist in the space.
+ *   01:f380 stores each value TWICE, to the saved centre AND the live walk
+ *   position. Setting only the centre left the first walk starting from zero
+ *   and stamping a blob in the top-left corner that the ROM never draws.
  *
- * So the error is in the generator, not in how it is seeded.
+ *   01:f5b9 makes THREE walks; we had two. The third, $f647, is $f600 with a
+ *   +3 probe, the small $f794 disc and a 1-in-13 bearing reset.
  *
- * ── THE SEEDING, NOW KNOWN ───────────────────────────────────────
+ * And 01:f843's probe is 16-bit wrapping: computing it as (int)cur_x + 4 turns
+ * a position of -1 ($FFFF) into 65535 and rejects a blob that should clip.
  *
- *     entry carry = 0,  entry A = 5CEE,  and one whole generation of map 3
- *     consumes exactly 20377 PRNG steps.
+ * ── WHAT MISLED THE SEARCH, AND WHAT FOUND IT ─────────────────────
  *
- * Recovered by walking the PRNG backwards from a state sampled off the guest
- * to the seeding signature ($5b = 1228 or 1238, the only two values the
- * ROL/ADC at 03:d84d can produce when $0b28 is zero). It shows up at depth 66
- * from an early frame and at depth 20377 from the final state -- the same
- * chain seen at two points, and the depths are consistent.
+ * Worth keeping, because the wrong methods were convincing for a long time.
  *
- * This did NOT rescue the comparison. With the correct seeding our output
- * matches the real map on 33.1% of cells, which is BELOW the 31.8% mean of a
- * 131072-point sweep -- the correct seed does slightly worse than average.
- * That is itself the signal: the divergence is early and structural, not a
- * matter of starting offset.
+ * COMPARING FINAL MAPS BARELY MEASURES A FIX. Once the draw sequence diverges
+ * every later loop bound comes from a different stream, so the number moves a
+ * couple of points for reasons unconnected to correctness. Chasing it produced
+ * a string of confident and wrong conclusions: that the reference had
+ * accumulated several passes, that a pipeline stage was missing, that we
+ * under-drew by half (measured at the wrong seed), that the seeding could not
+ * be found. Use SC_MAPGEN_SNAP_AT, which compares at an exact draw count.
  *
- * ── THE REFERENCE MAP WAS MID-GENERATION ───────────────────────────
+ * PERCENT-OF-CELLS-IDENTICAL IS USELESS EARLY. At 80 draws the guest has drawn
+ * 289 cells of 12000, so a completely wrong map still scores ~96% on the empty
+ * ones. Score the drawn cells -- intersection over union -- which separated a
+ * real candidate at 43% from noise at 0% where the raw figure read 94-97% for
+ * everything.
  *
- * A methodology error worth recording, because every earlier number in this
- * file was measured against the wrong target. 03:d840 runs generation as ONE
- * synchronous JSL $01f1ed -- but the SNES CPU takes about 800 frames of wall
- * clock to grind through it, which is exactly the slowness the fiber work
- * exists to remove. The capture that produced the first reference stopped at
- * frame 685, so it caught the map PART-BUILT.
+ * WHAT ACTUALLY FOUND IT was reading the guest's own variables. $0457/$0459
+ * hold the centre point: the guest had (68,59) and we had (74,54), which is
+ * a two-value comparison that settles in one step what a thousand map
+ * diffs could not. When the ROM keeps a value in RAM, read it rather than
+ * inferring it from what it eventually draws.
  *
- * The completion marker is 03:d873, which copies $0b27-29 to $0b2a-2c only
- * after f1ed returns. Watching it across 2600 frames:
- *
- *     f60..f810   kept = 02 00 00, map still changing, nonzero rising to 7352
- *                 then FALLING -- a late phase removes cells
- *     f860        kept = 03 00 00, PRNG frozen at 346D/529F, nonzero 6626,
- *                 and nothing changes for the next 1700 frames
- *
- * So the true final map is f860, not f685, and nonzero is 6626 rather than the
- * 6869 of the part-built one. The PRNG freezing on completion also proves that
- * NOTHING but generation steps it, which is what makes the step count a clean
- * measurement rather than a contaminated one.
- *
- * ── WHAT IS ACTUALLY WRONG ───────────────────────────────────
- *
- * CORRECTION. An earlier version of this block said we consume 12246 steps
- * against the guest's 20377 -- "60% of the draws, 8131 short". That was
- * measured with entry A = 0, before the seeding was recovered. The step count
- * is seed-dependent, because every loop bound in the chain is drawn. With the
- * correct A = 5CEE we consume 22342, so we OVER-draw by about 10%, and the
- * "under-draw by half" reading was an artifact of the wrong seed.
- *
- * 01:f1ed is confirmed to be exactly five calls, made once, in this order,
- * with the 0094bc clear only on the non-framed path:
- *
- *     JSL $0094bc / JSR $f380 / $f5b9 / $f311 / $f444 / $f3a3
- *
- * so nothing is missing at chain level; the divergence is inside a routine.
- *
- * Ours, per routine, at the correct seed (cells = running nonzero total):
- *
- *     centre  f380     2 steps      0 cells
- *     path    f5b9   381 steps  +1151
- *     cluster f311    73 steps   +530
- *     shore   f444   293 steps     +0     <-- draws nothing at all
- *     scatter f3a3 21592 steps  +3771     <-- 96.6% of every draw
- *
- * The guest, from its own step-vs-cells profile (walk the PRNG forward from
- * the seeding and look up each WRAM dump's $59/$5b to get cumulative steps):
- *
- *     phase A     0 ..  2156 steps   +4225 cells   2.2-3.6 cells/step
- *     phase B  2156 .. 15771 steps   +3127 cells   0.15-0.28 cells/step
- *     phase C 15771 .. 20377 steps    -726 cells   REMOVES cells
- *
- * The RATES agree well -- our early routines run 3.7 cells/step against the
- * guest's 3.6, and our scatter 0.17 against its 0.15-0.28 -- so the routines
- * are drawing the right KIND of work. The amounts do not. Our first four
- * routines together spend 749 steps for 1681 cells where the guest's fast
- * phase spends 2156 for 4225: about a third of the work.
- *
- * ── THE PHASES MAP ONTO THE ROUTINES ─────────────────────────────
- *
- * Histogramming each WRAM dump by value class shows the guest producing them
- * in strict sequence, which pins each phase to a routine:
- *
- *   steps      0.. 2156   ONLY values 1 and 2, growing to 3217 + 403 = 3620
- *   steps   ~2156.. 4629   values 04-13 appear, 605 of them, then frozen
- *   steps   ~2156..15771   values 14-25 grow to 3127; 1, 2 and 04-13 frozen
- *   steps  15771..20377   values 14-25 SHRINK by 726, back to zero
- *
- * so: centre+path+clusters draw the 1/2 terrain, $f444 draws the 04-13 band,
- * and $f3a3 both grows and then erodes the 14-25 class.
- *
- * Ours against those, at the correct seed:
- *
- *   path+clusters    456 steps, 1681 cells   guest 2156 steps, 3620 cells
- *   shore  f444      293 steps,  303 cells   guest             605 cells
- *   scatter f3a3   21592 steps, 3771 cells   guest ~13615, +3127 then -726
- *
- * ── HOW TO JUDGE A FIX HERE ───────────────────────────────────
- *
- * Two traps, both of which produced misleading numbers before being noticed.
- *
- * 1. COMPARING FINAL MAPS BARELY MEASURES A FIX. Once the draw sequence
- *    diverges, every later loop bound comes from a different stream, so the
- *    final match moves a couple of points for reasons unconnected to whether
- *    a change is right. Use SC_MAPGEN_SNAP_AT instead: the guest dumps carry
- *    the PRNG state, so each is pinned to an exact draw count (80, 256, 436,
- *    614, 849, 1265, 1654, 2156 from the seeding), and snapshotting our map at
- *    the same count compares like with like and finds the FIRST divergence.
- *
- * 2. PERCENT-OF-CELLS-IDENTICAL IS USELESS EARLY. At 80 draws the guest has
- *    drawn 289 cells of 12000, so a completely wrong map still scores ~96%
- *    on the empty ones. Score the drawn cells: intersection over union of the
- *    nonzero sets, which separated a real candidate (43%) from noise (0%)
- *    where the raw percentage showed 94-97% for everything.
- *
- * ── OPEN: THE PRE-STEP COUNT ─────────────────────────────────
- *
- * 03:d85e computes the count as ($0b29*2 + $0b28 + $0b27) & $1f, then steps
- * X+1 times, which for map 3 is 4. Sweeping it (SC_MAPGEN_PRESTEP) against the
- * earliest dump favours 11 at 43% IoU over 4 at 18%, which contradicts the
- * disassembly. Against the FINAL map the order reverses -- 4 gives 41.9% and
- * IoU 49.2%, 11 gives 33.4% and 44.2% -- so 4 is kept, on the grounds that the
- * single early dump is taken at a vblank rather than at an exact draw boundary
- * and carries up to a stamp of slop, while the final map has none. Worth
- * revisiting if a second early dump disagrees the same way.
+ * The pre-step count is 4, as 03:d85e computes. An earlier sweep favoured 11
+ * against a single early dump; that was the vblank slop above, and it
+ * disappeared once the range primitive was fixed.
+
  */
 
 
