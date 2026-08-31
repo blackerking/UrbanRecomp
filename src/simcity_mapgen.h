@@ -20,6 +20,8 @@ void sc_mapgen_prng_seed_from_spin(ScMapGenPrng *p, uint16_t spin_counter);
 
 /* 00:824f -- one step; returns the new $5b, as the ROM returns it in A. */
 extern unsigned long g_sc_mapgen_prng_steps;
+extern unsigned long g_sc_mapgen_phase_steps[5];
+extern unsigned long g_sc_mapgen_phase_cells[5];
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p);
 
 /* 03:d840 -- fold the three map-seed bytes in and pre-step the PRNG 1..32

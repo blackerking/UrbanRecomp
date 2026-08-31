@@ -72,6 +72,10 @@ void sc_mapgen_prng_seed_from_spin(ScMapGenPrng *p, uint16_t spin_counter) {
  * JSL chain from 03:d840, so a full run's step count is a fixed number -- which
  * makes it usable as a fingerprint against a state sampled from the guest. */
 unsigned long g_sc_mapgen_prng_steps = 0;
+/* Per-routine draw and cell accounting, to match against the guest's own
+ * step-vs-cells profile recovered from WRAM dumps. */
+unsigned long g_sc_mapgen_phase_steps[5] = {0};
+unsigned long g_sc_mapgen_phase_cells[5] = {0};
 
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p) {
     g_sc_mapgen_prng_steps++;
@@ -342,11 +346,13 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     }
     /* JSL $0094bc -- clears the map to zero; see the status block above.
      * Our caller zero-inits, so there is nothing to call. */
-    sc_mapgen_feature_centre(p, st);    /* $f380 */
-    sc_mapgen_feature_path(p, st);      /* $f5b9 */
-    sc_mapgen_feature_clusters(p, st);  /* $f311 */
-    sc_mapgen_shoreline(p, st);         /* $f444 */
-    sc_mapgen_feature_scatter(p, st);   /* $f3a3 */
+#define SC_PHASE(slot, call) do {                                                      const unsigned long s_ = g_sc_mapgen_prng_steps;                               unsigned c_ = 0, i_;                                                           call;                                                                          for (i_ = 0; i_ < SC_MAPGEN_CELLS; i_++) if (st->map[i_] & 0x3ffu) c_++;        g_sc_mapgen_phase_steps[slot] = g_sc_mapgen_prng_steps - s_;                   g_sc_mapgen_phase_cells[slot] = c_;                                        } while (0)
+    SC_PHASE(0, sc_mapgen_feature_centre(p, st));    /* $f380 */
+    SC_PHASE(1, sc_mapgen_feature_path(p, st));      /* $f5b9 */
+    SC_PHASE(2, sc_mapgen_feature_clusters(p, st));  /* $f311 */
+    SC_PHASE(3, sc_mapgen_shoreline(p, st));         /* $f444 */
+    SC_PHASE(4, sc_mapgen_feature_scatter(p, st));   /* $f3a3 */
+#undef SC_PHASE
 }
 
 /* ── What is decompiled, and what the comparison says ──────────────────
@@ -441,18 +447,52 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *
  * ── WHAT IS ACTUALLY WRONG ───────────────────────────────────
  *
- * We consume 12246 steps against the guest's 20377 -- 60% of the draws, 8131
- * short. That is the concrete defect now, and it lines up with the per-value
- * counts, where we under-draw most features by roughly half. Some routine, or
- * several, loops far fewer times than the ROM's does.
+ * CORRECTION. An earlier version of this block said we consume 12246 steps
+ * against the guest's 20377 -- "60% of the draws, 8131 short". That was
+ * measured with entry A = 0, before the seeding was recovered. The step count
+ * is seed-dependent, because every loop bound in the chain is drawn. With the
+ * correct A = 5CEE we consume 22342, so we OVER-draw by about 10%, and the
+ * "under-draw by half" reading was an artifact of the wrong seed.
  *
- * The way to localise it is the per-window step counts, which the dumps give
- * for free: stepping the PRNG forward from one dump's $59/$5b until it reaches
- * the next dump's gives the exact draws consumed in between, with no
- * instrumentation at all. Across the generation those windows run ~88 steps
- * per 25 frames early, ~200 in the middle, then 1600-3200 in the late phases.
- * Matching that profile against our routines pins down which one is short.
-  */
+ * 01:f1ed is confirmed to be exactly five calls, made once, in this order,
+ * with the 0094bc clear only on the non-framed path:
+ *
+ *     JSL $0094bc / JSR $f380 / $f5b9 / $f311 / $f444 / $f3a3
+ *
+ * so nothing is missing at chain level; the divergence is inside a routine.
+ *
+ * Ours, per routine, at the correct seed (cells = running nonzero total):
+ *
+ *     centre  f380     2 steps      0 cells
+ *     path    f5b9   381 steps  +1151
+ *     cluster f311    73 steps   +530
+ *     shore   f444   293 steps     +0     <-- draws nothing at all
+ *     scatter f3a3 21592 steps  +3771     <-- 96.6% of every draw
+ *
+ * The guest, from its own step-vs-cells profile (walk the PRNG forward from
+ * the seeding and look up each WRAM dump's $59/$5b to get cumulative steps):
+ *
+ *     phase A     0 ..  2156 steps   +4225 cells   2.2-3.6 cells/step
+ *     phase B  2156 .. 15771 steps   +3127 cells   0.15-0.28 cells/step
+ *     phase C 15771 .. 20377 steps    -726 cells   REMOVES cells
+ *
+ * The RATES agree well -- our early routines run 3.7 cells/step against the
+ * guest's 3.6, and our scatter 0.17 against its 0.15-0.28 -- so the routines
+ * are drawing the right KIND of work. The amounts do not. Our first four
+ * routines together spend 749 steps for 1681 cells where the guest's fast
+ * phase spends 2156 for 4225: about a third of the work.
+ *
+ * Two concrete leads, in order:
+ *
+ *   1. $f444 consumes 293 draws and changes the nonzero count by ZERO. Either
+ *      it only rewrites existing cells (possible -- it is a shoreline pass) or
+ *      it is drawing into nowhere. Worth confirming before anything else,
+ *      because 293 wasted draws desynchronise everything after it.
+ *   2. Nothing we do ever REMOVES a cell, but the guest's last 4606 draws take
+ *      726 cells away, and the map visibly peaks at 7352 before settling at
+ *      6626. No routine in our chain models that.
+ */
+
 
 /* ── Cell read and write ───────────────────────────────────────────────────
  *

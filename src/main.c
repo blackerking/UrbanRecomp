@@ -5513,7 +5513,18 @@ int main(int argc, char **argv) {
                 idx, nz, hist[0], hist[1], hist[2], hist[3],
                 hist[0x14], hist[0x15], hist[0x18], hist[0x1b]);
         fprintf(stderr, "[selftest] prng_steps=%lu s0=%04X s1=%04X\n",
-                g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1); }
+                g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1);
+        { static const char *nm[5] = { "centre f380", "path   f5b9",
+                                       "cluster f311", "shore  f444",
+                                       "scatter f3a3" };
+          unsigned long prev = 0;
+          for (int k = 0; k < 5; k++) {
+            fprintf(stderr, "[phase] %-12s steps=%6lu  cells=%5lu (%+ld)\n",
+                    nm[k], g_sc_mapgen_phase_steps[k],
+                    g_sc_mapgen_phase_cells[k],
+                    (long)g_sc_mapgen_phase_cells[k] - (long)prev);
+            prev = g_sc_mapgen_phase_cells[k];
+          } } }
       return 0;
     } }
   /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
