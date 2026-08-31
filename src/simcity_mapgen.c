@@ -990,7 +990,34 @@ unsigned sc_mapgen_cell_index(unsigned x, unsigned y) {
  *  b) The brushes do not write raw 1/2/3 after all, and 01:f7e7's TXA writes
  *     something this transcription got wrong.
  *
- * Read $0094bc first; it is small and it runs at exactly the right moment.
+ * $0094bc READ, and it is neither: it is a map clear.
+ *
+ *     LDX #$0000 / LDY #$5dc0 / LDA #$00
+ *     - STA $7f0200,X / INX / DEY / BNE -
+ *
+ * 24000 bytes, i.e. all 12000 cells zeroed before the chain runs. Useful to
+ * know -- the generator starts from a blank map, not whatever was there -- but
+ * it is not the missing stage.
+ *
+ * WHICH LEAVES A MORE LIKELY EXPLANATION, and it is that the COMPARISON was
+ * wrong rather than the generator. savestate_5 was taken "right after map
+ * loaded" on the map-select flow, and that flow was already established to
+ * serve the nine PREBUILT scenario maps -- the bulk 1702+3205 byte write with
+ * the PRNG still at 0000/0000 is a decompression, not a generation. So the
+ * reference is almost certainly a prebuilt map, and a generated map was never
+ * being compared against at all. Different vocabulary is exactly what two
+ * different kinds of map should look like.
+ *
+ * A related puzzle supports this. 01:f502 fits cells in class 0x14..0x25, but
+ * nothing in the generator can reach that range: the brushes write 1, 2, 3 and
+ * 01:f444's table tops out at 0x0B, so even with its +8 variant the maximum is
+ * 0x13. On a freshly generated map 01:f502 therefore does nothing at all --
+ * which fits a routine meant for maps that already carry real tile ids.
+ *
+ * So the next step is NOT more decompiling. It is a reference map that was
+ * genuinely generated, from the free-play path, which is the capture that has
+ * eluded every attempt so far. Until then the self-test can only be compared
+ * against itself.
  *
  * ── Verification, which comes before any of that ───────────────────────────
  *
