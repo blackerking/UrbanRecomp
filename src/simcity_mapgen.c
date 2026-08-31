@@ -68,7 +68,13 @@ void sc_mapgen_prng_seed_from_spin(ScMapGenPrng *p, uint16_t spin_counter) {
     p->t  = (uint16_t)(spin_counter + 2u);
 }
 
+/* How many times the PRNG has been stepped. The generation is one synchronous
+ * JSL chain from 03:d840, so a full run's step count is a fixed number -- which
+ * makes it usable as a fingerprint against a state sampled from the guest. */
+unsigned long g_sc_mapgen_prng_steps = 0;
+
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p) {
+    g_sc_mapgen_prng_steps++;
     const uint16_t t = p->s0;
     p->t = t;
 
@@ -334,7 +340,8 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
         sc_mapgen_framed_map(p, st);    /* JSR $f22c -- 33.6% of seeds */
         return;
     }
-    /* JSL $0094bc -- not decompiled; runs before the chain. */
+    /* JSL $0094bc -- clears the map to zero; see the status block above.
+     * Our caller zero-inits, so there is nothing to call. */
     sc_mapgen_feature_centre(p, st);    /* $f380 */
     sc_mapgen_feature_path(p, st);      /* $f5b9 */
     sc_mapgen_feature_clusters(p, st);  /* $f311 */
@@ -342,18 +349,64 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
     sc_mapgen_feature_scatter(p, st);   /* $f3a3 */
 }
 
-/* ── Not yet decompiled ────────────────────────────────────────────────────
+/* ── What is decompiled, and what the comparison says ──────────────────
  *
- * 01:f1ed  DONE (sc_mapgen_generate). The split is 86/256 = 33.6% to $f22c.
+ * NOTE: this block used to be titled "Not yet decompiled" and was never
+ * closed -- it ran straight into the next comment, swallowing that header.
+ * It also still listed $f3d3, $f502, the $f600 walk and the $f71d/$f794 blob
+ * draws as missing, long after all four were written.
  *
- *          01:f380   DONE (sc_mapgen_feature_centre)
- *          01:f877   DONE (sc_mapgen_rand_below)
+ * Everything in the chain is now decompiled:
  *
- *          01:f3a3   DONE (scatter), except its $f3d3 placement and $f502
- *          01:f5b9   DONE (path),    except its $f600 walk
+ *   01:f1ed  generate      split 86/256 = 33.6% to the framed map $f22c
+ *   01:f380  centre        01:f877  rand_below     01:f85d  min-of-two
+ *   01:f3a3  scatter       incl. $f3d3 placement and $f502
+ *   01:f5b9  path          incl. the $f600 walk
+ *   01:f311  clusters      incl. the $f71d / $f794 blob draws
+ *   01:f444  shoreline     01:f22c  framed map
+ *   01:f8e9 / 01:f8af      cell read and write
+ *   00:94bc                map clear -- SEP #$20 then 0x5dc0 = 24000 single
+ *                          BYTE stores to $7f0200,X, i.e. the whole 12000-word
+ *                          map zeroed. Nothing more; our zero-init is
+ *                          equivalent. Was the last unknown in the chain.
  *
- *          01:f311   DONE (clusters), except its $f71d / $f794 blob draws
+ * Still genuinely open: the $f2be vertical edge loop inside $f22c is inferred
+ * from the horizontal one, not read.
  *
+ * ── THE SEEDING IS NOT THE PROBLEM ───────────────────────────────
+ *
+ * The previous note here said the remaining mismatch was "almost certainly the
+ * seeding", since 03:d840's entry carry and entry A cannot be read off the
+ * disassembly. That was wrong, and it has now been tested two ways.
+ *
+ * Walking the PRNG BACKWARDS from a state sampled off the guest (5B19/426F)
+ * looking for the seeding signature -- $5b equal to 1228 or 1238, the only two
+ * values the ROL/ADC can produce for this map -- found three candidates at
+ * depths 10057, 17872 and 22670. All three generate a WORSE map than an
+ * arbitrary carry=0/A=0 (35.2%, 29.6%, 30.8% against 38.7%), and about two
+ * chance hits were expected over that depth anyway. They are noise.
+ *
+ * Then the whole space was swept: both carries by all 65536 entry values,
+ * 131072 full generations, against the golden map (SC_MAPGEN_SWEEP).
+ *
+ *     mean match 3686/12000 = 30.7%
+ *     best       carry=0 A=5782  5547/12000 = 46.2%
+ *     then       44.7%, 44.6%, 42.6%
+ *
+ * That is a smooth tail off the mean -- the shape of a maximum over 131072
+ * samples -- with no spike anywhere. If the decompilation were right, the true
+ * pair would reproduce the map and stand near 100%, unmistakably. It does not
+ * exist in the space.
+ *
+ * So the error is in the generator, not in how it is seeded, and hunting the
+ * entry values further is wasted effort. The 12246 PRNG steps a full run
+ * consumes (g_sc_mapgen_prng_steps) is the more useful handle now: it is a
+ * fixed fingerprint of the whole chain, so if the guest's own step count can
+ * be measured for one generation, comparing it localises which routine draws
+ * the wrong number of times -- which the per-value counts already hint at,
+ * since we under-draw most features by roughly half.
+ */
+
 /* ── Cell read and write ───────────────────────────────────────────────────
  *
  * 01:f8e9 reads and 01:f8af writes, and they are exact mirrors:

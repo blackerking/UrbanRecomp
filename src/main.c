@@ -5401,6 +5401,75 @@ int main(int argc, char **argv) {
    * SC_MAPGEN_CARRY and SC_MAPGEN_A exist because 03:d840's entry carry and
    * its entry A are genuinely unknown -- the disassembly cannot show either --
    * so they are swept rather than assumed. */
+  /* SC_MAPGEN_SWEEP=1 with SC_MAPGEN_GOLD=<wram dump>: brute-force 03:d840's
+   * two unknown entry values against a map dumped from the guest. Sweeping is
+   * the only way to settle them -- the disassembly cannot show either, and a
+   * backward walk of the PRNG from a sampled state produced only chance hits.
+   *
+   * This is decisive in BOTH directions. If the decompilation is right, the
+   * true pair reproduces the map and stands far above every other; if nothing
+   * rises above chance, the seeding is not what is wrong and no amount of
+   * guessing at it will help. */
+  { const char *sw = getenv("SC_MAPGEN_SWEEP");
+    const char *gp = getenv("SC_MAPGEN_GOLD");
+    if (sw && *sw && gp && *gp) {
+      static uint16_t gold[SC_MAPGEN_CELLS];
+      FILE *gf = fopen(gp, "rb");
+      if (!gf) { fprintf(stderr, "[sweep] cannot open %s\n", gp); return 1; }
+      { static unsigned char raw[0x20000];
+        const size_t got = fread(raw, 1, sizeof raw, gf);
+        fclose(gf);
+        if (got < 0x10200 + 2 * SC_MAPGEN_CELLS) {
+          fprintf(stderr, "[sweep] %s is too small (%u bytes)\n",
+                  gp, (unsigned)got);
+          return 1;
+        }
+        /* The map lives at $7F0200 -- bank 7F, so 0x10200 into a WRAM dump.
+         * This offset was wrong once already (7E, not 7F) and cost a whole
+         * "golden reference" built on the wrong buffer. */
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          const unsigned o = 0x10200u + 2u * i;
+          gold[i] = (uint16_t)((raw[o] | (raw[o + 1] << 8)) & 0x3ffu);
+        } }
+
+      { const unsigned idx =
+            (unsigned)strtoul(getenv("SC_MAPGEN_SELFTEST")
+                                  ? getenv("SC_MAPGEN_SELFTEST") : "3", NULL, 0);
+        static ScMapGenState gs;
+        unsigned best[4] = {0, 0, 0, 0}, bestc[4] = {0, 0, 0, 0};
+        unsigned besta[4] = {0, 0, 0, 0};
+        double sum = 0.0; unsigned runs = 0;
+        for (unsigned carry = 0; carry < 2u; carry++) {
+          for (unsigned a = 0; a < 0x10000u; a++) {
+            ScMapGenPrng pr;
+            memset(gs.map, 0, sizeof gs.map);
+            sc_mapgen_seed(&pr, (uint16_t)a, (uint8_t)(idx & 0xff),
+                           (uint8_t)((idx >> 8) & 0xff),
+                           (uint8_t)((idx >> 16) & 0xff), carry);
+            sc_mapgen_generate(&pr, &gs);
+            { unsigned m = 0;
+              for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
+                if ((gs.map[i] & 0x3ffu) == gold[i]) m++;
+              sum += m; runs++;
+              if (m > best[0]) {
+                for (int k = 3; k > 0; k--) {
+                  best[k] = best[k-1]; bestc[k] = bestc[k-1]; besta[k] = besta[k-1];
+                }
+                best[0] = m; bestc[0] = carry; besta[0] = a;
+              } }
+          }
+          fprintf(stderr, "[sweep] carry=%u done, best so far %u (%.1f%%)\n",
+                  carry, best[0], 100.0 * best[0] / SC_MAPGEN_CELLS);
+        }
+        fprintf(stderr, "[sweep] mean match over %u runs: %.1f (%.1f%%)\n",
+                runs, sum / runs, 100.0 * (sum / runs) / SC_MAPGEN_CELLS);
+        for (int k = 0; k < 4; k++)
+          fprintf(stderr, "[sweep] #%d carry=%u A=%04X  %u/%u = %.1f%%\n",
+                  k + 1, bestc[k], besta[k], best[k], (unsigned)SC_MAPGEN_CELLS,
+                  100.0 * best[k] / SC_MAPGEN_CELLS); }
+      return 0;
+    } }
+
   { const char *st = getenv("SC_MAPGEN_SELFTEST");
     if (st && *st) {
       const char *outp = getenv("SC_MAPGEN_OUT");
@@ -5415,9 +5484,11 @@ int main(int argc, char **argv) {
                      (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u));
       { const char *rp = getenv("SC_MAPGEN_REPEAT");
         const unsigned reps = rp && *rp ? (unsigned)strtoul(rp, NULL, 0) : 1u;
-        /* The captured reference accumulated more than one pass -- the preview
-         * regenerates while the button is held -- so the count is a parameter
-         * rather than 1. */
+        /* Was a guess that the reference had accumulated several passes, since
+         * the preview regenerates while the button is held. Disproved -- more
+         * passes make the match worse, and the second wipes the first's work.
+         * Kept only as a sweep knob; 1 is correct. */
+        g_sc_mapgen_prng_steps = 0;
         for (unsigned r = 0; r < reps; r++) sc_mapgen_generate(&pr, &gs); }
       if (outp && *outp) {
         FILE *f = fopen(outp, "wb");
@@ -5432,7 +5503,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[selftest] idx=%u nonzero=%u  0:%u 1:%u 2:%u 3:%u"
                         " 20:%u 21:%u 24:%u 27:%u\n",
                 idx, nz, hist[0], hist[1], hist[2], hist[3],
-                hist[0x14], hist[0x15], hist[0x18], hist[0x1b]); }
+                hist[0x14], hist[0x15], hist[0x18], hist[0x1b]);
+        fprintf(stderr, "[selftest] prng_steps=%lu s0=%04X s1=%04X\n",
+                g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1); }
       return 0;
     } }
   /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
