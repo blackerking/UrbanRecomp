@@ -36,6 +36,7 @@
 
 #include "simcity_mapgen.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* ── PRNG ──────────────────────────────────────────────────────────────────
  *
@@ -80,8 +81,28 @@ unsigned long g_sc_mapgen_phase_cells[5] = {0};
 unsigned long g_sc_mapgen_phase_changed[5] = {0};
 unsigned long g_sc_mapgen_phase_cleared[5] = {0};
 
+/* Snapshot the map after an exact number of PRNG draws.
+ *
+ * Comparing FINAL maps is nearly useless for judging a fix: the moment the
+ * draw sequence diverges, every later loop bound is drawn from a different
+ * stream and all the totals become chaos, so a change can move the final match
+ * by a couple of points for no reason connected to its correctness. The guest
+ * dumps, though, carry the PRNG state, so each one is pinned to an exact draw
+ * count -- 80, 256, 436, 614, 849, 1265, 1654, 2156 and so on. Snapshotting
+ * our map at the same count compares like with like and finds the FIRST
+ * divergence, which is the only one that means anything. */
+ScMapGenState    *g_sc_mapgen_cur = 0;
+unsigned long     g_sc_mapgen_snap_at = 0;
+int               g_sc_mapgen_snapped = 0;
+uint16_t          g_sc_mapgen_snap[SC_MAPGEN_CELLS];
+
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p) {
     g_sc_mapgen_prng_steps++;
+    if (g_sc_mapgen_snap_at && g_sc_mapgen_prng_steps == g_sc_mapgen_snap_at &&
+        g_sc_mapgen_cur && !g_sc_mapgen_snapped) {
+        memcpy(g_sc_mapgen_snap, g_sc_mapgen_cur->map, sizeof g_sc_mapgen_snap);
+        g_sc_mapgen_snapped = 1;
+    }
     const uint16_t t = p->s0;
     p->t = t;
 
@@ -142,7 +163,13 @@ void sc_mapgen_seed(ScMapGenPrng *p, uint16_t a_on_entry,
     n = (uint16_t)n;
     n = n + seed1 + c2;  c2 = (n >> 16) & 1u;  n = (uint16_t)n;
     n = n + seed0 + c2;                        n = (uint16_t)n;
-    const unsigned steps = (unsigned)(n & 0x1fu) + 1u;   /* DEX/BPL: X+1 times */
+    unsigned steps = (unsigned)(n & 0x1fu) + 1u;         /* DEX/BPL: X+1 times */
+    /* SC_MAPGEN_PRESTEP overrides the count. The whole stream shifts with it,
+     * so if this reading of $0b29/$0b28/$0b27 is off by even one the map is
+     * unrelated to the guest's -- worth being able to sweep rather than
+     * assume. */
+    { const char *e = getenv("SC_MAPGEN_PRESTEP");
+      if (e && *e) steps = (unsigned)strtoul(e, NULL, 0); }
 
     for (unsigned i = 0; i < steps; i++) sc_mapgen_prng_step(p);
 }
@@ -195,8 +222,20 @@ uint16_t sc_mapgen_rand_below(ScMapGenPrng *p, uint16_t n) {
  * NOTE the operand order: the range call happens BEFORE the add, so it draws
  * with N = 40 and N = 33, not with the sum. Two PRNG steps per call. */
 void sc_mapgen_feature_centre(ScMapGenPrng *p, ScMapGenState *st) {
-    st->x0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0028) + 0x0028u);   /* $0457/$043b */
-    st->y0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0021) + 0x0021u);   /* $0459/$043d */
+    /* Each value is stored TWICE -- to the saved centre AND to the live walk
+     * position:
+     *
+     *     STA $0457 / STA $043b        STA $0459 / STA $043d
+     *
+     * Setting only the centre left the first walk starting from whatever
+     * $043b/$043d held, which for us was zero: the first walk ran from the
+     * top-left corner and stamped a blob there that the ROM never draws. The
+     * second and third walks looked right only because $f5b9 resets the
+     * position from $0457/$0459 before each of them. */
+    st->x0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0028) + 0x0028u);   /* $0457 */
+    st->cur_x = st->x0;                                               /* $043b */
+    st->y0 = (uint16_t)(sc_mapgen_rand_below(p, 0x0021) + 0x0021u);   /* $0459 */
+    st->cur_y = st->y0;                                               /* $043d */
 }
 
 /* ── Feature: scatter ──────────────────────────────────────────────────────
@@ -254,6 +293,28 @@ void sc_mapgen_feature_scatter(ScMapGenPrng *p, ScMapGenState *st) {
  *
  * $0457/$0459 are the centre written by 01:f380, so this feature depends on
  * that one having run. */
+/* 01:f843 applied to a probe formed as $043b + offset, in 16-BIT WRAPPING
+ * arithmetic, which is the whole point of this helper.
+ *
+ *     LDA $0453 / BMI fail / CMP #$0078 / BCS fail
+ *     LDA $0455 / BMI fail / CMP #$0064 / BCS fail
+ *
+ * The ROM builds the probe with ADC #$0004 on a 16-bit word, so a walk that
+ * has stepped to x = -1 ($FFFF) probes at 3 and PASSES -- it keeps drawing for
+ * a few more cells past the left or top edge. Computing the probe as
+ * (int)cur_x + 4 instead gives 65539, fails, and stops the walk immediately.
+ * That single difference made our walks about half the guest's length. */
+static int sc_mapgen_probe_in_bounds(uint16_t x, uint16_t y,
+                                     uint16_t offx, uint16_t offy) {
+    const uint16_t px = (uint16_t)(x + offx);
+    const uint16_t py = (uint16_t)(y + offy);
+    if (px & 0x8000u) return 0;                   /* BMI */
+    if (px >= SC_MAPGEN_W) return 0;              /* CMP #$0078 / BCS */
+    if (py & 0x8000u) return 0;                   /* BMI */
+    if (py >= SC_MAPGEN_H) return 0;              /* CMP #$0064 / BCS */
+    return 1;
+}
+
 void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
     st->dir_base = (uint16_t)(sc_mapgen_prng_step(p) & 0x0003u);
     st->dir_cur = st->dir_base;
@@ -292,7 +353,7 @@ void sc_mapgen_feature_path(ScMapGenPrng *p, ScMapGenState *st) {
  * further before snapping back to its base bearing. */
 void sc_mapgen_path_walk_narrow(ScMapGenPrng *p, ScMapGenState *st) {
     for (;;) {
-        if (!sc_mapgen_in_bounds((int)st->cur_x + 3, (int)st->cur_y + 3)) return;
+        if (!sc_mapgen_probe_in_bounds(st->cur_x, st->cur_y, 3, 3)) return;
         sc_mapgen_stamp_blob_small(st);                 /* JSR $f794 */
 
         const uint16_t r = sc_mapgen_prng_step(p);
@@ -382,6 +443,7 @@ void sc_mapgen_feature_clusters(ScMapGenPrng *p, ScMapGenState *st) {
  * generation-in-progress flag; it is reproduced because it is cheap, not
  * because its effect is understood. */
 void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
+    g_sc_mapgen_cur = st;
     const unsigned pick = sc_mapgen_prng_step(p) & 0x00ffu;
     if (pick < 0x0056u) {
         sc_mapgen_framed_map(p, st);    /* JSR $f22c -- 33.6% of seeds */
@@ -548,31 +610,36 @@ void sc_mapgen_generate(ScMapGenPrng *p, ScMapGenState *st) {
  *   shore  f444      293 steps,  303 cells   guest             605 cells
  *   scatter f3a3   21592 steps, 3771 cells   guest ~13615, +3127 then -726
  *
- * ── THE DIAGNOSTIC ───────────────────────────────────────────
+ * ── HOW TO JUDGE A FIX HERE ───────────────────────────────────
  *
- * Our early routines draw 3.7 cells per PRNG step; the guest draws 1.68. We
- * are not drawing too few cells because we loop too few times -- we are
- * drawing them TOO CHEAPLY. The ROM consumes about twice as many random
- * numbers per cell as we do, which means a draw inside the path walk or the
- * cluster blob is reading values we never read. That also explains the shape
- * of the final histogram, where we are 2022 short on value 01 and 374/379
- * long on 18 and 21: the terrain pass ends early, so scatter finds an emptier
- * map and fills it with its own class.
+ * Two traps, both of which produced misleading numbers before being noticed.
  *
- * Find the missing reads before touching loop bounds. Raising an iteration
- * count would move the cell totals toward the guest while making the stream
- * divergence worse, which is the kind of change that looks like progress on
- * the histogram and is wrong.
+ * 1. COMPARING FINAL MAPS BARELY MEASURES A FIX. Once the draw sequence
+ *    diverges, every later loop bound comes from a different stream, so the
+ *    final match moves a couple of points for reasons unconnected to whether
+ *    a change is right. Use SC_MAPGEN_SNAP_AT instead: the guest dumps carry
+ *    the PRNG state, so each is pinned to an exact draw count (80, 256, 436,
+ *    614, 849, 1265, 1654, 2156 from the seeding), and snapshotting our map at
+ *    the same count compares like with like and finds the FIRST divergence.
  *
- * The other confirmed gap: nothing we do ever clears a cell (measured --
- * cleared=0 in every routine), while the guest's last 4606 draws turn 726
- * cells of the 14-25 class back to zero. $f3a3 has an erosion stage we have
- * not found.
+ * 2. PERCENT-OF-CELLS-IDENTICAL IS USELESS EARLY. At 80 draws the guest has
+ *    drawn 289 cells of 12000, so a completely wrong map still scores ~96%
+ *    on the empty ones. Score the drawn cells: intersection over union of the
+ *    nonzero sets, which separated a real candidate (43%) from noise (0%)
+ *    where the raw percentage showed 94-97% for everything.
  *
- * $f444 is NOT the problem -- it was suspected of drawing into nowhere, but it
- * rewrites 303 existing cells nonzero-to-nonzero, which is what a shoreline
- * pass should do. Its 303 against the guest's 605 is the same factor-of-two.
+ * ── OPEN: THE PRE-STEP COUNT ─────────────────────────────────
+ *
+ * 03:d85e computes the count as ($0b29*2 + $0b28 + $0b27) & $1f, then steps
+ * X+1 times, which for map 3 is 4. Sweeping it (SC_MAPGEN_PRESTEP) against the
+ * earliest dump favours 11 at 43% IoU over 4 at 18%, which contradicts the
+ * disassembly. Against the FINAL map the order reverses -- 4 gives 41.9% and
+ * IoU 49.2%, 11 gives 33.4% and 44.2% -- so 4 is kept, on the grounds that the
+ * single early dump is taken at a vblank rather than at an exact draw boundary
+ * and carries up to a stamp of slop, while the final map has none. Worth
+ * revisiting if a second early dump disagrees the same way.
  */
+
 
 
 
@@ -630,19 +697,25 @@ void sc_mapgen_write_cell(ScMapGenState *st, unsigned x, unsigned y, uint16_t v)
  * cluster -> jittered point -> 9x9 disc -> this conditional write. */
 void sc_mapgen_draw_cell(ScMapGenState *st, unsigned brush, int ox, int oy) {
     if (brush == 0) return;                       /* outside the disc */
-    const int x = (int)st->cur_x + ox;            /* $0447 + $043b */
-    const int y = (int)st->cur_y + oy;            /* $0449 + $043d */
-    if (!sc_mapgen_in_bounds(x, y)) return;       /* JSR $f843 / BCS */
+    /* 16-BIT WRAPPING, as the ROM's ADC does -- see sc_mapgen_probe_in_bounds.
+     * Computing these as (int)cur_x + ox turns a blob position of -1 ($FFFF)
+     * into 65535 rather than -1, so every cell of a blob straddling the left
+     * or top edge is rejected instead of clipped. */
+    const uint16_t x = (uint16_t)(st->cur_x + (uint16_t)ox);   /* $0447 + $043b */
+    const uint16_t y = (uint16_t)(st->cur_y + (uint16_t)oy);   /* $0449 + $043d */
+    if (!sc_mapgen_probe_in_bounds(st->cur_x, st->cur_y,
+                                   (uint16_t)ox, (uint16_t)oy))
+        return;                                   /* JSR $f843 / BCS */
 
     unsigned value = brush;
     if (brush == 2) {
         /* The centre marker is not placed on the border; it becomes a 1. */
         if (x == 0 || x == SC_MAPGEN_W || y == 0 || y == SC_MAPGEN_H) value = 1;
     } else {
-        const unsigned existing = sc_mapgen_read_cell(st, (unsigned)x, (unsigned)y);
+        const unsigned existing = sc_mapgen_read_cell(st, x, y);
         if (existing == 1 || existing == 2) return;   /* protected, leave it */
     }
-    sc_mapgen_write_cell(st, (unsigned)x, (unsigned)y, (uint16_t)value);
+    sc_mapgen_write_cell(st, x, y, (uint16_t)value);
 }
 
 /* ── The blob brush ────────────────────────────────────────────────────────
@@ -931,7 +1004,7 @@ void sc_mapgen_shoreline(ScMapGenPrng *p, ScMapGenState *st) {
  * map. */
 void sc_mapgen_path_walk(ScMapGenPrng *p, ScMapGenState *st) {
     for (;;) {
-        if (!sc_mapgen_in_bounds((int)st->cur_x + 4, (int)st->cur_y + 4)) return;
+        if (!sc_mapgen_probe_in_bounds(st->cur_x, st->cur_y, 4, 4)) return;
         sc_mapgen_stamp_blob(st);                       /* JSR $f71d */
 
         const uint16_t r = sc_mapgen_prng_step(p);

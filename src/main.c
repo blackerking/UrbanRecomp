@@ -5490,6 +5490,8 @@ int main(int argc, char **argv) {
                      (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
                      (uint8_t)((idx >> 16) & 0xff),
                      (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u));
+      { const char *sa = getenv("SC_MAPGEN_SNAP_AT");
+        if (sa && *sa) g_sc_mapgen_snap_at = strtoul(sa, NULL, 0); }
       { const char *rp = getenv("SC_MAPGEN_REPEAT");
         const unsigned reps = rp && *rp ? (unsigned)strtoul(rp, NULL, 0) : 1u;
         /* Was a guess that the reference had accumulated several passes, since
@@ -5500,7 +5502,13 @@ int main(int argc, char **argv) {
         for (unsigned r = 0; r < reps; r++) sc_mapgen_generate(&pr, &gs); }
       if (outp && *outp) {
         FILE *f = fopen(outp, "wb");
-        if (f) { fwrite(gs.map, 2, SC_MAPGEN_CELLS, f); fclose(f); }
+        /* With SC_MAPGEN_SNAP_AT, write the map as it stood after exactly that
+         * many draws rather than the finished one. */
+        if (f) {
+          fwrite(g_sc_mapgen_snapped ? g_sc_mapgen_snap : gs.map,
+                 2, SC_MAPGEN_CELLS, f);
+          fclose(f);
+        }
       }
       { unsigned hist[64] = {0}, nz = 0;
         for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {

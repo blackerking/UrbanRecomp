@@ -24,6 +24,11 @@ extern unsigned long g_sc_mapgen_phase_steps[5];
 extern unsigned long g_sc_mapgen_phase_cells[5];
 extern unsigned long g_sc_mapgen_phase_changed[5];
 extern unsigned long g_sc_mapgen_phase_cleared[5];
+/* Snapshot the map after an exact draw count -- see the note in the .c. */
+extern struct ScMapGenState *g_sc_mapgen_cur;
+extern unsigned long g_sc_mapgen_snap_at;
+extern int           g_sc_mapgen_snapped;
+extern uint16_t      g_sc_mapgen_snap[SC_MAPGEN_CELLS];
 uint16_t sc_mapgen_prng_step(ScMapGenPrng *p);
 
 /* 03:d840 -- fold the three map-seed bytes in and pre-step the PRNG 1..32
