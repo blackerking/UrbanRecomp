@@ -2935,3 +2935,50 @@ NOT measured: which layer is which quantity. The view modes are contiguous
 own map-view menu -- and the order of that menu names them directly. That is a
 question for someone who can read the menu, not something to infer from the
 weight table.
+
+### The diffusion step, `03:a0c4`-`a137`
+
+The pass that produces `$7FB600` from `$7FC1B8` is a five-point stencil:
+
+```
+for row  $02 = 0..49
+ for col $00 = 0..59
+    sum = 0
+    if col != 0    sum += $7FC1B7,X      ; left    (base-1)
+    if col != 59   sum += $7FC1B9,X      ; right   (base+1)
+    if row != 0    sum += $7FC17C,X      ; above   (base-60)
+    if row != 49   sum += $7FC1F4,X      ; below   (base+60)
+                   sum += $7FC1B8,X      ; self
+    $7FB600,X = min(250, sum >> 2)
+```
+
+Two things worth drawing out.
+
+**It amplifies as well as spreads.** Five terms divided by four: a uniform
+neighbourhood comes out 1.25x higher than it went in, and the clamp at 250 is
+what stops it running away. This is not an average, it is a
+spread-and-grow step with a ceiling.
+
+**The edge handling confirms the grid independently.** `CPY #$003b` (59) is the
+last column and `CPY #$0031` (49) the last row, so out-of-bounds neighbours are
+dropped rather than wrapped. That is a third measurement of 60x50, after the
+loop bounds at `03:9f47` and the 3000-byte array size.
+
+The sum is kept as 16 bits across `$04`/`$05` with `INC $05` on each carry, so
+five bytes at 250 cannot overflow it.
+
+### The layer chain so far
+
+```
+$7FC1B8  (03:a09f)   a working quantity
+   |
+   +--> $7FB600  (03:a125)   diffused: 5-point stencil, >>2, clamp 250
+   |       |
+   |       +--> $7F8270  (03:9c89)  copy, plus 32-bit total, max, count
+   |
+   +--> $7F8E28  (03:9b87)  doubled, saturated at 255
+```
+
+`$7F8E28` is the fallback the UI shows for every view mode outside 8-11, and
+`$7F8270` is view mode 9. So one quantity feeds two different views of itself:
+raw-doubled, and diffused.
