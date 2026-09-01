@@ -2533,3 +2533,45 @@ So a menu trigger for it cannot work the way the six do. It needs whatever the
 Boston scenario sets up at load time, and that is the next thing to find —
 `03:ce2e` (scenario map loader) and `03:ddb6` (scenario select) are the places
 to look.
+
+## The title sequence (`$14 = 1`)
+
+`03:d2c6` is the handler. Per frame it:
+
+  - counts `$6e` down toward `#$e0`, one step per 14 frames (`$3c` is the
+    divider) -- the fade/entry timer;
+  - `JSL $0593ae`, which is the whole animation;
+  - checks `$011b` for a button pair (`AND #$3030`) and, on it, zeros
+    `$700000` and `$707ff0` -- the SRAM clear;
+  - on `$c9 AND #$9000`, calls `03:e574` and `03:e349` and `INC $14` to leave.
+
+`05:93ae` is a five-entry phase machine: `LDA $30 / ASL / TAX / JSR ($93c1,X)`.
+The table at `05:93c1` holds only FIVE addresses -- anything read past entry 4
+is code bytes, not handlers.
+
+| `$30` | handler | |
+|---|---|---|
+| 0 | `05:93cb` | waits on `05:2cc6`, `INC $30` when it returns zero |
+| 1 | `05:93d4` | the scroll animation |
+| 2 | `05:941a` | |
+| 3 | `05:93cb` | same waiter as phase 0 |
+| 4 | `05:942e` | |
+
+Phase 1 advances four scroll values at different rates off a frame counter
+`$2c`: `$18` every 2 frames, `$1c` every 4, `$20` and `$24` every 8, each
+masked to `#$01ff` -- the 512 px width of the 64-column BG1 map. `$2a`
+decrements once `$18` passes `#$01e6`. It then calls `05:94be` and `05:952e`,
+which set `$025d`/`$025f`/`$0261` and issue `COP #$00` with `A = 2`.
+
+### There is no "the logo has left the screen" signal
+
+Worth stating because it decides how the widescreen artifact can be fixed. The
+SimCity sign is ordinary tilemap content: it is drawn once and the phase-1
+scroll carries it left, and when it passes x=0 the ROM does nothing at all --
+hardware clips at the screen edge, so there is nothing to do. The mask to
+`#$01ff` means it eventually wraps back around, which is why it reappears
+"when it is needed another time".
+
+So the ROM offers no flag, no counter and no write to hook: any suppression of
+the sign in the widescreen margins has to be a host RENDER rule, and it cannot
+be driven by anything the game itself knows.
