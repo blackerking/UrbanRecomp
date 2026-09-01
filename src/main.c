@@ -2174,6 +2174,89 @@ static bool run_one_frame(void) {
      * pair bounds the generation exactly. The decompressor at 00:90dd keeps a
      * plain holdoff -- it has no equivalent end marker and is short. */
     if (cpu->k == 0x03 && cpu->pc == 0xd862) { s_gen_trigger_hits++; s_generating = true; }
+
+    /* ── Run the map generator natively, on the INTERPRETER path ───────────
+     *
+     * 01:f1ed is the whole generator, reached by JSL from 03:d869, and the
+     * SNES CPU takes about 800 frames of wall clock to grind through it --
+     * thirteen seconds of watching a map appear a few cells at a time.
+     * src/simcity_mapgen.c does the same work in well under a frame.
+     *
+     * This is the same substitution as the SimCity_MapGen HLE, but hooked
+     * here rather than through hle_func, and that difference is the point:
+     * hle_func only applies to AOT bodies, so it needs SC_FIBER, and the
+     * fiber currently has rendering defects of its own
+     * (docs/TODO_fiber_rendering.md). Hooking the interpreter delivers the
+     * fast generation on the path that is actually correct.
+     *
+     * The GENERATOR is verified bit-exact -- three maps across both branches
+     * reproduce the guest's map on all 12000 cells, consume its exact draw
+     * count and leave the PRNG in its exact final state -- and the same
+     * substitution is proven working through the fiber HLE.
+     *
+     * THIS HOOK, however, has never been observed to fire. Default OFF until
+     * it has: SC_MAPGEN_FAST=1 to enable.
+     *
+     * It could not be verified because no save state currently reaches map
+     * generation. The ones used earlier were overwritten during an interactive
+     * session, and the survivors either sit in the 05:935A block-copy loop or
+     * never reach the map screen; a plain boot does not generate either (the
+     * "gen: trigger_hits" counter is shared with the 00:90dd decompressor, so
+     * a non-zero count there does NOT mean the generator ran -- that cost an
+     * hour of chasing). Verifying needs a save state on the map-select screen,
+     * then SC_MAPGEN_FAST=1 SC_MAPGEN_FAST_DIAG=1 and a press of Up.
+     *
+     * The RTL emulation below is the part most worth re-reading before
+     * trusting this: get the pull order or the +1 wrong and it returns into
+     * the middle of the caller.
+     *
+     * By the time execution reaches f1ed the caller has already seeded and
+     * pre-stepped the PRNG (03:d84d through the d862 loop), so $59/$5b ARE the
+     * starting point and there is no seeding to redo. */
+    if (cpu->k == 0x01 && cpu->pc == 0xf1ed) {
+      static int fast = -1;
+      if (fast < 0) {
+        const char *e = getenv("SC_MAPGEN_FAST");
+        fast = (e && *e) ? (*e != '0') : 0;   /* OFF until observed firing */
+      }
+      if (fast) {
+        static ScMapGenState gs;
+        ScMapGenPrng pr;
+        pr.s0 = (uint16_t)(g_ram[0x59] | (g_ram[0x5a] << 8));
+        pr.s1 = (uint16_t)(g_ram[0x5b] | (g_ram[0x5c] << 8));
+        pr.t  = (uint16_t)(g_ram[0x5d] | (g_ram[0x5e] << 8));
+        sc_mapgen_generate(&pr, &gs);
+        /* The map is at $7F0200 -- bank 7F, so 0x10200 into WRAM. */
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          g_ram[0x10200 + 2 * i]     = (uint8_t)(gs.map[i] & 0xff);
+          g_ram[0x10200 + 2 * i + 1] = (uint8_t)((gs.map[i] >> 8) & 0xff);
+        }
+        g_ram[0x59] = (uint8_t)(pr.s0 & 0xff); g_ram[0x5a] = (uint8_t)(pr.s0 >> 8);
+        g_ram[0x5b] = (uint8_t)(pr.s1 & 0xff); g_ram[0x5c] = (uint8_t)(pr.s1 >> 8);
+        g_ram[0x5d] = (uint8_t)(pr.t  & 0xff); g_ram[0x5e] = (uint8_t)(pr.t  >> 8);
+
+        /* Emulate the RTL that ends 01:f1ed: pull PCL, PCH, PBR, then PC+1.
+         * The JSL at 03:d869 pushed three bytes; leaving them would return
+         * into the middle of the caller. */
+        { uint16_t sp = cpu->sp;
+          uint8_t lo  = g_ram[(uint16_t)(sp + 1)];
+          uint8_t hi  = g_ram[(uint16_t)(sp + 2)];
+          uint8_t pbr = g_ram[(uint16_t)(sp + 3)];
+          cpu->sp = (uint16_t)(sp + 3);
+          cpu->k  = pbr;
+          cpu->pc = (uint16_t)(((hi << 8) | lo) + 1); }
+
+        if (getenv("SC_MAPGEN_FAST_DIAG")) {
+          unsigned nz = 0;
+          for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
+            if (gs.map[i] & 0x3ff) nz++;
+          fprintf(stderr, "[mapgen_fast] %u cells, %lu draws, prng %04X/%04X, "
+                          "return %02X:%04X\n",
+                  nz, g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1,
+                  (unsigned)cpu->k, (unsigned)cpu->pc);
+        }
+      }
+    }
     if (cpu->k == 0x03 && cpu->pc == 0xd871) s_generating = false;
     if (cpu->k == 0x00 && cpu->pc == 0x90dd) {
       s_gen_trigger_hits++;
