@@ -2575,3 +2575,72 @@ hardware clips at the screen edge, so there is nothing to do. The mask to
 So the ROM offers no flag, no counter and no write to hook: any suppression of
 the sign in the widescreen margins has to be a host RENDER rule, and it cannot
 be driven by anything the game itself knows.
+
+### The intro's animation driver (`05:9603`)
+
+Called first by `05:93ae` every frame, before the phase handler. It is a
+table-driven tile-index animator, not a CHR animator: it rewrites the low 10
+bits of chosen tilemap CELLS and leaves the upper 6 (palette/priority/flip)
+alone.
+
+```
+LDX $32 / LDA $9696,X -> $79      ; $79 = the frame's cell list
+INX INX / CPX #$0018 / BNE +      ; 12 lists, walked two bytes at a time
+  $34 = ($34 + 1) % 3 ; X = 0     ; ...and a 3-step variant counter
+STX $32
+LDA ($79) / ASL / STA $7f         ; $7f = count * 2
+$79 += 2                          ; past the count
+$7c = $79 + ($34 + 1) * $7f       ; the variant's value block
+loop:
+  LDA ($79),Y -> X                ; a cell offset
+  LDA $7e2840,X / AND #$fc00 / ORA ($7c),Y / STA $7e2840,X
+  Y += 2 / CPY $7f / BNE loop
+```
+
+So each list is: a count, then that many cell offsets, then THREE blocks of
+that many tile values -- one per variant.
+
+The offsets index a set of shadow tilemaps in WRAM which are DMA'd to VRAM by
+the tail of the same routine (`$968a` holds the VRAM destinations, `$9690` the
+WRAM sources, `$0147`/`$0167`/`$0177`/`$0187` are the queue slots, `$b7 |= 4`
+arms it):
+
+| WRAM shadow | VRAM | what |
+|---|---|---|
+| `$7E2840` | `$5800` | BG2 tilemap |
+| `$7E3040` | `$6000` | BG1 page 0 |
+| `$7E3840` | `$6400` | BG1 page 1 |
+
+An offset is therefore decoded as `$7E2840 + X`, and which map it lands in
+follows from the `$800` spacing -- offsets past `$800` are BG1, not BG2.
+
+The twelve lists at `05:9696`:
+
+| list | at | cells | what the tiles draw |
+|---|---|---|---|
+| 0, 5 | `96ae`, `97da` | BG1 r15/r12, 6 | lit windows |
+| 1, 6 | `97b0`, `96e0` | BG1 r20, 5 | lit windows (tiles `001`-`023`) |
+| 2 | `970a` | BG1 r13-16, 9 | lit windows |
+| 3, 4 | `980c`, `9786` | BG1 r17/r12, 5 | lit windows |
+| 7, 10 | `9858`, `98b4` | BG2 r15, 7 | skyline with a blinking antenna light |
+| 8, 9 | `9836`, `9892` | BG2 r14/r15, 4 | two blinking antenna lights |
+| 11 | `9754` | BG1 r16, 6 | lit windows |
+
+### The SimCity sign is NOT in the animation driver
+
+Decoded the CHR for every tile every list writes. All of it is lit windows and
+blinking antenna lights; the three variants of lists 7-10 differ by a SINGLE
+pixel value, which is the light blinking. There is no lettering anywhere in the
+set.
+
+This matters because two attempts to suppress the sign were built on the belief
+that tiles `001`..`023` were it. They are list 1 and 6 -- a building's lit
+windows -- which is why suppressing that range removed a small building from
+the margins and never touched the sign. The mistake originally came from
+reading a low-resolution ASCII render, where rows of lit windows look exactly
+like letter glyphs.
+
+So the sign is drawn by something else: it is not in the phase machine's
+scroll, and not in the per-frame animator. The remaining candidates are OBJ
+(the earlier OBJ-clip measurement removed 145 margin samples on the title,
+never attributed) and a one-off tilemap write outside this driver.
