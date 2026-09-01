@@ -796,6 +796,7 @@ static void ws_fix_scroll_seam(void);
 static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
+#define SC_TITLE_LOGO_TILE_MAX 0x023u
 static void widen_title_lights(void);
 static void ws_fill_margins(void);
 static void ws_fill_flat_margins(void);
@@ -1116,6 +1117,30 @@ static void handle_pos_stuff(void) {
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       memset(s_oam_left_hints, 0, sizeof s_oam_left_hints);
       widen_wood_bg();
+      /* The title's SimCity sign is ordinary tilemap content: the phase-1
+       * scroll at 05:93d4 carries it left and, once past x=0, the ROM does
+       * nothing -- hardware clips there, so there is nothing for it to do, and
+       * the #$01ff wrap is why it comes back later (docs/ROM_MAP.md). Nothing
+       * in the game marks it off-screen, so the only place to act is the
+       * renderer.
+       *
+       * Tiles 001..023 are the sign; buildings start at 024. Measured from two
+       * save states: stuck at the left, the margin columns hold 003..01a;
+       * mid-screen they hold only 06c..083.
+       *
+       * SC_WS_TITLE_LOGO=0 turns it off. */
+      if (g_ppu) {
+        static int on = -1;
+        if (on < 0) {
+          const char *e = getenv("SC_WS_TITLE_LOGO");
+          on = (e && *e) ? (*e != '0') : 1;
+        }
+        PpuWsSetMarginTileSuppress(
+            g_ppu,
+            (on && s_ws_extra > 0 && g_ram[0x14] == 0x01 && s_ws_widen_title)
+                ? 0 : -1,
+            SC_TITLE_LOGO_TILE_MAX);
+      }
       /* AFTER widen_wood_bg(), which clears the flag for the frame. */
       if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
