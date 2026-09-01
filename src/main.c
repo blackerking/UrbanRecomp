@@ -3925,6 +3925,23 @@ static bool load_state(const char *path) {
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
   bool ok = fs.ok;
   fclose(f);
+  /* Hand the restored registers to the fiber, HERE rather than at the call
+   * sites.
+   *
+   * load_state restores g_snes and the Interp816, and knows nothing about the
+   * separate CpuState the fiber actually executes. Without this the fiber
+   * keeps running boot registers over mid-game WRAM and wedges spinning on the
+   * BNE at $05935A in the block-copy region.
+   *
+   * That was already known and already fixed -- but only on the --load-state
+   * command-line path. The interactive slot keys and the menu loader called
+   * load_state directly and got the stale registers, so loading a state from
+   * inside a running fiber session hung the game. Doing it inside load_state
+   * means a new call site cannot miss it, which is exactly how this one was
+   * missed. */
+#ifdef SIMCITY_AOT_TIER
+  if (ok && sc_fiber_active()) SimCityFiberDrive_AdoptInterpState(g_cpu);
+#endif
   return ok;
 }
 
@@ -6101,7 +6118,7 @@ int main(int argc, char **argv) {
      * any state existed. Left alone, the fiber runs boot registers over
      * restored WRAM: measured as a hang at $05935A inside 60 frames, while the
      * same state is fine on the interpreter and the fiber is fine from boot. */
-    if (sc_fiber_active()) SimCityFiberDrive_AdoptInterpState(g_cpu);
+    /* load_state() adopts into the fiber itself now. */
 #endif
   }
 
