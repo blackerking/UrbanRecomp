@@ -1203,6 +1203,34 @@ static void handle_pos_stuff(void) {
          * A zeroed hint array is therefore "strict, nothing marked": every
          * ambiguous slot wraps negative exactly as hardware does.
          * SC_WS_OAM=0 restores the permissive decode. */
+        /* THE TITLE HAS NO AMBIGUOUS PARKED SPRITES, so the strict wrap costs
+         * it something for nothing.
+         *
+         * A raw OAM X in [256, 256+extraRight) is normally ambiguous: either a
+         * sprite entering the right margin, or one parked off-screen-LEFT at
+         * x-512. Strict assumes parked and wraps it negative, so an object
+         * arriving from the right stays hidden until it crosses x=256 and then
+         * appears all at once -- reported from play as the sign "stepping" in
+         * on the right while it now leaves smoothly on the left.
+         *
+         * Dumping the title's OAM settles which it is here: exactly ONE sprite
+         * is in the band (slot 125, raw 277, tile 120 -- the row of blinking
+         * lights along the bottom), and every parked entry sits at raw 384 or
+         * beyond, outside it. So on this screen the positive decode is the
+         * right one for everything in the band.
+         *
+         * Marked per-slot rather than by turning strict off, so the decode
+         * stays strict everywhere else -- the scenario selector's parked
+         * sprites DO land in the band, which is what the strict default is
+         * for. SC_WS_TITLE_OAM_RIGHT=0 restores the wrap. */
+        if (s_ws_oam_strict && g_ram[0x14] == 0x01 && s_ws_widen_title) {
+          static int on = -1;
+          if (on < 0) {
+            const char *e = getenv("SC_WS_TITLE_OAM_RIGHT");
+            on = (e && *e) ? (*e != '0') : 1;
+          }
+          if (on) memset(s_oam_right_hints, 0xff, sizeof s_oam_right_hints);
+        }
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
