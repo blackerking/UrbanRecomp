@@ -3028,3 +3028,44 @@ and continuous -- an error does not show up as a wrong pixel, it shows up as a
 city that evolves differently over an hour of play. Any replacement has to be
 checked by running both and comparing WRAM tick by tick, and the layers it
 maintains are not all identified yet.
+
+### The map cell accessors, `03:849e` (read) and `03:84c4` (write)
+
+The hottest page in the simulation is not a simulation rule at all -- it is
+address arithmetic.
+
+```
+03:849e  read  cell(x,y) -> A        03:84c4  write cell(x,y) = Y
+    ASL A ; STA $0b3f                    (identical arithmetic)
+    STZ $0b40                            ...
+    LDA #$00 ; XBA          ; y*256      TYA
+    PHA ; ASL x4 ; STA $0b3d ; y*16      STA $7f0200,X
+    PLA ; XBA ; SEC ; SBC $0b3d
+    CLC ; ADC $0b3f         ; + x*2
+    TAX ; LDA $7f0200,X
+```
+
+Both compute the same index:
+
+```
+index = y*256 - y*16 + x*2   =   y*240 + x*2
+```
+
+240 is the row stride: 120 cells at 2 bytes each. The 65816 has no addressing
+mode for a 240-byte stride, so every single map access pays a shift-and-
+subtract sequence plus two scratch stores at `$0b3d`/`$0b3f`.
+
+`03:8400`-`84ff` is **25.2% of all bank-03 opcodes**, and bank 03 is 60.3% of
+the guest's total -- so roughly **15% of the entire game's CPU time is spent
+computing map cell addresses**.
+
+That is worth knowing for two reasons. It is the strongest single argument for
+moving the simulation to native code, where the same index is one multiply the
+compiler will strength-reduce to a shift-add and no memory traffic at all. And
+it means the profile's hot pages should not be read as "these are the important
+rules" -- the top page is plumbing, and the actual per-tick rules sit further
+down the list.
+
+`$7F0200` is the same map the generator writes, so the accessors, the tile
+weight ladder at `03:9e0c` and `src/simcity_mapgen.c` are all three looking at
+one array in the same 10-bit format.
