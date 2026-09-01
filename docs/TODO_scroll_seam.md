@@ -610,6 +610,32 @@ those columns. There is no property of a tile that says "scenery" or "parked";
 both are just map entries. A whole-layer clamp cannot express the difference,
 which is why it takes the wanted content with it.
 
+### Second attempt, also reverted: blank the logo tiles in the margin columns
+
+The layer attribution above is right and the tile ranges are real:
+
+    stuck at the left   margin columns hold 003..01a in the outer four
+    mid-screen          margin columns hold only 06c..083, no low tiles
+    full map at hs=0    logo occupies 001..023, buildings start at 024
+
+Blanking BG1 cells below 0x024 in the eight tile columns each margin reads
+LOOKS right in a still: on the stuck save state the glyphs are replaced by the
+scenery behind them, 814 margin pixels change, and the visible 256 px is
+byte-identical; on the mid-screen state nothing changes at all.
+
+In motion it is WORSE than the artifact it removes. Reverted.
+
+The still frames could not have shown that, and I knew it -- the handover note
+even said "worth confirming in motion". Two frames from two save states cannot
+see a cell being blanked and unblanked as the logo scrolls across the boundary,
+and that is where this lives: the suppression is recomputed every frame from a
+moving hScroll, so a column enters and leaves the blanked set as the logo
+crosses it.
+
+If this is tried again, the test has to be a MOVING capture through the moment
+the logo crosses the left edge, compared frame by frame -- not a pair of
+stills, however carefully measured.
+
 ### What might work
 
   - A COLUMN rule rather than a layer rule: find the columns the game parks in
