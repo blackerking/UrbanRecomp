@@ -1425,51 +1425,17 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * advice is "leave it alone" is worse than no setting, so the row and the flag
  * are gone.
  *
- * What it existed for became MAPGEN TURBO, and that is now gone too: the
- * decompiled generator removes the wait it was collapsing, so the boost had
- * stopped changing anything (map complete at frame 90 either way) and the row
- * was dead weight in the menu. Only the decompressor half survives, off by
- * default -- see s_decomp_turbo. */
+ * What it existed for became MAPGEN TURBO, and the WHOLE FAMILY is now gone.
+ * The decompiled map generator (SC_MAPGEN_FAST, hooked at 01:f1ed) removes the
+ * wait these were collapsing: measured, the map completes at frame 90 whether
+ * the boost is 16x or off. The decompressor half went with it -- 00:90dd fires
+ * on screen transitions and loads during ordinary play, so boosting it
+ * advanced the SIMULATION, which is how the whole thing was noticed ("seems to
+ * speed up the simulation, on the normal map, not the map generation").
+ *
+ * Nothing host-side now runs the guest faster except Tab-held fast-forward and
+ * DRAG TURBO, both of which are explicit, held gestures. */
 static unsigned long s_gen_trigger_hits;
-/* Split out, because one shared counter made the two triggers indistinguishable
- * -- and they are completely different things. 03:d862 is real map generation;
- * 00:90dd is the DECOMPRESSOR, which runs during ordinary play. */
-static unsigned long s_gen_trigger_mapgen;
-static unsigned long s_gen_trigger_decomp;
-static unsigned long s_gen_boost_frames;
-static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
-
-/* Guest frames per host frame while the map-generation / decompression loop is
- * active. This is how the generation wait is removed WITHOUT moving generation
- * host-side.
- *
- * Generating the map host-side would cross the line docs/PLAN_renderer.md sets
- * out: the map is state, not presentation. It is genuinely procedural --
- * 03:d840 seeds the PRNG a seed-dependent 1-32 times, then JSL $01f1ed runs
- * five distinct terrain-feature routines -- so a host implementation would have
- * to match it bit-for-bit, and any divergence would produce a different city
- * with nothing to detect it. The guest stays authoritative; it just runs
- * faster while nobody is looking at the screen.
- *
- * Separate from AUTO TURBO, which stays off by default for its own reasons
- * (it fired during ordinary gameplay and made the game feel rough). This only
- * engages on the two load-specific triggers. */
-/* The DECOMPRESSOR boost, split out from MAPGEN TURBO and defaulted OFF.
- *
- * Both triggers used to share one factor, which made a setting named
- * MAPGEN TURBO into a simulation turbo during ordinary play. Measured on an
- * in-game city with no map generation at all: mapgen=0 triggers, decomp=4,
- * and 80 frames boosted 16x -- roughly 1280 frames of simulation the player
- * never asked for, which is exactly how it was noticed ("seems to speed up
- * the simulation, on the normal map, not the map generation").
- *
- * 00:90dd is the unpacker, and it runs on screen transitions and loads during
- * normal play, not only while a map is being made. Boosting it is a defensible
- * thing to WANT -- shorter loading screens -- but it is a different feature
- * from map generation and must not ride on that setting. Off by default;
- * SC_DECOMP_TURBO=<n> to enable. */
-static int s_decomp_turbo = 1;    /* 1 = off */
-#define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
 
 /* Post-load power dropout fix.
  *
@@ -2192,7 +2158,7 @@ static bool run_one_frame(void) {
      * 03:d871 is where execution resumes once both JSLs have returned, so the
      * pair bounds the generation exactly. The decompressor at 00:90dd keeps a
      * plain holdoff -- it has no equivalent end marker and is short. */
-    if (cpu->k == 0x03 && cpu->pc == 0xd862) { s_gen_trigger_hits++; s_gen_trigger_mapgen++; }
+    if (cpu->k == 0x03 && cpu->pc == 0xd862) s_gen_trigger_hits++;
 
     /* ── Run the map generator natively, on the INTERPRETER path ───────────
      *
@@ -2276,11 +2242,6 @@ static bool run_one_frame(void) {
                   (unsigned)cpu->k, (unsigned)cpu->pc);
         }
       }
-    }
-    if (cpu->k == 0x00 && cpu->pc == 0x90dd) {
-      s_gen_trigger_hits++;
-      s_gen_trigger_decomp++;
-      s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
     }
     /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
      * the map already unpacked and SRAM already restored. */
@@ -2426,8 +2387,6 @@ static bool run_one_frame(void) {
     if (s_addr_trace_last_ed == 0xff) { s_addr_trace_last_ed = g_ram[0x01ed]; s_addr_trace_armed = false; }
     else if (!s_addr_trace_armed && g_ram[0x01ed] != s_addr_trace_last_ed) s_addr_trace_armed = true;
   }
-  if (s_gen_loop_active_frames > 0 && s_decomp_turbo > 1) s_gen_boost_frames++;
-  if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
 }
 
@@ -5550,10 +5509,7 @@ static int run_qualification(uint64_t frames) {
             interp_tier_hit_count(), sites, clean, bail);
     fprintf(stderr, "\n"); }
 #endif
-  fprintf(stderr, "gen: trigger_hits=%lu (mapgen=%lu decomp=%lu) "
-                  "boosted_frames=%lu decomp_turbo=%d\n",
-          s_gen_trigger_hits, s_gen_trigger_mapgen, s_gen_trigger_decomp,
-          s_gen_boost_frames, s_decomp_turbo);
+  fprintf(stderr, "gen: 03:d862 seeding hits=%lu\n", s_gen_trigger_hits);
   fprintf(stderr,
           "qualify: %s frames=%llu master=%llu logic_changes=%llu "
           "logic_stall_max=%llu audio_samples=%u audio_active_frames=%llu "
@@ -6172,8 +6128,6 @@ int main(int argc, char **argv) {
     if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
     if (e && *e) s_ninth_scroll = (int)strtol(e, NULL, 0); }
-  { const char *e = getenv("SC_DECOMP_TURBO");
-    if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_decomp_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
     if (e && *e) s_host_map = (*e != '0'); }
   /* Say which binary this is, unconditionally.
@@ -6679,9 +6633,8 @@ int main(int argc, char **argv) {
      * audio gets queued (skipping the rest, rather than speeding it up or
      * garbling it) and only its video is presented -- the frame pacer
      * below still targets normal 60fps, so this is a real Nx speed-up in
-     * game-time per real second, not just a faster/choppier render. Also
-     * applied automatically (no key needed) while the map/scenario
-     * generation loop is active -- see s_gen_loop_active_frames above. */
+     * game-time per real second, not just a faster/choppier render. Held, and
+     * only held -- nothing applies it automatically any more. */
     /* DRAG TURBO: run extra guest frames while a mouse button is held.
      *
      * The cursor and the map scroll are not slow because their routines are
@@ -6703,29 +6656,12 @@ int main(int argc, char **argv) {
     const bool dragging = s_drag_turbo > 1 &&
       (SDL_GetMouseState(NULL, NULL) &
        (SDL_BUTTON(SDL_BUTTON_LEFT) | SDL_BUTTON(SDL_BUTTON_RIGHT))) != 0;
-    /* Map generation gets its own, much larger factor. 6x barely dents a wait
-     * the player is staring at; the point is to collapse it, and nothing is
-     * being watched while the generator runs. Tab-held fast-forward keeps its
-     * modest 6x, since that IS being watched. */
-    /* Two DIFFERENT boosts, deliberately not sharing a factor -- see
-     * s_decomp_turbo. `generating` is real map generation, bounded exactly by
-     * 03:d862 and 03:d871. `unpacking` is the 00:90dd decompressor, which also
-     * fires during ordinary play, so boosting it advances the SIMULATION. */
-    /* MAPGEN TURBO is GONE. It ran the guest 16x while the generator was
-     * working, to collapse a wait the player was staring at. The decompiled
-     * generator removes the wait itself -- measured, the map completes at
-     * frame 90 with the turbo at 16 and at frame 90 with it at 1, i.e. the
-     * boost had stopped doing anything at all -- so the setting was dead
-     * weight in the menu and is removed rather than left to confuse.
-     *
-     * `unpacking` is the 00:90dd decompressor, a different thing that also
-     * fires during ordinary play; boosting it advances the SIMULATION, which
-     * is why it is off by default. See s_decomp_turbo. */
-    const bool unpacking = s_gen_loop_active_frames > 0;
+    /* No automatic boost of any kind. The map-generation and decompressor
+     * turbos both existed to collapse waits; the decompiled generator removes
+     * the one that mattered, and the other was advancing the simulation during
+     * ordinary play. Only explicit held gestures remain. */
     bool fast_forward = keys[SDL_SCANCODE_TAB];
-    int frames_this_iter = unpacking   ? s_decomp_turbo
-                         : fast_forward ? 6
-                         : (dragging ? s_drag_turbo : 1);
+    int frames_this_iter = fast_forward ? 6 : (dragging ? s_drag_turbo : 1);
 
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
      * time for any run_one_frame() call slower than the threshold -- there's
