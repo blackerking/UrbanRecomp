@@ -2644,3 +2644,42 @@ So the sign is drawn by something else: it is not in the phase machine's
 scroll, and not in the per-frame animator. The remaining candidates are OBJ
 (the earlier OBJ-clip measurement removed 145 margin samples on the title,
 never attributed) and a one-off tilemap write outside this driver.
+
+### The SimCity sign is OBJ (finally located)
+
+Dumped OAM on the title with the sign stuck at the left edge (`SC_TITLE_DUMP`
+now writes OAM and the OBJ tile bases alongside VRAM):
+
+| slot | x | y | tile | size |
+|---|---|---|---|---|
+| 101 | -34 | 119 | `1ec` | 16 |
+| 100 | -18 | 119 | `1ee` | 16 |
+| 99 | -2 | 119 | `148` | 16 |
+| 98 | -34 | 135 | `18e` | 16 |
+| 97 | -18 | 135 | `1cc` | 16 |
+| 96 | -2 | 135 | `1ce` | 16 |
+
+Three 16x16 sprites across by two down -- a 48x32 billboard. Decoding those
+tiles out of the OBJ CHR (`objTileAdr1=$2000`, `adr2=$3000`) gives a bordered
+sign with lettering inside, which is what the seven captured variants are.
+
+So it is NOT a background tile at all. Every earlier attempt aimed at BG1 tile
+ranges was aimed at a building's lit windows, and this is why none of them
+touched the sign.
+
+The other margin sprites there are slots 125-127 and 57 (tile `120`, 64 px
+wide, y=196) -- the row of blinking lights along the bottom -- and a long run of
+parked entries at x=-128, y=0, tile 0.
+
+### The strict left-hint gate is not blocking them
+
+`PpuWidescreenOamLeftHintAllows` exists to do exactly this job: with
+`wsOamLeftHintStrict` set, an unhinted sprite lying wholly off-screen-left is
+refused. Slots 97, 98, 100 and 101 qualify -- x = -18 and -34 at size 16, so
+`x + size <= 0` -- and they are drawn anyway.
+
+Measured on the stuck save state: `SC_WS_OBJ_CLIP=1` changes nothing in the
+sign's rows, while `SC_WS_OAM=0` does change them. So the decode is live and
+placing the sprites at negative x, and the gate that should then reject them is
+not rejecting them. That gap is the thing to fix, and it is upstream code
+(`snesrecomp/runner/src/snes/ppu.c`), not host code.

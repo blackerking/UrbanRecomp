@@ -1230,8 +1230,15 @@ static void handle_pos_stuff(void) {
             hdr[0] = (uint16_t)g_ppu->hScroll[0];
             hdr[1] = (uint16_t)m;
             hdr[2] = (uint16_t)PPU_bgTileAdr(g_ppu, 0);
+            uint16_t hdr2[3];
+            hdr2[0] = (uint16_t)PPU_objTileAdr1(g_ppu);
+            hdr2[1] = (uint16_t)PPU_objTileAdr2(g_ppu);
+            hdr2[2] = (uint16_t)PPU_objSize(g_ppu);
             fwrite(hdr, 2, 3, f);
+            fwrite(hdr2, 2, 3, f);
             fwrite(g_ppu->vram, 2, 0x8000, f);   /* whole VRAM */
+            fwrite(g_ppu->oam, 2, 0x100, f);     /* OAM low  */
+            fwrite(g_ppu->highOam, 1, 32, f);    /* OAM high */
             fclose(f);
           }
         }
