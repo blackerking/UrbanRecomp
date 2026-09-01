@@ -3115,7 +3115,17 @@ static void widen_wood_bg(void) {
        * will read are blank, it gets the same page-1 stand-in the 32-column
        * case gets -- patched over the blank columns only, so the side that
        * already works is left alone. */
-      if (wood_wide_margin_blank(L)) { why = NULL; layer = L; src = (unsigned)PPU_bgTilemapAdr(g_ppu, L); wide_patch = true; }
+      /* AND IT MUST ACTUALLY BE WOOD. The first version of this checked only
+       * that the margin columns were blank and took the layer on that alone,
+       * which is not a test for wood at all -- it accepted the title screen's
+       * scrolling background and grew "wood" out of its tiles, breaking the
+       * title badly. wood_map_ok() is the check the 32-column path has always
+       * applied; the wide path needs it just as much. */
+      { const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+        if (m + 0x800u > 0x8000u)              why = "wide-pages-off-vram";
+        else if (!wood_map_ok(&g_ppu->vram[m])) why = "wide-map-not-woodlike";
+        else if (!wood_wide_margin_blank(L))    why = "wide-margins-already-drawn";
+        else { why = NULL; layer = L; src = m; wide_patch = true; } }
       /* The claim being tested: "a 64-column layer already reaches the
        * margins". Print what the margins would actually READ from it -- the
        * eight tile columns either side of the 32-column window -- because a
