@@ -2891,3 +2891,47 @@ different code.
 
 What the three quantities ARE is still not established, and the shape alone
 should not be used to name them.
+
+### The overlay layers are selected by `$0d49` (`02:91a0`)
+
+The layers are not anonymous after all -- bank 02, the UI bank, picks between
+them from a single view-mode byte:
+
+```
+02:919d  LDA $0d49
+02:91a0  CMP #$0b / BEQ -> LDA $7f6b00,X
+02:91a4  CMP #$0a / BEQ -> LDA $7f76b8,X
+02:91a8  CMP #$09 / BEQ -> LDA $7f8270,X
+02:91ac  CMP #$08 / BEQ -> LDA $7f99e0,X
+02:91b0            else -> LDA $7f8e28,X
+```
+
+| `$0d49` | layer read |
+|---|---|
+| 8 | `$7F99E0` |
+| 9 | `$7F8270` |
+| 10 | `$7F76B8` |
+| 11 | `$7F6B00` |
+| anything else | `$7F8E28` |
+
+So four view modes each have their own map and everything else falls back to
+one shared layer. `$0d49` is written at `02:84d6`, `02:85d0` and `02:862c`, and
+indexes a second table at `02:86a4` that gives a per-mode kind (0..3) --
+modes 0-3 kind 1, 4-5 kind 0, 6-7 kind 2, 8-11 kind 0, 12-13 kind 3. The four
+overlay modes share kind 0 with modes 4 and 5.
+
+`$7F99E0` is a FIFTH layer that the earlier region scan missed: it begins
+exactly where the `$7F6B00` block ends, so it was the boundary rather than a
+region. `03:88f3` reads it too. Its owning writer has not been attributed.
+
+### What is now known, and what names them
+
+Measured: five display layers, which view mode selects each, the 60x50 grid,
+which two are cheap transforms of working layers, and the tile weight ladder
+that feeds one of the passes.
+
+NOT measured: which layer is which quantity. The view modes are contiguous
+(8, 9, 10, 11), so they are almost certainly consecutive entries in the game's
+own map-view menu -- and the order of that menu names them directly. That is a
+question for someone who can read the menu, not something to infer from the
+weight table.
