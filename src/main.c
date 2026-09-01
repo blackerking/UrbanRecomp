@@ -796,6 +796,7 @@ static void ws_fix_scroll_seam(void);
 static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
+static void title_hide_parked_logo(void);
 static void widen_title_lights(void);
 static void ws_fill_margins(void);
 static void ws_fill_flat_margins(void);
@@ -1116,6 +1117,7 @@ static void handle_pos_stuff(void) {
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       memset(s_oam_left_hints, 0, sizeof s_oam_left_hints);
       widen_wood_bg();
+      title_hide_parked_logo();
       /* AFTER widen_wood_bg(), which clears the flag for the frame. */
       if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
@@ -1217,6 +1219,43 @@ static void handle_pos_stuff(void) {
        * whether that tilemap has anything in the columns the extra width
        * would expose -- the same question SC_SELECTOR_PPU answered for the
        * scenario screen, asked everywhere. */
+      /* SC_TITLE_TILES: dump the title's BG2 tilemap by column, once.
+       * Looking for what separates the parked lettering from the skyline that
+       * legitimately wraps into the margins -- if they come from different
+       * tile ranges, a narrow rule is possible where a layer clamp is not. */
+      if (getenv("SC_TITLE_TILES") && g_ppu && g_ram[0x14] == 0x01) {
+        static int done = 0;
+        if (!done && s_frames > 8) {
+          done = 1;
+          const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+          const int hs = (int)g_ppu->hScroll[0];
+          fprintf(stderr, "[title] BG1 map=%04x (64 col)  hs=%d\n", m, hs);
+          /* The eight tile columns the LEFT margin reads, as a grid, so the
+           * cells holding a parked pattern can be told from scenery. */
+          fprintf(stderr, "[title] left-margin columns, tile indices by row:\n");
+          for (int r = 0; r < 28; r++) {
+            char line[160]; int o = 0;
+            o += snprintf(line + o, sizeof line - o, "  row %2d:", r);
+            for (int i = 8; i >= 1; i--) {
+              const int c = (((hs >> 3) - i) & 63);
+              const unsigned base = m + ((c & 32) ? 0x400u : 0u) + (unsigned)(c & 31);
+              o += snprintf(line + o, sizeof line - o, " %03x",
+                            g_ppu->vram[base + r * 32] & 0x3ffu);
+            }
+            fprintf(stderr, "%s\n", line);
+          }
+          for (int c = 0; c < 64; c++) {
+            const unsigned base = m + ((c & 32) ? 0x400u : 0u) + (unsigned)(c & 31);
+            unsigned lo = 0x3ff, hi = 0; int nz = 0;
+            for (int r = 0; r < 32; r++) {
+              const unsigned t = g_ppu->vram[base + r * 32] & 0x3ffu;
+              if (t) { nz++; if (t < lo) lo = t; if (t > hi) hi = t; }
+            }
+            if (nz) fprintf(stderr, "  col %2d: %2d nz, tiles %03x..%03x\n",
+                            c, nz, lo, hi);
+          }
+        }
+      }
       if (getenv("SC_PPU_LAYOUT")) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {
@@ -3074,6 +3113,80 @@ static bool wood_wide_margin_blank(int L) {
     if ((g_ppu->vram[ro] & 0x3ffu) == 0) rblank++;
   }
   return lblank == 8 || rblank == 8;
+}
+
+/* Hide the title's parked logo tiles from the margins.
+ *
+ * On the title the SimCity logo rides across on BG1 with a building. Hardware
+ * shows nothing past x=256, so when the logo scrolls off the left the game
+ * simply leaves it in the tilemap -- the building carries on and departs, and
+ * the lettering sits there until the sequence wants it again. Widescreen shows
+ * those columns, so the abandoned lettering stays on screen. Reported from
+ * play, with save states either side: mid-screen (correct) and stuck at the
+ * left edge.
+ *
+ * Clamping BG1 was tried and reverted -- it takes the real skyline with it,
+ * since scenery and logo share the layer. What separates them is the TILE
+ * RANGE. Measured from both save states:
+ *
+ *   stuck at the left   margin columns hold 003..01a in the outer four
+ *   mid-screen          margin columns hold only 06c..083, no low tiles
+ *   full map at hs=0    logo occupies 001..023, buildings start at 024
+ *
+ * So: blank BG1 cells below 0x024 in the eight columns each margin reads. The
+ * margin columns are DISJOINT from the visible ones -- the screen reads
+ * firstcol..firstcol+31 and the margins read outside that -- so the logo keeps
+ * drawing normally wherever it is genuinely on screen, and only the abandoned
+ * copy goes.
+ *
+ * Restored before the guest runs again, so the game's own tilemap is never
+ * altered from its point of view. */
+#define SC_TITLE_LOGO_TILE_MAX 0x023u
+static struct { unsigned addr; uint16_t val; } s_title_patch[8 * 2 * 32];
+static unsigned s_title_patch_n;
+
+static void title_restore_logo_cells(void) {
+  if (!g_ppu) { s_title_patch_n = 0; return; }
+  for (unsigned i = 0; i < s_title_patch_n; i++) {
+    /* Only put back a cell the guest has not written since. The guest runs
+     * interleaved with rendering, so it can legitimately store into one of
+     * these cells while it is blanked -- restoring the old value blindly would
+     * clobber that write and freeze the very animation this is meant to leave
+     * alone. If it no longer reads as our zero, it is the guest's now. */
+    if ((g_ppu->vram[s_title_patch[i].addr] & 0x3ffu) == 0)
+      g_ppu->vram[s_title_patch[i].addr] = s_title_patch[i].val;
+  }
+  s_title_patch_n = 0;
+}
+
+static void title_hide_parked_logo(void) {
+  title_restore_logo_cells();
+  if (!g_ppu || s_ws_extra <= 0 || g_ram[0x14] != 0x01 || !s_ws_widen_title)
+    return;
+  if (!PPU_bgTilemapWider(g_ppu, 0)) return;   /* the 64-column map only */
+  const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+  if (m + 0x800u > 0x8000u) return;
+  const int firstcol = ((int)g_ppu->hScroll[0] >> 3);
+  const int cols = (s_ws_extra + 7) / 8;       /* tile columns per margin */
+  for (int side = 0; side < 2; side++) {
+    for (int i = 1; i <= cols; i++) {
+      const int c = side == 0 ? ((firstcol - i) & 63)
+                              : ((firstcol + 32 + i - 1) & 63);
+      const unsigned base = m + ((c & 32) ? 0x400u : 0u) + (unsigned)(c & 31);
+      for (int r = 0; r < 32; r++) {
+        const unsigned a = base + (unsigned)r * 32u;
+        const uint16_t v = g_ppu->vram[a];
+        const unsigned t = v & 0x3ffu;
+        if (t == 0 || t > SC_TITLE_LOGO_TILE_MAX) continue;
+        if (s_title_patch_n >= sizeof s_title_patch / sizeof s_title_patch[0])
+          break;
+        s_title_patch[s_title_patch_n].addr = a;
+        s_title_patch[s_title_patch_n].val = v;
+        s_title_patch_n++;
+        g_ppu->vram[a] = 0;
+      }
+    }
+  }
 }
 
 static void widen_wood_bg(void) {
