@@ -2703,3 +2703,67 @@ freshly loaded save state is not evidence about normal play**. The sign
 appearing in slot 3's margin is at least partly that artifact: by the time the
 gate goes strict a few frames later, the sign's slots are no longer at negative
 x at all.
+
+## The simulation's data structures, from write attribution
+
+`SC_WRAM_MAP` records the LAST routine to write each WRAM byte. Run over ~12
+ticks of a running city (`savestate_0`, 2500 frames), every large written
+region in bank `7F` resolves to a single owning routine in bank 03. The sizes
+are the interesting part.
+
+| WRAM | size | grid | written by |
+|---|---|---|---|
+| `$7F0200` | 24000 | 120x100 x2 bytes -- **the city map** | `03:b191` (94%) |
+| `$7F6B00` | 3000 | 60x50 | `03:9dc9` |
+| `$7F76B8` | 3000 | 60x50 | `03:9f47` |
+| `$7F8270` | 3000 | 60x50 | `03:9c89` |
+| `$7F8E28` | 3000 | 60x50 | `03:9b87` |
+| `$7FA598` | 1500 | | `03:afc5` |
+| `$7FAB74` | 750 | 30x25 | `03:a01d` |
+| `$7FAFE8` | 195 | 15x13 | `03:9f93` |
+| `$7FB0AB` | 195 | 15x13 | `03:9ac8` |
+| `$7FB16E` | 390 | | `03:828b` |
+| `$7FB2F4` | 390 | | `03:828f` |
+| `$7FB47A` | 390 | | `03:a286` |
+| `$7FB600` | 3000 | 60x50 | `03:a125` |
+| `$7FC1B8` | 3000 | 60x50 | `03:a09f` |
+| `$7FCD70` | 750 | 30x25 | `03:9d2e` |
+| `$7FD05E` | 390 | | `03:a1a4` |
+
+Six 3000-byte arrays at half resolution, two 750-byte at quarter, two 195-byte
+at eighth, four 390-byte. Each has exactly one owner, and the owners are
+distinct routines -- so these are separate per-cell layers maintained
+independently, not one array written from several places.
+
+The sizes and owners above are MEASURED. What each layer holds is not yet:
+a multi-resolution overlay set is how this simulation family is built
+(density, traffic, pollution, land value, crime at half res; service coverage
+at coarser res), but which array is which has not been established here and
+should not be assumed from the resolution alone.
+
+## The tick's pipeline runs twice
+
+`03:8000` is documented above as calling a fixed sequence. Reading it against
+`03:88b4` shows the sequence is not flat:
+
+```
+03:800a  JSR $90a7
+03:800d  JSR $c474
+03:8010  JSR $b84b
+03:8013  JSR $88b4     ; itself: 894c, 821d, 8297, addf, afb0, b152, addf,
+                       ;         9c11, 9e8e, 9ad7, 9c11, 9e8e, 9ad7, 9aa3,
+                       ;         clear $0cdd..$0ce6, $0dfb=1, b42f, addf
+03:8018  JSR $894c     ; again
+03:801b  JSR $821d     ; again
+03:801e  JSR $8297     ; again
+03:8021  JSR $addf     ; again
+```
+
+`03:88b4` is straight-line and ungated, so `894c`/`821d`/`8297`/`addf` run
+TWICE per tick and `addf` four times. The triple `9c11`/`9e8e`/`9ad7` is
+likewise repeated back to back inside it. Repeated passes over the same data
+are how a diffusion step is iterated, which fits the overlay layout above.
+
+`03:b152`, called only from `88b4`, is the map-wide pass: its inner store at
+`03:b191` accounts for 94% of the 24000 map bytes and 264,100 writes over the
+sampled ticks.
