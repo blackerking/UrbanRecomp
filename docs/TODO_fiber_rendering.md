@@ -49,15 +49,68 @@ localised to the widescreen columns.
 `nmi_serviced=1999` under the fiber against `2000` interpreted, and
 `video_changes` 2 against 3.
 
-## Where to look first
+## ROOT CAUSE (found)
 
-The 2-on/2-off cadence and the lost NMI both point at the frame boundary
-rather than at any drawing code: `SimCity_WaitForVblank` (`src/simcity_hle.c`)
-and the frame driver in `src/simcity_fiberdrive.c`. The suspicion is that the
-fiber hands a frame back to the host at a point where the guest has not
-finished its update, so the host presents a half-written screen -- which would
-also explain why the defect reads as the seam returning, since a half-composed
-host map is exactly what the seam repair was built to prevent.
+**The bridge advances the beam too.** `interp_bridge.c`'s per-opcode
+`snes_sync_master_clock()` moves the same `snes->hPos/vPos` by the guest's
+master delta as it executes. So when the host hands the guest a whole frame's
+worth of cycles, the beam can WRAP MID-BURST -- the frame is presented from
+inside the guest's update, at whatever instruction the budget happened to
+expire on. That is a screen the per-opcode host never renders, because it
+interleaves guest writes across the scanlines as they are drawn.
+
+`SC_FRAME_TRACE=1` shows the cadence exactly. The guest reaches its `00:9311`
+vblank wait only every FOURTH frame; on the other three the budget cuts it at
+`03:83F9`. Correlating the handover PC with frame fidelity gives a clean
+period-4 pattern -- every frame handed over at `009311`, and the one after it,
+is byte-identical; the two cut at `03:83F9` are the novel ones.
+
+## What has been tried
+
+**Sizing the budget differently does not help.** Both directions are worse, and
+by a lot:
+
+| budget | frames identical (of 17) |
+|---|---|
+| 0.05, 0.1, 0.25, 0.5 frame | 0 |
+| **1 frame** | **9** |
+| 2, 4, 8 frames | 0 |
+
+Exactly one frame is special because the host's own beam loop also advances
+exactly one frame per iteration; any other value breaks step with it. The bound
+is not the fix.
+
+**Parking the beam at vblank entry before handing over** (done, in
+`run_one_frame_fiber`) moved it from 7/17 to 9/17. It puts the active display
+on the correct side of the guest's burst, which is the hardware order, but it
+cannot stop the bridge wrapping the beam during the burst.
+
+**Splitting the frame into two guest slices** (active-display slice, then a
+vblank slice, each bounded so the beam cannot reach the next boundary) made it
+strictly worse: 0/17, with master cycles nearly doubled and `nmi_requests` 387
+over 300 frames. The slicing double-advances somewhere -- the guest clock is
+mirrored into `g_master_cycles` per slice and the vblank detection fires twice.
+Reverted. If retried, fix the accounting first.
+
+## Where to look next
+
+The guest must not be holding the CPU at the instant the beam crosses a
+boundary. Two shapes look plausible:
+
+1. **Let the bridge tell the host when the beam is about to wrap** and stop
+   there, rather than sizing a budget in cycles and hoping. A budget is an
+   open-loop guess at where the beam will be; the bridge knows exactly.
+
+2. **Present from a snapshot** taken when the guest last parked at `00:9311`,
+   rather than from live PPU state. That decouples presentation from wherever
+   the guest happens to be, at the cost of a frame of latency and a buffer.
+
+Note that the guest genuinely needs more than one frame for its work here --
+it only reaches the wait every fourth frame -- so "run until the wait" is not
+available as a frame boundary. Whatever is done has to be correct for a guest
+that is mid-update when the frame ends, which is also what real hardware does;
+the difference is that hardware scans out progressively rather than sampling
+one frozen state for the whole screen.
 
 Do NOT chase this in the widescreen code. Two independent checks say the
 drawing is right: byte-identical static frames, and differences that span the

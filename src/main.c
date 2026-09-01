@@ -1706,8 +1706,21 @@ static void sc_catch_missed_vblank(void) {
 static bool run_one_frame_fiber(void) {
   uint64_t before = s_frames;
 
+  /* Advance to VBLANK ENTRY, not through the whole frame.
+   *
+   * This used to run the beam all the way round -- which presents the frame --
+   * and only then deliver NMI and let the guest run, so the guest's per-frame
+   * PPU work happened with the beam already back in the next active display.
+   * Parking at vblank entry instead means the active lines are rendered with
+   * the guest quiescent in its 00:9311 wait, and the NMI handler's writes land
+   * where nothing is being scanned out, which is the hardware order.
+   *
+   * Measured improvement, not a fix: 9 of 17 frames byte-identical to the
+   * per-opcode host against 7 before. The rest is the deeper problem recorded
+   * in docs/TODO_fiber_rendering.md -- the bridge advances the beam by the
+   * guest's own cycles, so the frame boundary can still be crossed mid-burst. */
   unsigned guard = 0;
-  while (s_frames == before && guard++ < 400000) {
+  while (!g_snes->inVblank && s_frames == before && guard++ < 400000) {
     sc_beam_step();
   }
   snes_catchupApu(g_snes);
@@ -1768,6 +1781,14 @@ static bool run_one_frame_fiber(void) {
       }
     }
     last_guest_master = now;
+    sc_catch_missed_vblank();
+
+    /* Finish the frame with the guest quiescent again. */
+    { unsigned g2 = 0;
+      while (s_frames == before && g2++ < 400000) {
+        sc_beam_step();
+      }
+      snes_catchupApu(g_snes); }
     sc_catch_missed_vblank();
     return ok;
   }
