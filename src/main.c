@@ -3055,6 +3055,27 @@ static void wood_fill_page1(const uint16_t *page0, uint16_t *page1) {
  * and no amount of latching or settling could fix it, because the destination
  * was never really free. Writing nothing at all cannot collide with anything,
  * and it retires the whole risk of scrambling VRAM along with it. */
+/* Do the columns a margin will read from a WIDE map contain nothing?
+ *
+ * Returns true if either side's eight tile columns are entirely blank, which
+ * is the case the "already reaches the margins" shortcut got wrong. */
+static bool wood_wide_margin_blank(int L) {
+  if (!g_ppu) return false;
+  const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+  if (m + 0x800u > 0x8000u) return false;      /* both pages must be in VRAM */
+  const int firstcol = (int)(((unsigned)g_ppu->hScroll[L] & 0x1ffu) >> 3);
+  int lblank = 0, rblank = 0;
+  for (int i = 1; i <= 8; i++) {
+    const int lc = (firstcol - i) & 63;
+    const int rc = (firstcol + 32 + i - 1) & 63;
+    const unsigned lo = m + (unsigned)(lc & 31) + ((lc & 32) ? 0x400u : 0u);
+    const unsigned ro = m + (unsigned)(rc & 31) + ((rc & 32) ? 0x400u : 0u);
+    if ((g_ppu->vram[lo] & 0x3ffu) == 0) lblank++;
+    if ((g_ppu->vram[ro] & 0x3ffu) == 0) rblank++;
+  }
+  return lblank == 8 || rblank == 8;
+}
+
 static void widen_wood_bg(void) {
   s_bg3_widened = false;
   s_wood_widened = false;
@@ -3072,14 +3093,71 @@ static void widen_wood_bg(void) {
    * rather than guessed at; a 64-column layer already reaches the margins. */
   int layer = -1;
   unsigned src = 0;
+  bool wide_patch = false;   /* wide map, blank margin columns to fill in */
   for (int L = 0; L < 4 && layer < 0; L++) {
+    /* SC_WS_DIAG prints WHY each layer was passed over. "no-wood-layer" on its
+     * own says only that nothing qualified, which is the least useful thing it
+     * could say on a screen whose margins are wrong. */
+    const char *why = NULL;
     if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
-        !((g_ppu->screenEnabled[1] >> L) & 1)) continue;
-    if (PPU_bgTilemapWider(g_ppu, L) || (g_ppu->bgXsc[L] & 0x02u)) continue;
-    const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
-    if (m + 0x400u > 0x8000u || !wood_map_ok(&g_ppu->vram[m])) continue;
-    layer = L;
-    src = m;
+        !((g_ppu->screenEnabled[1] >> L) & 1)) why = "disabled";
+    else if (PPU_bgTilemapWider(g_ppu, L)) {
+      why = "wide-map";
+      /* "A 64-column layer already reaches the margins" -- true only if the
+       * columns it reaches them WITH are drawn. Measured on the screen that
+       * reported a missing left margin: BG1 is 64 columns, the window sits at
+       * column 0, so the right margin reads columns 32..39 (real content on
+       * page 1) and the left wraps to 56..63, which are entirely blank. The
+       * assumption held for one side and failed for the other, which is
+       * exactly what "wood on the right, black on the left" looks like.
+       *
+       * So a wide layer is no longer skipped outright. If the columns a margin
+       * will read are blank, it gets the same page-1 stand-in the 32-column
+       * case gets -- patched over the blank columns only, so the side that
+       * already works is left alone. */
+      if (wood_wide_margin_blank(L)) { why = NULL; layer = L; src = (unsigned)PPU_bgTilemapAdr(g_ppu, L); wide_patch = true; }
+      /* The claim being tested: "a 64-column layer already reaches the
+       * margins". Print what the margins would actually READ from it -- the
+       * eight tile columns either side of the 32-column window -- because a
+       * wide map whose extra columns are blank reaches them with nothing. */
+      if (getenv("SC_WS_DIAG")) {
+        static int said[4];
+        if (!said[L]) {
+          said[L] = 1;
+          const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+          const unsigned hofs = (unsigned)g_ppu->hScroll[L] & 0x1ffu;
+          const int firstcol = (int)(hofs >> 3);
+          int lblank = 0, rblank = 0;
+          for (int i = 1; i <= 8; i++) {
+            const int lc = (firstcol - i) & 63;
+            const int rc = (firstcol + 32 + i - 1) & 63;
+            /* page 1 lives 0x400 words on for columns 32..63 */
+            const unsigned lo = m + (unsigned)((lc & 31)) + ((lc & 32) ? 0x400u : 0u);
+            const unsigned ro = m + (unsigned)((rc & 31)) + ((rc & 32) ? 0x400u : 0u);
+            if ((g_ppu->vram[lo] & 0x3ff) == 0) lblank++;
+            if ((g_ppu->vram[ro] & 0x3ff) == 0) rblank++;
+          }
+          fprintf(stderr, "[wood] BG%d wide: hofs=%u firstcol=%d  "
+                          "left 8 cols blank=%d/8, right 8 cols blank=%d/8\n",
+                  L + 1, hofs, firstcol, lblank, rblank);
+        }
+      }
+    }
+    else if (g_ppu->bgXsc[L] & 0x02u)      why = "bgXsc-wide";
+    else {
+      const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+      if (m + 0x400u > 0x8000u)            why = "map-off-vram";
+      else if (!wood_map_ok(&g_ppu->vram[m])) why = "map-not-woodlike";
+      else { layer = L; src = m; }
+    }
+    if (why && getenv("SC_WS_DIAG")) {
+      static char seen[4][32];
+      if (strcmp(seen[L], why)) {
+        snprintf(seen[L], sizeof seen[L], "%s", why);
+        fprintf(stderr, "[wood] BG%d skipped: %s (map=%04x)\n",
+                L + 1, why, (unsigned)PPU_bgTilemapAdr(g_ppu, L));
+      }
+    }
   }
   if (layer < 0) { wood_trace("no-wood-layer", -1, 0); return; }
 
@@ -3110,10 +3188,24 @@ static void widen_wood_bg(void) {
     anchor_src = src;
     if (steady || !s_wood_pass_ready) {
       wood_fill_page1(&g_ppu->vram[src], s_wood_pass_map);
+      if (wide_patch) {
+        /* Page 1 is REAL here and one margin is already reading it correctly.
+         * Keep every column that has something in it and take only the blank
+         * ones from the grown wood, or the working side breaks while fixing
+         * the other. */
+        const uint16_t *real1 = &g_ppu->vram[src + 0x400u];
+        for (int r = 0; r < 32; r++)
+          for (int c = 0; c < 32; c++) {
+            const uint16_t v = real1[r * 32 + c];
+            if ((v & 0x3ffu) != 0) s_wood_pass_map[r * 32 + c] = v;
+          }
+      }
       s_wood_pass_ready = true;
     } }
   s_wood_pass_layer = layer;
-  s_wood_pass_src = src;
+  /* The margins of a wide map read PAGE 1, so that is the page to stand in
+   * for; a 32-column map wraps and reads page 0. */
+  s_wood_pass_src = wide_patch ? src + 0x400u : src;
   s_ws_bg_margins = true;
   s_ws_margin_layer = layer;
   if (layer == 2) s_bg3_widened = true;   /* BG3 is clamped independently */
