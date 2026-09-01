@@ -1507,6 +1507,11 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * Nothing host-side now runs the guest faster except Tab-held fast-forward and
  * DRAG TURBO, both of which are explicit, held gestures. */
 static unsigned long s_gen_trigger_hits;
+static int s_bank_profile;
+static unsigned long long s_bank_ops[256];
+static unsigned long long s_b3_page[256];
+static unsigned long long s_tick_count, s_tick_frames_total, s_tick_ops_total;
+static unsigned long long s_tick_frames_max, s_tick_start_frame, s_tick_start_ops;
 
 /* Post-load power dropout fix.
  *
@@ -2214,6 +2219,27 @@ static bool run_one_frame(void) {
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
+    /* SC_BANK_PROFILE=1: opcodes executed per bank, and how many frames the
+     * simulation tick spans. Answers "is the simulation worth replacing with
+     * native code" with a number instead of an impression -- the map
+     * generator was worth it because ~800 frames of wall clock were measured
+     * first, not assumed. */
+    if (s_bank_profile) {
+      s_bank_ops[cpu->k]++;
+      if (cpu->k == 0x03) s_b3_page[cpu->pc >> 8]++;
+      if (cpu->k == 0x03 && cpu->pc == 0x8000) {
+        s_tick_count++;
+        s_tick_start_frame = s_frames;
+        s_tick_start_ops = s_bank_ops[3];
+      }
+      if (cpu->k == 0x03 && cpu->pc == 0x8026 && s_tick_start_ops) {
+        const unsigned long long span = s_frames - s_tick_start_frame;
+        s_tick_frames_total += span;
+        s_tick_ops_total += s_bank_ops[3] - s_tick_start_ops;
+        if (span > s_tick_frames_max) s_tick_frames_max = span;
+        s_tick_start_ops = 0;
+      }
+    }
     /* Unconditional now that AUTO TURBO is gone. This only opens the
      * generation/decompression window; whether anything speeds up is MAPGEN
      * TURBO's decision, and 1 means off. */
@@ -5683,6 +5709,31 @@ static int run_qualification(uint64_t frames) {
     fprintf(stderr, "\n"); }
 #endif
   fprintf(stderr, "gen: 03:d862 seeding hits=%lu\n", s_gen_trigger_hits);
+  if (s_bank_profile) {
+    unsigned long long tot = 0;
+    for (int b = 0; b < 256; b++) tot += s_bank_ops[b];
+    fprintf(stderr, "bankprof: total opcodes=%llu\n", tot);
+    for (int b = 0; b < 256; b++)
+      if (s_bank_ops[b] * 200 > tot)
+        fprintf(stderr, "  bank %02x: %12llu  %5.1f%%\n", b,
+                s_bank_ops[b], 100.0 * (double)s_bank_ops[b] / (double)tot);
+    { unsigned long long b3 = s_bank_ops[3];
+      fprintf(stderr, "  bank-03 hot pages:\n");
+      for (int k = 0; k < 10; k++) {
+        int best = -1; unsigned long long bv = 0;
+        for (int i = 0; i < 256; i++)
+          if (s_b3_page[i] > bv) { bv = s_b3_page[i]; best = i; }
+        if (best < 0 || !bv) break;
+        fprintf(stderr, "    03:%02x00-%02xff  %12llu  %5.1f%%\n",
+                best, best, bv, b3 ? 100.0*(double)bv/(double)b3 : 0.0);
+        s_b3_page[best] = 0;
+      } }
+    if (s_tick_count)
+      fprintf(stderr, "  sim ticks=%llu  avg frames/tick=%.2f  max=%llu  "
+                      "avg bank-03 opcodes/tick=%llu\n",
+              s_tick_count, (double)s_tick_frames_total / (double)s_tick_count,
+              s_tick_frames_max, s_tick_ops_total / s_tick_count);
+  }
   fprintf(stderr,
           "qualify: %s frames=%llu master=%llu logic_changes=%llu "
           "logic_stall_max=%llu audio_samples=%u audio_active_frames=%llu "
@@ -6282,6 +6333,7 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");
     if (e && *e) { s_force_legacy = (*e == '0'); if (!s_force_legacy) s_render_flags = 1; } }
+  { const char *e = getenv("SC_BANK_PROFILE"); if (e && *e) s_bank_profile = (*e != '0'); }
   { const char *e = getenv("SC_WS_CLAMP");
     if (e && *e) { s_ws_clamp = (uint8_t)strtol(e, NULL, 0); s_ws_clamp_auto = false; } }
   { const char *e = getenv("SC_HOST_HDMA");

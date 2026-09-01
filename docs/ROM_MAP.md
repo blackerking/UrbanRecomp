@@ -2982,3 +2982,49 @@ $7FC1B8  (03:a09f)   a working quantity
 `$7F8E28` is the fallback the UI shows for every view mode outside 8-11, and
 `$7F8270` is view mode 9. So one quantity feeds two different views of itself:
 raw-doubled, and diffused.
+
+### How much CPU the simulation actually costs (`SC_BANK_PROFILE=1`)
+
+Counted per-bank opcodes over 2500 frames of a running city:
+
+| bank | opcodes | share |
+|---|---|---|
+| 00 | 6,514,275 | 21.1% |
+| 01 | 2,690,673 | 8.7% |
+| 02 | 3,086,117 | 10.0% |
+| **03** | **18,633,532** | **60.3%** |
+
+and within bank 03, by page:
+
+| page | share of bank 03 | what lives there |
+|---|---|---|
+| `03:8400` | 25.2% | |
+| `03:8300` | 17.7% | |
+| `03:8200` | 14.5% | `821d`, `8297` -- two tick pipeline stages |
+| `03:b100` | 11.6% | `b152`/`b191` -- the map-wide pass |
+| `03:a000` | 8.8% | `a09f`, `a0c4` -- the diffusion kernel |
+| `03:a200` | 8.3% | `a29a`, `a2f5` -- index and multiply helpers |
+| `03:9d00`, `9b00`, `a100`, `9c00` | 10.1% | the overlay passes |
+
+Those ten pages are 96.2% of bank 03, so **the simulation is about 58% of the
+guest's entire opcode workload** (0.603 x 0.962).
+
+### What replacing it would and would not buy
+
+It would NOT make rendering faster. The host already renders every frame well
+inside budget -- `SC_FRAME_TIME` reports no frame exceeding the threshold -- so
+the guest's opcode count is not what limits the picture.
+
+What it would buy is the thing DRAG TURBO exists to paper over: bank 03 holds
+the CPU for about four consecutive frames at a time, and the bank-01 cursor
+dispatcher does not run at all during those, giving the 4-on/4-off duty cycle
+that makes the cursor and map scroll feel starved. Removing 58% of the guest's
+work is removing most of what starves them.
+
+The bar is much higher than the map generator's, though, and worth stating
+before anyone starts. The generator was a pure function: one seed in, 12000
+cells out, verifiable by comparing a finished map. The simulation is stateful
+and continuous -- an error does not show up as a wrong pixel, it shows up as a
+city that evolves differently over an hour of play. Any replacement has to be
+checked by running both and comparing WRAM tick by tick, and the layers it
+maintains are not all identified yet.
