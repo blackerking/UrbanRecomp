@@ -1229,7 +1229,24 @@ static void handle_pos_stuff(void) {
             const char *e = getenv("SC_WS_TITLE_OAM_RIGHT");
             on = (e && *e) ? (*e != '0') : 1;
           }
-          if (on) memset(s_oam_right_hints, 0xff, sizeof s_oam_right_hints);
+          if (on) {
+            memset(s_oam_right_hints, 0xff, sizeof s_oam_right_hints);
+            /* And the LEFT, for the same reason and with the same evidence.
+             *
+             * Clipping at x=0 makes an object vanish at the AUTHENTIC border,
+             * 64 px before the real edge of the view -- reported from play as
+             * the sign "fading out before the screenborder". Hinting the slots
+             * lets them draw on into the margin and leave at the true edge,
+             * exactly as they now arrive on the right.
+             *
+             * Safe here because the title parks its unused sprites at raw 384,
+             * i.e. x = -128: with a 64 px margin those span -128..-113 and are
+             * outside it, so nothing parked can appear however permissive this
+             * is. It also makes the per-pixel edge clip inert for these slots,
+             * which is wanted -- that clip exists to soften the whole-sprite
+             * gate, and a hinted sprite is not gated at all. */
+            memset(s_oam_left_hints, 0xff, sizeof s_oam_left_hints);
+          }
         }
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
