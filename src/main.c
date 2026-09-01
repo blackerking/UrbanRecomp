@@ -1703,48 +1703,96 @@ static void sc_catch_missed_vblank(void) {
   if (snes->nmiEnabled) { g_cpu->nmiWanted = true; s_nmi_requests++; }
   if (snes->autoJoyRead) snes->autoJoyTimer = 4224;
 }
+/* Master cycles from the current beam position to the frame boundary.
+ * 1364 per scanline, 262 lines per frame. */
+static uint64_t sc_cycles_to_frame_end(void) {
+  int64_t c = (int64_t)(262 - (int)g_snes->vPos) * 1364 - (int64_t)g_snes->hPos;
+  return c > 0 ? (uint64_t)c : 0;
+}
+
+/* One host frame.
+ *
+ * The frame boundary -- the instant that decides what gets presented -- must
+ * fall while the guest is STOPPED. That is the whole content of this function,
+ * and it took three attempts to get right.
+ *
+ * The bridge advances the beam by the guest's own master cycles as it runs
+ * (interp_bridge.c's per-opcode snes_sync_master_clock moves the same
+ * hPos/vPos this host's beam loop does). So the original shape -- run the beam
+ * all the way round, present, then hand the guest a flat 357368 cycles -- let
+ * vPos WRAP MID-BURST, presenting a screen sampled from part-way through the
+ * guest's update. Those are frames the per-opcode host never renders, because
+ * it interleaves guest writes across the scanlines as they are drawn, and they
+ * are what made already-fixed widescreen defects appear to come back.
+ *
+ * Two things that did NOT work, both measured, both recorded in
+ * docs/TODO_fiber_rendering.md: resizing the flat budget (worse in both
+ * directions, 0/17 frames identical at every value tried against 9/17 at
+ * exactly one frame), and an earlier two-slice split that double-counted the
+ * guest clock and fired vblank detection twice (0/17, master cycles nearly
+ * doubled).
+ *
+ * What works is to size each slice from the ACTUAL BEAM POSITION rather than
+ * guess, and to cross the boundary in between:
+ *
+ *   park at vblank entry, guest stopped   -> active display rendered cleanly
+ *   NMI
+ *   slice A, bounded by cycles-to-wrap    -> guest cannot carry the beam over
+ *   host crosses the boundary, guest stopped  -> THE PRESENT
+ *   slice B, the rest of the frame budget -> guest's main-loop work
+ *
+ * The guest still receives one frame of cycles per host frame, so pacing is
+ * unchanged. It simply is not holding the CPU at the instant that matters. */
 static bool run_one_frame_fiber(void) {
   uint64_t before = s_frames;
+  bool ok = true;
+  const uint64_t kFrameCycles = 357368u;
 
-  /* Advance to VBLANK ENTRY, not through the whole frame.
-   *
-   * This used to run the beam all the way round -- which presents the frame --
-   * and only then deliver NMI and let the guest run, so the guest's per-frame
-   * PPU work happened with the beam already back in the next active display.
-   * Parking at vblank entry instead means the active lines are rendered with
-   * the guest quiescent in its 00:9311 wait, and the NMI handler's writes land
-   * where nothing is being scanned out, which is the hardware order.
-   *
-   * Measured improvement, not a fix: 9 of 17 frames byte-identical to the
-   * per-opcode host against 7 before. The rest is the deeper problem recorded
-   * in docs/TODO_fiber_rendering.md -- the bridge advances the beam by the
-   * guest's own cycles, so the frame boundary can still be crossed mid-burst. */
-  unsigned guard = 0;
-  while (!g_snes->inVblank && s_frames == before && guard++ < 400000) {
-    sc_beam_step();
-  }
-  snes_catchupApu(g_snes);
+  /* Render the active display with the guest quiescent in its 00:9311 wait,
+   * which is the hardware order: scan out, then vblank, then let the game
+   * write the PPU while nothing is being scanned. */
+  { unsigned guard = 0;
+    while (!g_snes->inVblank && s_frames == before && guard++ < 400000)
+      sc_beam_step();
+    snes_catchupApu(g_snes); }
 
-  /* Hand the host's NMI request to the guest instead of faking its effect.
-   * handle_pos_stuff() raises NMI on g_cpu, the Interp816 -- which never
-   * executes in fiber mode, so the request used to sit there unconsumed
-   * while this line forged the handler's INC $b9:
-   *
-   *     g_ram[0xb9] = 1;
-   *
-   * That released 00:930d's wait and skipped the rest of 00:80B2, i.e. the
-   * per-frame PPU work. The driver now delivers a real interrupt. */
+  /* Hand the host's NMI request to the guest rather than faking its effect --
+   * handle_pos_stuff() raises it on g_cpu, the Interp816, which never executes
+   * in fiber mode. Forging g_ram[$b9]=1 released 00:930d's wait but skipped
+   * the rest of 00:80B2, i.e. the per-frame PPU work. */
   sc_catch_missed_vblank();
   bool nmi_pending = false;
   if (g_cpu->nmiWanted) { g_cpu->nmiWanted = false; nmi_pending = true; }
 
-  {
-    static uint64_t last_guest_master;
-    bool ok = SimCityFiberDrive_RunGuestFrame(s_frames, nmi_pending);
+  { static uint64_t last_guest_master;
+    const uint64_t guest_start = SimCityFiberDrive_MasterCycles();
+
+    /* Slice A: bounded so the beam stops short of the wrap. */
+    { uint64_t a = sc_cycles_to_frame_end();
+      if (a > kFrameCycles) a = kFrameCycles;
+      if (a < 1364u) a = 1364u;
+      ok = SimCityFiberDrive_RunGuestSlice(s_frames, nmi_pending, a); }
+
+    /* Cross the boundary with the guest stopped. This is the present. */
+    { unsigned guard = 0;
+      while (s_frames == before && guard++ < 400000) sc_beam_step();
+      snes_catchupApu(g_snes); }
+
+    /* Slice B: the remainder of this frame's budget, capped so the beam
+     * cannot reach the NEXT boundary either. No NMI -- one per frame. */
+    { const uint64_t used = SimCityFiberDrive_MasterCycles() - guest_start;
+      if (used < kFrameCycles) {
+        uint64_t b = kFrameCycles - used;
+        uint64_t room = sc_cycles_to_frame_end();
+        if (room && b > room) b = room;
+        if (b >= 1364u)
+          ok = SimCityFiberDrive_RunGuestSlice(s_frames, false, b) && ok;
+      } }
+
     s_nmi_serviced = SimCityFiberDrive_NmiDelivered();
-    /* Mirror the guest clock into the host counter the qualify bar and the
-     * APU pacing read. Without this the frame path reports master=0 and every
-     * cycle-derived check reads as dead. */
+
+    /* Mirror the guest clock into the host counter ONCE per frame. Doing this
+     * per slice is how the earlier attempt double-counted. */
     uint64_t now = SimCityFiberDrive_MasterCycles();
     if (now > last_guest_master) {
       uint64_t delta = now - last_guest_master;
@@ -1780,18 +1828,10 @@ static bool run_one_frame_fiber(void) {
         delta -= chunk;
       }
     }
-    last_guest_master = now;
-    sc_catch_missed_vblank();
+    last_guest_master = now; }
 
-    /* Finish the frame with the guest quiescent again. */
-    { unsigned g2 = 0;
-      while (s_frames == before && g2++ < 400000) {
-        sc_beam_step();
-      }
-      snes_catchupApu(g_snes); }
-    sc_catch_missed_vblank();
-    return ok;
-  }
+  sc_catch_missed_vblank();
+  return ok;
 }
 #endif /* SIMCITY_AOT_TIER */
 

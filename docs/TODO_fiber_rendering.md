@@ -92,7 +92,56 @@ over 300 frames. The slicing double-advances somewhere -- the guest clock is
 mirrored into `g_master_cycles` per slice and the vblank detection fires twice.
 Reverted. If retried, fix the accounting first.
 
-## Where to look next
+## FIXED: the frame was presented mid-burst
+
+`run_one_frame_fiber` now crosses the frame boundary with the guest STOPPED.
+Each host frame is:
+
+```
+park at vblank entry, guest quiescent   -> active display rendered cleanly
+deliver NMI
+slice A, bounded by cycles-to-wrap      -> guest cannot carry the beam over
+host crosses the boundary, guest stopped -> THE PRESENT
+slice B, the rest of the frame's budget -> the guest's main-loop work
+```
+
+Each slice is sized from the ACTUAL beam position (`sc_cycles_to_frame_end`)
+rather than from a flat constant, which is what made the earlier attempts
+fail -- a cycle budget is an open-loop guess at where the beam will end up.
+The guest still gets one frame of cycles per host frame, so pacing is
+unchanged; `master` agrees with the old path to within 54 cycles over 300
+frames, i.e. no double-counting this time.
+
+Proof it worked: the correlation is gone. Before, EVERY frame handed back at
+`03:83F9` was bad and every one at `009311` was good, in a clean period-4
+pattern. Now frames parking at `009311` come out both identical and novel, so
+the handover point no longer decides the outcome.
+
+It did NOT move the frame-fidelity number (9/17 either way), because a second,
+independent cause dominates.
+
+## REMAINING: the partial-update split line differs
+
+The surviving differences are a BAND AT THE TOP of the screen. Measured on two
+consecutive bad frames: rows 0..146 and rows 0..114 differ, everything below is
+byte-identical, and the right margin (x >= 320) is never touched at all. The
+differing columns run x 8..247 -- part of the left margin plus the scrolling
+map area.
+
+That is the signature of a partial update whose split scanline lands in a
+different place on the two hosts: the guest's tilemap/scroll writes are taking
+effect at a different beam position, so the screen tears at a different line.
+
+The likely mechanism is sync granularity INSIDE compiled bodies. The bridge
+advances the beam per interpreted opcode, but once execution bounces into an
+AOT body the beam moves in coarser chunks, so every PPU write inside that body
+lands at one beam position instead of its own. The per-opcode host has no such
+granularity and tears where the hardware would.
+
+If that is right, this is a framework-level concern rather than a host one, and
+the fix is beam sync points inside generated bodies -- not something to bodge
+in `run_one_frame_fiber`. Confirm the mechanism before building anything: a
+cheap check is whether the split line is always at a compiled-body boundary.
 
 The guest must not be holding the CPU at the instant the beam crosses a
 boundary. Two shapes look plausible:

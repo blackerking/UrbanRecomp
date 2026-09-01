@@ -25,7 +25,8 @@ void SimCityFiberDrive_AdoptInterpState(const struct Interp816 *in);
  * interpreter CPU by the caller. When set, the driver materializes the
  * 65816 interrupt frame and resumes at the NMI vector, so the guest runs
  * 00:80B2 itself instead of the driver faking its INC $b9. */
-bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending);
+bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
+                                     uint64_t budget);
 
 /* NMIs actually delivered to the guest (for the --qualify nmi_serviced). */
 uint64_t SimCityFiberDrive_NmiDelivered(void);

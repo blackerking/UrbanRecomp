@@ -186,7 +186,8 @@ void SimCityFiberDrive_AdoptInterpState(const Interp816 *in) {
     s_resume_pc24 = ((uint32_t)in->k << 16) | in->pc;
 }
 
-bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending) {
+bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
+                                     uint64_t budget) {
     /* Do not hand over a frame whose input latch is still busy -- see the long
      * note on sc_advance_until_input_ready() in src/main.c. */
     /* First frame: g_snes does not exist yet when Init() runs (that happens
@@ -251,7 +252,17 @@ bool SimCityFiberDrive_RunGuestFrame(uint64_t frame, bool nmi_pending) {
      * step cap to catch it. One frame of master cycles is the natural bound. */
     /* One frame. Tested at 600 frames too: the run behaves identically, so the
      * deadline is NOT what stops it -- see MIGRATION_step3 §10. */
-    interp_bridge_set_master_deadline(s_cpu.master_cycles + 357368u);
+    /* The caller sizes the budget so the BEAM CANNOT CROSS THE FRAME BOUNDARY
+     * while the guest holds the CPU.
+     *
+     * A flat one-frame bound was the original defect. The bridge advances the
+     * beam by the guest's own master cycles as it executes, so a full-frame
+     * budget let vPos wrap MID-BURST and the frame was presented from inside
+     * the guest's update. Resizing it does not help -- both directions measure
+     * strictly worse (docs/TODO_fiber_rendering.md has the sweep) -- because
+     * the bound is an open-loop guess at where the beam will end up. The
+     * caller computes it from the actual beam position instead. */
+    interp_bridge_set_master_deadline(s_cpu.master_cycles + budget);
 
     unsigned long hle_before = g_simcity_vblank_hle_calls;
     int ok = interp_bridge_run_loop(&s_cpu, s_resume_pc24,
