@@ -2767,3 +2767,68 @@ are how a diffusion step is iterated, which fits the overlay layout above.
 `03:b152`, called only from `88b4`, is the map-wide pass: its inner store at
 `03:b191` accounts for 94% of the 24000 map bytes and 264,100 writes over the
 sampled ticks.
+
+### The half-resolution grid is 60x50, from the code
+
+Not inferred from the 3000-byte size. `03:9f47`'s enclosing loop counts an
+inner index to `#$003c` (60) and an outer to `#$0032` (50):
+
+```
+03:9f49  INC $08 ; LDA $08 ; CMP #$003c ; BEQ +     ; 60 columns
+03:9f52  JMP $9eb0
+03:9f55  INC $0a ; LDA $0a ; CMP #$0032             ; 50 rows
+```
+
+So the map's 120x100 is halved on both axes, and a coarse cell covers a 2x2
+block of tiles.
+
+### Working layers and derived copies
+
+Two of the six 3000-byte arrays are not independent -- they are cheap
+transforms of two others, done once per pass:
+
+```
+03:9b75  LDA $7fc1b8,X / ASL A / BCC + / LDA #$ff        ; saturating x2
+03:9b83  STA $7f8e28,X
+
+03:9c81  LDA $7fb600,X / STA $7f8270,X                   ; plain copy,
+03:9c89  STA $0c ...                                     ; accumulating a
+                                                         ; 32-bit total in
+                                                         ; $00:$02, a maximum
+                                                         ; in $1c and a count
+                                                         ; in $14
+```
+
+| working | derived | transform |
+|---|---|---|
+| `$7FB600` (`03:a125`) | `$7F8270` (`03:9c89`) | copy, with total/max/count |
+| `$7FC1B8` (`03:a09f`) | `$7F8E28` (`03:9b87`) | doubled, saturated at 255 |
+
+So the six half-res arrays are really two working layers, two presentation
+copies of them, and two more (`$7F6B00`, `$7F76B8`) that are filled by a
+different kind of pass -- see below. That halves the number of distinct
+quantities to identify.
+
+### `03:9dc9`'s pass reads the MAP, not another layer
+
+Its loop masks a value to ten bits -- the map cell width -- skips zero, and
+branches on tile-value thresholds to accumulate weights:
+
+```
+03:9dcc  AND #$03ff        ; a map cell
+03:9dcf  BEQ +             ; empty, skip
+03:9dd1  CMP #$0028 ; BCS +
+03:9dd6  LDA $22 ; ADC #$000f ; STA $22    ; accumulate 15 for this class
+```
+
+That is the shape of a map-to-coarse-grid tally: walk the tiles, classify each
+by its index, and add a per-class weight into the 60x50 cell that contains it.
+The thresholds are the tile taxonomy, so reading them out is the way to learn
+what the tile ranges mean -- which is also what the map generator work left
+open.
+
+**Disassembly note**: `03:9dc9` is mid-instruction. Starting a listing there
+produces plausible nonsense (`BRK`, an absolute-indexed `ADC`); the real
+instruction boundary is `03:9dcc`. The write-attribution PC is the address of
+the store's NEXT instruction in several of these cases, so treat an attributed
+PC as "in this routine", not as an instruction boundary.
