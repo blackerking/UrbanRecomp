@@ -3118,3 +3118,52 @@ spacing. Inferred: that a 9-run is a 3x3 building and bit 0 marks its anchor.
 The inference is strong -- 72 of 81 exact -- but it is still an inference, and
 the way to settle it is to read `03:90c5` and see whether it treats the cell as
 the corner of a 3x3.
+
+### `03:90c5` -- the once-per-object dispatcher
+
+Reached only from the bit-0 path of the attribute table, so it runs once per
+object rather than once per tile. It calls `03:9137` and then routes on the
+tile index in `$0b89`:
+
+| tile | goes to | also |
+|---|---|---|
+| `< $080` | nothing | |
+| `$080`-`$128` | `03:937a` | |
+| `$129` exactly | `03:91df` | `INC $0e1f` |
+| `$132` exactly | `03:9207` | `INC $0e1f` |
+| `$137`-`$1f3` | `03:92ce` | |
+| `$249`-`$2ba` | `03:aa9f` | |
+| `$2bb`-`$375` | `03:ae25` | `INC $0e1f` |
+| `$307`, `$310`, `$36b` | `03:aa9f` | singled out by equality |
+| `$376`-`$399` | `03:937a` | |
+| `>= $39a` | `03:92ce` | |
+
+`03:937a` and `03:92ce` each serve two disjoint ranges, and they sit beside the
+three accumulators at `03:924f`/`92fb`/`93b1` this document already links to
+the capacity contribution for `$0b89`. `$0e1f` counts objects from three
+specific classes.
+
+### `03:9137` -- the neighbour probe, and 3-cell object spacing
+
+It biases the cell index by `-$2d0` and then reads with constant bases, so the
+net offsets are what matter:
+
+```
+LDA $0b49 ; SEC ; SBC #$02d0 ; TAX
+$7F04D6,X  ->  index + 6     ; 3 cells RIGHT   (6 bytes = 3 cells x 2)
+$7F04CA,X  ->  index - 6     ; 3 cells LEFT
+$7F07A0,X  ->  index + $2d0  ; 3 rows DOWN     (720 = 3 x 240)
+```
+
+and it uses them to check whether a partner tile is where it should be --
+`$37a` expects `$383` three cells right, `$383` expects `$37a` three cells
+left, `$38c` expects `$395` three rows down -- returning early when the pair is
+intact.
+
+**Three-cell steps in both axes is object spacing**, which supports the 3x3
+reading of the 9-tile attribute runs. Note the scope honestly though: this
+routine only does the check for tiles `>= $37a`, so it demonstrates 3-cell
+structures for that range rather than proving every 9-run is a 3x3. The
+attribute-table spacing (72 of 81 gaps exactly 9) and this are two independent
+pieces of evidence pointing the same way, which is stronger than either, and
+still short of reading a handler that walks all nine cells.
