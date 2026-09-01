@@ -3069,3 +3069,52 @@ down the list.
 `$7F0200` is the same map the generator writes, so the accessors, the tile
 weight ladder at `03:9e0c` and `src/simcity_mapgen.c` are all three looking at
 one array in the same 10-bit format.
+
+### The per-tile attribute table, `03:84eb`
+
+This is the tile taxonomy, and it is a plain byte table indexed by the 10-bit
+tile index. `03:8297`'s per-cell loop dispatches on its BITS:
+
+```
+03:82dc  LDA $84eb,Y ; AND #$01 ; if set: $7f02f0,X |= $4000 ; JSR $90c5
+03:82ff  LDA $84eb,Y ; AND #$20 ; if set: JSR $a73d
+03:8310  LDA $84eb,Y ; AND #$40 ; if set: JSR $a493
+03:831f  LDA $84eb,Y ; AND #$10 ; if set: JSR $a7da
+```
+
+So each bit selects a rule that applies to that tile. Four are identified from
+the dispatch above; the rest (`b1`, `b2`, `b3`, `b7`) are consumed further down
+the same stage and elsewhere.
+
+The table's shape, by contiguous runs of equal attribute:
+
+| tiles | flags | note |
+|---|---|---|
+| `$001`-`$013` | `08` | one class |
+| `$014`-`$027` | `04` | another |
+| `$028`-`$02f` | `00` | no rules at all |
+| `$030`-`$03e` | `48`/`44`/`d4` | a 15-tile group |
+| `$040`-`$04e` | `48`/`44`/`d4` | the SAME pattern again |
+| `$050`-`$05e` | `48`/`44`/`d4` | and again |
+| `$060`-`$06e` | `98`/`94`/`b4` | a fourth, different |
+| `$070`-`$07e` | `28`/`24` | a fifth |
+| `$080`-`$3bd` | `84`, with `85` at intervals | the large region |
+| `$354`-`$363` | `40` | an exception inside it |
+| `$364`-`$365` | `00` | and another |
+
+Three consecutive 15-tile groups sharing one flag pattern (`$030`, `$040`,
+`$050`) line up with the weight ladder giving those same ranges 0, 10 and 25 --
+the same structure repeated at three levels.
+
+**The `$080`-`$3bd` region is built from 9-tile groups.** 82 tiles there carry
+bit 0, and the spacing between them is exactly 9 in 72 of 81 cases (the
+exceptions are 10, 16 x3, 21, 25, 26). Nine tiles with a flag on the first is
+what a 3x3 object looks like with its anchor marked, and bit 0 is the one that
+sets `$4000` in the map cell and calls `03:90c5` -- i.e. it fires once per
+object, not once per tile.
+
+Measured: the table, the bit-to-routine dispatch, the run structure and the
+spacing. Inferred: that a 9-run is a 3x3 building and bit 0 marks its anchor.
+The inference is strong -- 72 of 81 exact -- but it is still an inference, and
+the way to settle it is to read `03:90c5` and see whether it treats the cell as
+the corner of a 3x3.
