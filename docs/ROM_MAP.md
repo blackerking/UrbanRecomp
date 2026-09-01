@@ -2671,15 +2671,35 @@ The other margin sprites there are slots 125-127 and 57 (tile `120`, 64 px
 wide, y=196) -- the row of blinking lights along the bottom -- and a long run of
 parked entries at x=-128, y=0, tile 0.
 
-### The strict left-hint gate is not blocking them
+### CORRECTION: the strict left-hint gate is NOT broken
 
 `PpuWidescreenOamLeftHintAllows` exists to do exactly this job: with
 `wsOamLeftHintStrict` set, an unhinted sprite lying wholly off-screen-left is
 refused. Slots 97, 98, 100 and 101 qualify -- x = -18 and -34 at size 16, so
 `x + size <= 0` -- and they are drawn anyway.
 
-Measured on the stuck save state: `SC_WS_OBJ_CLIP=1` changes nothing in the
-sign's rows, while `SC_WS_OAM=0` does change them. So the decode is live and
-placing the sprites at negative x, and the gate that should then reject them is
-not rejecting them. That gap is the thing to fix, and it is upstream code
-(`snesrecomp/runner/src/snes/ppu.c`), not host code.
+An earlier version of this section claimed the gate was failing. That was
+wrong, and the way it was wrong is worth keeping.
+
+Instrumenting the predicate to print its decision shows `strict=0` on the
+sign's slots -- but ONLY in the first few frames after a save state is loaded.
+The host publishes the hint arrays at `vPos == 0`, and a state loaded mid-frame
+does not reach that point for a few frames, so those frames render with the
+gate disabled. Every `strict=0` reading came from that window.
+
+From BOOT, over 900 frames, there are ZERO gate calls with strict off. With
+strict on the gate decides correctly: slot 127 is `hinted=1` (host-placed, so
+allowed), slot 57 `straddles` (partly on screen, correctly allowed), and a
+sprite lying wholly off-screen-left is blocked.
+
+Two things follow.
+
+There IS a real but narrow bug: **the first frames after a save-state load
+render with OAM hints unpublished**, so anything parked off-screen-left draws
+into the margins until the host's next `vPos == 0`.
+
+And -- more importantly for anyone measuring here -- **a rendering taken from a
+freshly loaded save state is not evidence about normal play**. The sign
+appearing in slot 3's margin is at least partly that artifact: by the time the
+gate goes strict a few frames later, the sign's slots are no longer at negative
+x at all.

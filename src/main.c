@@ -1207,6 +1207,7 @@ static void handle_pos_stuff(void) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
           PpuWsSetOamLeftHints(g_ppu, s_oam_left_hints);
+
         } else {
           PpuWsSetOamRightHints(g_ppu, NULL);
           PpuWsSetOamLeftHints(g_ppu, NULL);
