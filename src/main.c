@@ -1217,6 +1217,25 @@ static void handle_pos_stuff(void) {
        * whether that tilemap has anything in the columns the extra width
        * would expose -- the same question SC_SELECTOR_PPU answered for the
        * scenario screen, asked everywhere. */
+      /* SC_TITLE_DUMP=<path>: write BG1's two tilemap pages plus the live
+       * hScroll, once, for offline analysis of which cells hold what. */
+      if (getenv("SC_TITLE_DUMP") && g_ppu && g_ram[0x14] == 0x01) {
+        static int dumped = 0;
+        if (!dumped && s_frames > 8) {
+          dumped = 1;
+          const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+          FILE *f = fopen(getenv("SC_TITLE_DUMP"), "wb");
+          if (f) {
+            uint16_t hdr[3];
+            hdr[0] = (uint16_t)g_ppu->hScroll[0];
+            hdr[1] = (uint16_t)m;
+            hdr[2] = (uint16_t)PPU_bgTileAdr(g_ppu, 0);
+            fwrite(hdr, 2, 3, f);
+            fwrite(g_ppu->vram, 2, 0x8000, f);   /* whole VRAM */
+            fclose(f);
+          }
+        }
+      }
       if (getenv("SC_PPU_LAYOUT")) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {
