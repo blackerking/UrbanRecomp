@@ -2194,17 +2194,18 @@ static bool run_one_frame(void) {
      * count and leave the PRNG in its exact final state -- and the same
      * substitution is proven working through the fiber HLE.
      *
-     * THIS HOOK, however, has never been observed to fire. Default OFF until
-     * it has: SC_MAPGEN_FAST=1 to enable.
+     * THIS HOOK IS NOW VERIFIED IN SITU, against the ROM's own generator on the
+     * same save state: identical 5206 cells, identical kept index, identical
+     * PRNG state 180B/1385, 100.00% of cells. The map completes at frame 90
+     * against frame 690 for the ROM -- 600 frames, ten seconds, gone.
      *
-     * It could not be verified because no save state currently reaches map
-     * generation. The ones used earlier were overwritten during an interactive
-     * session, and the survivors either sit in the 05:935A block-copy loop or
-     * never reach the map screen; a plain boot does not generate either (the
-     * "gen: trigger_hits" counter is shared with the 00:90dd decompressor, so
-     * a non-zero count there does NOT mean the generator ran -- that cost an
-     * hour of chasing). Verifying needs a save state on the map-select screen,
-     * then SC_MAPGEN_FAST=1 SC_MAPGEN_FAST_DIAG=1 and a press of Up.
+     * Six further generations from an interactive session all returned to
+     * 03:D86D, and three of them reproduce guest captures taken independently:
+     * 4258 cells / 2DC4-8570, 9469 / 5B19-426F and 6626 / 346D-529F.
+     *
+     * A note for whoever verifies the next thing here: "gen: trigger_hits"
+     * does NOT mean the generator ran. That counter is shared with the 00:90dd
+     * decompressor, and a non-zero count while chasing this cost an hour.
      *
      * The RTL emulation below is the part most worth re-reading before
      * trusting this: get the pull order or the +1 wrong and it returns into
@@ -2217,7 +2218,7 @@ static bool run_one_frame(void) {
       static int fast = -1;
       if (fast < 0) {
         const char *e = getenv("SC_MAPGEN_FAST");
-        fast = (e && *e) ? (*e != '0') : 0;   /* OFF until observed firing */
+        fast = (e && *e) ? (*e != '0') : 1;   /* on; SC_MAPGEN_FAST=0 disables */
       }
       if (fast) {
         static ScMapGenState gs;
