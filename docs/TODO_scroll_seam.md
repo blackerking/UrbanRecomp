@@ -571,3 +571,53 @@ The host strip moves a different distance from the guest on ~25 of 106 frames
 during fast horizontal pan. Not caused by the seam work -- disabling that
 correction gives 27. Probably the "clearly apart for a split second" reported
 early on.
+
+## Title margins: the parked building on BG1
+
+**Open. One approach tried and reverted -- do not repeat it.**
+
+Reported from play: an animated tile carrying the SimCity lettering rides in
+with a building, reaches the left edge and parks there instead of leaving; the
+building shows Maxis beneath it and departs normally while the lettering stays.
+
+Located by clamping one layer at a time and rendering the margin as text:
+
+    clamp BG2   the letter shapes go, the building stays
+    clamp BG3   nothing changes
+    clamp BG1   the building and its rows of windows go
+    clamp all   the margin is empty
+
+So the building is on BG1 and the lettering on BG2.
+
+### What was tried, and why it is wrong
+
+Clamping BG1 on the title ($14 == 0x01). It does remove the parked building --
+and it removes EVERY OTHER BUILDING FROM BOTH MARGINS with it, because BG1's
+off-screen columns carry the real skyline as well as the parked object.
+Reported immediately: "rendering of all buildings are only inside the normal
+view, the widescreen got nothing". Reverted.
+
+The measurements that made it look right were all confirming: the building was
+gone, nothing else regressed, the wood still worked. None of them asked what
+ELSE the margin lost, because a non-black pixel count cannot tell a wanted
+building from an unwanted one.
+
+### Why this is hard
+
+Hardware shows nothing beyond x=256, so the game is free to leave anything it
+likes in the columns past the window -- and does. Widescreen deliberately shows
+those columns. There is no property of a tile that says "scenery" or "parked";
+both are just map entries. A whole-layer clamp cannot express the difference,
+which is why it takes the wanted content with it.
+
+### What might work
+
+  - A COLUMN rule rather than a layer rule: find the columns the game parks in
+    (they should be stable across the title sequence) and blank only those.
+  - A ROW rule: the parked object sits at a known band of scanlines; the
+    skyline that should wrap may occupy a different one.
+  - Accept it. The building leaving the view and reappearing is a cost of
+    seeing past the authentic edge, and the alternative just tried is worse.
+
+Whatever is attempted, the check is NOT "is the artifact gone" -- it is "what
+does the margin still contain". Render it and look.
