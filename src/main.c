@@ -5611,17 +5611,24 @@ int main(int argc, char **argv) {
               (unsigned)(s_dump_pc24 >> 16), (unsigned)(s_dump_pc24 & 0xffff));
     } }
 #ifdef SIMCITY_AOT_TIER
-  /* The fiber is now the DEFAULT in the AOT build: it runs the compiled bodies
-   * and the HLEs, including the map generator at 01:f1ed, which is the whole
-   * reason the AOT tier exists. SC_FIBER=0 falls back to interpreting every
-   * opcode, which remains the correctness baseline.
+  /* The AOT tier is linked into this build, but the fiber is OPT-IN again.
+   *
+   * It was briefly the default. Playing on it showed widescreen defects that
+   * had already been fixed coming back -- the rendering code is identical, so
+   * the cause is that the guest runs compiled bodies under the fiber and any
+   * fix that hangs off the per-opcode interpreter path stops firing. Until
+   * that is found and closed, the interpreter stays the default, because it
+   * is the path every widescreen fix was developed and verified against.
+   *
+   * SC_FIBER=1 enables it -- that is how the map generator HLE at 01:f1ed
+   * runs, which is worth having and is verified bit-exact.
    *
    * The decision is recorded here but ACTED ON after the ROM is read, because
    * the AOT code is compiled against the US image and the region is not known
    * until then. */
   { const char *e = getenv("SC_FIBER");
     s_fiber_explicit = (e && *e);
-    s_fiber_want = s_fiber_explicit ? (*e != '0') : 1; }
+    s_fiber_want = s_fiber_explicit ? (*e != '0') : 0; }
 #endif
   { const char *e = getenv("SC_SCENARIO_EVENT");
     if (e && *e) {
