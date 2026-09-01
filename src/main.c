@@ -1612,6 +1612,12 @@ static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
  * because that path is this project's correctness baseline and every
  * `--qualify` number rests on it. */
 static bool s_fiber_mode;
+/* What was asked for, and whether a human asked. The difference matters
+ * only on a non-US ROM: an explicit SC_FIBER=1 there is an error worth
+ * stopping for, while the mere default quietly steps down to the
+ * interpreter so every region stays playable. */
+static int  s_fiber_want;
+static int  s_fiber_explicit;
 
 /* One host frame in the fiber model: advance the PPU and devices for a whole
  * frame (so raster effects still work line by line, per MIGRATION_step3 §4),
@@ -5605,28 +5611,17 @@ int main(int argc, char **argv) {
               (unsigned)(s_dump_pc24 >> 16), (unsigned)(s_dump_pc24 & 0xffff));
     } }
 #ifdef SIMCITY_AOT_TIER
-  /* SC_FIBER=1: drive the guest inside the fiber instead of interpreting it
-   * per opcode (migration step 3d). Only meaningful in the AOT build, and
-   * deliberately opt-in -- see run_one_frame_fiber(). */
+  /* The fiber is now the DEFAULT in the AOT build: it runs the compiled bodies
+   * and the HLEs, including the map generator at 01:f1ed, which is the whole
+   * reason the AOT tier exists. SC_FIBER=0 falls back to interpreting every
+   * opcode, which remains the correctness baseline.
+   *
+   * The decision is recorded here but ACTED ON after the ROM is read, because
+   * the AOT code is compiled against the US image and the region is not known
+   * until then. */
   { const char *e = getenv("SC_FIBER");
-    if (e && *e && *e != '0') {
-      if (!SimCityFiberDrive_Init()) {
-        fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
-        return 1;
-      }
-      s_fiber_mode = true;
-      /* Feed the coverage bitmaps from the bridge, or a fiber run records
-       * nothing at all and every tool in tools/ silently sees an empty
-       * bitmap. Interpreted opcodes go into the bitmaps exactly as the
-       * per-opcode host records them; compiled-body ENTRIES are collected
-       * separately, because a bounce is not an extent. */
-      { extern void (*g_interp_bridge_pc_hook)(uint32_t, int, int);
-        extern void (*g_interp_bridge_bounce_hook)(uint32_t, int, int);
-        g_interp_bridge_pc_hook = sc_note_executed_pc;
-        g_interp_bridge_bounce_hook = sc_note_aot_entry; }
-      fprintf(stderr, "[fiber] driving the guest inside the fiber "
-                      "(entry I_RESET_M1X1)\n");
-    } }
+    s_fiber_explicit = (e && *e);
+    s_fiber_want = s_fiber_explicit ? (*e != '0') : 1; }
 #endif
   { const char *e = getenv("SC_SCENARIO_EVENT");
     if (e && *e) {
@@ -5732,17 +5727,42 @@ int main(int argc, char **argv) {
             rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
   }
 #ifdef SIMCITY_AOT_TIER
-  /* Checked HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
+  /* Decided HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
    * is read, so the fingerprint is not known yet. The first version of this
    * guard sat at the parse site and did nothing at all -- a German ROM ran 60
    * compiled bounces straight past it. */
-  if (s_fiber_mode && !s_rom_is_us) {
-    fprintf(stderr,
-            "SC_FIBER refused: the AOT code is compiled against the US ROM and "
-            "this image is a different region.\n"
-            "  Run without SC_FIBER -- the interpreter tier handles every "
-            "region.\n");
-    return 1;
+  if (s_fiber_want && !s_rom_is_us) {
+    if (s_fiber_explicit) {
+      fprintf(stderr,
+              "SC_FIBER refused: the AOT code is compiled against the US ROM "
+              "and this image is a different region.\n"
+              "  Run without SC_FIBER -- the interpreter tier handles every "
+              "region.\n");
+      return 1;
+    }
+    /* Only the default asked for it, so step down rather than refuse to run.
+     * Every region stays playable; this one just runs on the interpreter. */
+    fprintf(stderr, "[fiber] not a US image -- running on the interpreter "
+                    "tier, which handles every region.\n");
+    s_fiber_want = 0;
+  }
+  if (s_fiber_want) {
+    if (!SimCityFiberDrive_Init()) {
+      fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
+      return 1;
+    }
+    s_fiber_mode = true;
+    /* Feed the coverage bitmaps from the bridge, or a fiber run records
+     * nothing at all and every tool in tools/ silently sees an empty bitmap.
+     * Interpreted opcodes go into the bitmaps exactly as the per-opcode host
+     * records them; compiled-body ENTRIES are collected separately, because a
+     * bounce is not an extent. */
+    { extern void (*g_interp_bridge_pc_hook)(uint32_t, int, int);
+      extern void (*g_interp_bridge_bounce_hook)(uint32_t, int, int);
+      g_interp_bridge_pc_hook = sc_note_executed_pc;
+      g_interp_bridge_bounce_hook = sc_note_aot_entry; }
+    fprintf(stderr, "[fiber] driving the guest inside the fiber "
+                    "(entry I_RESET_M1X1)\n");
   }
 #endif
   if (!rom_data) {

@@ -703,18 +703,38 @@ stack-corruption problem MMX's yield had.
 | step | state |
 |---|---|
 | 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
-| 2. Can both tiers live in one binary? | **done** — `SimCitySNESRecompAOT` is the same `src/main.c` linked with the generated banks and the AOT runtime, and produces byte-identical `--qualify` output to the shipping build |
+| 2. Can both tiers live in one binary? | **done** — the same `src/main.c` linked with the generated banks and the AOT runtime. While the AOT build was still pure interpreter this produced byte-identical `--qualify` output to the shipping build; now that the fiber drives compiled bodies by default the counters differ, because the work itself differs (see 3e) |
 | 3a. Is any compiled body *correct*? | **8 bodies verified** — `SimCityAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
 | 3b. Declare the frame boundary | **done** — `hle_func 930d SimCity_WaitForVblank` in `recomp/bank00.cfg`, implemented in `src/simcity_hle.c`. The emitter now routes all four M/X variants of `bank_00_930d` through the host function |
 | 3c. Fiber layer for the frame boundary | **done** — `src/simcity_fiber.c`, verified by `tests/fiber_test.c` (stack and FP state preserved across switches) |
 | — | **blocked on a correctness bug**: 28 compiled call sites execute instructions the ROM never runs ([`docs/UPSTREAM_inline_args.md`](docs/UPSTREAM_inline_args.md)) |
-| 3d. Drive the guest inside the fiber | not started — needs an interpreter-with-bouncing driver, because SimCity has no compiled entry point to start from ([why](docs/MIGRATION_step3.md) §5) |
+| 3d. Drive the guest inside the fiber | **done** — `src/simcity_fiberdrive.c`, entered at `I_RESET_M1X1`. It is an interpreter-with-bouncing driver, since SimCity has no compiled entry point to start from ([why](docs/MIGRATION_step3.md) §5) |
+| 3e. Replace real work with a compiled body | **done** — `hle_func f1ed SimCity_MapGen` runs the decompiled map generator (`src/simcity_mapgen.c`) instead of the ROM's. Verified bit-exact on three maps across both generator branches: same 12000 cells, same draw count, same final PRNG state. The routine it replaces takes the SNES CPU ~800 frames; the map is now complete the frame after the trigger |
+| 4. Make the AOT tier the default | **done** — when `src/gen` is present, `SimCitySNESRecomp` *is* the AOT build and the fiber drives it. `SC_FIBER=0` restores the pure interpreter, which remains the correctness baseline |
 
-Both are `EXCLUDE_FROM_ALL`, so neither can break the normal build:
+The normal build now links the AOT tier itself, so there is nothing extra to
+build for it:
+
+```bash
+cmake --build build --target SimCitySNESRecomp        # AOT tier + fiber (default)
+SC_FIBER=0 ./build/Release/SimCitySNESRecomp ...      # pure interpreter
+```
+
+Two caveats worth stating plainly. The generated code is compiled against the
+**US** ROM, so on any other region the fiber steps down to the interpreter and
+says so — every region stays playable, and an explicit `SC_FIBER=1` there is
+still refused rather than silently ignored. And without `src/gen` (a fresh
+clone, before `tools/regen.sh`) the whole AOT block is skipped and the target
+builds interpreter-only exactly as it did before.
+
+The diagnostic targets remain `EXCLUDE_FROM_ALL`:
 
 ```bash
 cmake --build build --target SimCityAOTProbe          # link probe
-cmake --build build --target SimCitySNESRecompAOT     # host + AOT runtime
+cmake --build build --target SimCitySNESRecompAOT     # same content as the
+                                                      # default build now;
+                                                      # kept for the docs and
+                                                      # scripts that name it
 ```
 
 Step 2's point is narrow but load-bearing: the two tiers **share one WRAM

@@ -115,6 +115,53 @@ snesrecomp_target_sdl(SimCitySNESRecomp)
 # It is excluded from ALL so a broken or stale src/gen can never break the
 # normal build, and it is skipped entirely when src/gen has not been generated.
 file(GLOB SIMCITY_GEN_SOURCES ${CMAKE_SOURCE_DIR}/src/gen/*.c)
+
+# ── AOT is the standard build ───────────────────────────────────────────────
+#
+# When the generated banks are present, SimCitySNESRecomp IS the AOT build: the
+# compiled bodies and the HLEs are linked in and the fiber drives them by
+# default. That is what makes the map generator HLE at 01:f1ed actually run,
+# which is the point of having an AOT tier at all -- it turns ~800 frames of
+# the SNES CPU grinding through 03:d840 into less than one.
+#
+# SC_FIBER=0 still interprets every opcode. That path is unchanged and remains
+# the correctness baseline every --qualify number rests on, so the fallback is
+# always one environment variable away.
+#
+# Without src/gen -- a fresh clone before tools/regen.sh -- this whole block is
+# skipped and the target builds interpreter-only exactly as it did before.
+if(SIMCITY_GEN_SOURCES)
+    target_sources(SimCitySNESRecomp PRIVATE
+        ${SIMCITY_GEN_SOURCES}
+        src/simcity_hle.c
+        src/simcity_fiber.c
+        src/simcity_fiberdrive.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
+        ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
+        ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
+        ${SNESRECOMP_ROOT}/runner/src/host_report.c
+        ${SNESRECOMP_ROOT}/runner/src/framedump.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
+    )
+    target_include_directories(SimCitySNESRecomp PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src/desktop)
+    target_compile_definitions(SimCitySNESRecomp PRIVATE SIMCITY_AOT_TIER)
+    if(MSVC)
+        # cpu_state.c's weak-marked fallback guard table is a strong definition
+        # under MSVC, and common_rtl.c redefines a handful of APU helpers that
+        # main.c also carries. See the note on SimCityAOTProbe.
+        target_link_options(SimCitySNESRecomp PRIVATE /FORCE:MULTIPLE)
+    else()
+        target_compile_options(SimCitySNESRecomp PRIVATE
+            -w -Wno-implicit-function-declaration)
+    endif()
+endif()
+
 if(SIMCITY_GEN_SOURCES)
     add_executable(SimCityAOTProbe EXCLUDE_FROM_ALL
         src/aot_probe.c
@@ -183,6 +230,10 @@ endif()
 # Routing execution through the compiled bodies is step 3.
 #
 #   cmake --build build --target SimCitySNESRecompAOT
+# NOTE: this now builds the same content as the default target, which links the
+# AOT tier itself. Kept because README.md, docs/ and tools/gen_align_check.py
+# name it, and because having a target that is unambiguously the AOT build is
+# useful when the default one is configured without src/gen.
 if(SIMCITY_GEN_SOURCES)
     add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
         src/main.c
