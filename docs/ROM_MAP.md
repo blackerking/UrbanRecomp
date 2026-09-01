@@ -3167,3 +3167,40 @@ structures for that range rather than proving every 9-run is a 3x3. The
 attribute-table spacing (72 of 81 gaps exactly 9) and this are two independent
 pieces of evidence pointing the same way, which is stronger than either, and
 still short of reading a handler that walks all nine cells.
+
+### The three zone handlers, and how they reach population
+
+`03:922f`, `03:92ce` and `03:937a` are the same routine three times over with
+different constants. Each is reached from `03:90c5`'s tile-range dispatch, so
+each runs once per object of its class.
+
+| | `03:922f` | `03:92ce` | `03:937a` |
+|---|---|---|---|
+| locals reserved | 8 | 8 | 10 |
+| objects counted in | `$0b91` | `$0b95` | `$0b8d` |
+| capacity helper | `03:847a` | `03:8456` | `03:842f` |
+| flat capacity above a threshold | -- | `6` for tiles >= `$39a` | `$30` (48) for tiles >= `$376` |
+| extra special case | -- | -- | tile `$084` -> `03:9a3e` |
+| accumulates into | `$0b8f` | `$0b93` | `$0b8b` |
+| accumulator instruction | `03:924f` | `03:92fb` | `03:93b1` |
+| constant passed to `03:9035` | -- | `5` | `$23` (35) |
+
+Those three accumulator addresses are the ones this document already listed as
+"three sibling accumulators" without saying what they accumulated. They are the
+three terms of the population formula recorded above:
+
+```
+population = (($0b8f + $0b93) * 8 + $0b8b) * 20
+```
+
+so two classes are weighted x8 and one x1.
+
+**The flat capacities are chosen to match after that weighting.** `03:937a`
+gives 48 and is weighted x1; `03:92ce` gives 6 and is weighted x8. Both come to
+48. That is a useful check on the whole reading -- the formula, the handler
+identification and the constants were recovered from three separate places, and
+they agree.
+
+All three share one pair of counters: `$0e1b` for objects whose capacity came
+out non-zero and `$0e1d` for those that came out zero. So the game separately
+tracks how many objects of any class are producing nothing.
