@@ -2832,3 +2832,62 @@ produces plausible nonsense (`BRK`, an absolute-indexed `ADC`); the real
 instruction boundary is `03:9dcc`. The write-attribution PC is the address of
 the store's NEXT instruction in several of these cases, so treat an attributed
 PC as "in this routine", not as an instruction boundary.
+
+### The tile weight ladder, `03:9e0c`
+
+Takes a map cell in `A` and returns a signed weight. Read out in full:
+
+| tile range | weight |
+|---|---|
+| `$000`-`$03f` | 0 |
+| `$040`-`$04f` | 10 |
+| `$050`-`$05f` | 25 |
+| `$060`-`$07e` | 0 |
+| **`$07f` exactly** | 60 |
+| `$080`-`$1fc` | 0 |
+| `$1fd`-`$244` | 50 |
+| `$245`-`$266` | 0 |
+| `$267`-`$276` | 60 |
+| `$277`-`$286` | 0 |
+| `$287`-`$2b9` | 60 |
+| `$2ba`-`$363` | 0 |
+| **`$364` exactly** | **-40** |
+| `$365`+ | 0 |
+
+`$07f` and `$364` are tested first and by equality, so they are single tiles
+singled out of ranges that otherwise weigh 0 and 0. `$364` is the only negative
+weight in the table.
+
+Two of the branches are easy to misread: at `03:9e45` `Y` is loaded with 60
+BEFORE the comparison, and `BCC $9e5c` then throws it away by reloading 0. So
+`$245`-`$266` weigh 0 despite the `LDY #$003c` immediately above them, and the
+same trick appears again at `03:9e52`.
+
+### What the caller does with it, `03:9dcc`
+
+```
+AND #$03ff                 ; a map cell
+BEQ out                    ; empty contributes nothing at all
+CMP #$0028 ; BCC low       ; below $28:
+    $22 += 15              ;   add 15 and stop -- no weight, no count
+CMP #$02bf / #$0354        ; inside [$2bf,$354),
+CMP #$0307 / #$0310        ;   excluding $307 and $310 exactly:
+    $22 = 255              ;   saturate
+JSR $9e0c ; $0e += weight  ; every non-empty cell contributes its weight
+CMP #$0030 ; BCS +
+    INC $10                ; and cells >= $30 are counted
+```
+
+So one pass produces three things per coarse cell: a saturating quantity `$22`
+that low tiles nudge by 15 and one specific tile band pins to maximum, a
+weighted sum `$0e`, and a plain count `$10` of tiles at or above `$30`.
+
+The tile numbers here are the same 10-bit values the map generator writes, so
+this ladder is a second, independent source on what the tile ranges MEAN -- the
+generator produced values `$00`-`$25` and this classifier treats everything
+below `$28` as one class and everything below `$30` as uncounted. Those two
+readings agree, which is worth noting because they were derived from completely
+different code.
+
+What the three quantities ARE is still not established, and the shape alone
+should not be used to name them.
