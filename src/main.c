@@ -1164,27 +1164,8 @@ static void handle_pos_stuff(void) {
          * Clamping them stops the gradient dead at the authentic edge, which
          * is exactly what it did once the flags below started reaching the PPU
          * per frame and the clamp became live for the first time. */
-        if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title) {
+        if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title)
           clamp &= (uint8_t)~0x06;   /* BG2 | BG3 */
-          /* ...but CLAMP BG1, the one layer the auto rule leaves alone here.
-           *
-           * The rule above keeps 64-column layers unclamped because "64
-           * columns covers 512 px, more than the 448 the maximum widescreen
-           * renders, so those carry real content all the way out". On the
-           * title that is false in the same way it was false for the wood
-           * margins: the map is wide, but its off-screen columns are the
-           * game's PARKING SPACE, not scenery.
-           *
-           * Reported from play: a building rides in carrying the Maxis
-           * lettering, reaches the left edge, and instead of leaving it sits
-           * in the margin until the sequence wants it again. Confirmed on the
-           * layer -- clamping BG1 alone removes the building and its windows
-           * from the margin, and clamping BG2 or BG3 does not touch it.
-           *
-           * BG2 and BG3 still wrap, so the sky gradient and the far skyline
-           * fill the margins as intended; only the parked foreground goes. */
-          clamp |= 0x01;             /* BG1 */
-        }
         /* The wood-only margin pass needs its layer to REACH the margins, or
          * the pass renders 256 px of desk and nothing beyond. Its own map
          * wraps seamlessly, and the frame the player sees is taken from the
