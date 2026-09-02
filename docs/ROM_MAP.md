@@ -3204,3 +3204,32 @@ they agree.
 All three share one pair of counters: `$0e1b` for objects whose capacity came
 out non-zero and `$0e1d` for those that came out zero. So the game separately
 tracks how many objects of any class are producing nothing.
+
+### The overview map's per-cell display path (`02:9150`, `02:91d2`)
+
+Reported from play: entering the visual/overview map from the menu takes a long
+time, while the graph screen next to it appears instantly.
+
+Two pieces of that path are read:
+
+`02:91d2` converts one layer value to a colour. It halves with rounding five
+times (`LSR ; ADC #$00` x5, i.e. divide by 32 rounding up), clamps to 8, and
+indexes a table at `$00AA75`. That is cheap.
+
+`02:9150` computes the cell address, and is not cheap. Per cell it masks NMI
+(`$b3` -> `$b1`), writes both hardware multiplier ports, burns the mandatory
+delay, reads `$4216`/`$4217`, and restores NMI -- the same expensive shape the
+map generator's range primitive uses, and roughly 60-80 cycles of overhead
+before any actual work.
+
+**This is a candidate for the slowness, NOT a diagnosis.** The arithmetic says
+3000 cells of that costs single-digit frames and 12000 costs under a second,
+which is not "a huge time" -- so either the loop is larger than the display
+grid, or entering the screen recomputes the simulation layers rather than just
+drawing them, or the cost is somewhere else entirely. Guessing between those
+from the listing is exactly the mistake that cost three reverts on the title.
+
+To settle it: a save state taken immediately before pressing B, then
+`SC_BANK_PROFILE=1` across the load. That gives the hot pages directly and
+distinguishes "display path" from "recompute the whole simulation", which need
+completely different fixes.
