@@ -1248,6 +1248,34 @@ static void handle_pos_stuff(void) {
            * is tried next needs to test the SIGN's own pixels over time, not
            * the margin's total. */
         }
+        /* SC_WS_SCEN_OAM_LEFT=1 (experiment): release the left hints on the
+         * scenario selector ($14 = 0b). Widescreen reveals two card columns
+         * the authentic 256 view never shows, and the game parks their won-
+         * mark sprites at negative X (slots seen at rawX 472/480, tile 76 --
+         * the same X tiles the on-screen marks use). Hardware clips those
+         * entirely; a 96 px margin does not. Whether they land on the right
+         * cards is the thing to look at. */
+        /* The scenario selector's missing won-marks CANNOT be fixed here.
+         *
+         * Reported from play: widescreen reveals two card columns the
+         * authentic 256 view never shows (San Francisco/Detroit left, the
+         * ninth scenario right), and those cards carry no red X.
+         *
+         * Releasing the left hints here was tried, and it is wrong. Dumped
+         * OAM ($14=0b, SC_OAM_BAND=2) shows exactly two slots decoding
+         * negative -- 2 and 11 -- and they are not marks. Slots 8-21 are one
+         * selection bracket built from tiles 76/78/96 repeated with flip
+         * bits (attr 34 = none, 74 = H, b4 = V, f4 = both), and 2/11 are a
+         * second such bracket parked off-screen-left. Hardware clips it;
+         * releasing it just paints a stray green bracket in the margin.
+         * Measured: the ONLY pixels the release adds are #63ff00/#21bd00 at
+         * x=16..71, entirely outside any card. Not one red pixel.
+         *
+         * So the marks for the revealed columns are not in OAM at all -- the
+         * game only emits them for cards inside its own 256 px view. Drawing
+         * them would mean synthesising them host-side from the win flags at
+         * $700007 (which apply_unlock_all already reads), which is a new
+         * feature and not a decode fix. */
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
@@ -1286,6 +1314,38 @@ static void handle_pos_stuff(void) {
             fwrite(g_ppu->oam, 2, 0x100, f);     /* OAM low  */
             fwrite(g_ppu->highOam, 1, 32, f);    /* OAM high */
             fclose(f);
+          }
+        }
+      }
+      /* SC_OAM_BAND=1: list every OAM slot whose raw X lands in the
+       * ambiguous band [256, 256+extraRight), for whatever screen is up.
+       *
+       * That band is the whole question the strict decode answers by
+       * assuming "parked". On the title the assumption is wrong and the
+       * slots are hinted permissive; on the scenario selector it is right
+       * for some slots and wrong for others, which is why the selector needs
+       * this rather than a blanket switch either way. Y is printed because
+       * a parked sprite is usually parked in Y as well (>= 224), which
+       * separates the two cases without guessing. */
+      if (getenv("SC_OAM_BAND") && g_ppu) {
+        static int done = 0;
+        if (!done && s_frames > 20) {
+          done = 1;
+          fprintf(stderr, "[oamband] $14=%02x extraRight=%d\n",
+                  g_ram[0x14], s_ws_extra);
+          for (int i = 0; i < 128; i++) {
+            const unsigned lo = g_ppu->oam[i * 2];
+            const unsigned hi = g_ppu->oam[i * 2 + 1];
+            const unsigned hbits = g_ppu->highOam[i >> 3];
+            const unsigned x9 = (lo & 0xff) | (((hbits >> ((i & 7) * 2)) & 1) << 8);
+            const unsigned y = (lo >> 8) & 0xff;
+            const unsigned tile = hi & 0xff;
+            const unsigned attr = (hi >> 8) & 0xff;
+            const int all = atoi(getenv("SC_OAM_BAND"));
+            if (y < 224 && (all > 1 ||
+                (x9 >= 256 && x9 < 256u + (unsigned)s_ws_extra)))
+              fprintf(stderr, "  slot %3d  rawX=%3u y=%3u tile=%3u attr=%02x\n",
+                      i, x9, y, tile, attr);
           }
         }
       }
