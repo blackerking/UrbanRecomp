@@ -3233,3 +3233,337 @@ To settle it: a save state taken immediately before pressing B, then
 `SC_BANK_PROFILE=1` across the load. That gives the hot pages directly and
 distinguishes "display path" from "recompute the whole simulation", which need
 completely different fixes.
+
+**RESOLVED -- and it is none of the three guesses above.** Measured from
+`savestate_3.bin` (menu, cursor on the spot, B injected at frame 60):
+
+| frames | what the screen does |
+|---|---|
+| 60 | B pressed |
+| 70 | 11,784 px change -- the menu tears down |
+| 70-210 | **nothing. Frozen for 140 frames (~2.4 s).** |
+| 210 | 45,191 px change -- the map appears, in a single frame |
+| 210+ | 100-300 px per frame -- normal animation |
+
+The map is drawn all at once at the end, so nothing is slow about drawing it.
+Isolating the frozen window by subtracting a `--qualify 70` profile from a
+`--qualify 210` one:
+
+    frames 70-210: 1,815,038 opcodes over 140 frames
+      bank 00  48.4%    bank 02  46.1%    bank 03  5.3%
+      = 13k opcodes per frame
+
+Bank 03 -- the simulation -- is **5.3%**, so "entering the screen recomputes
+the simulation layers" is wrong. An earlier 900-frame profile put bank 03 at
+48.4% with `03:b100` hottest, which looked exactly like recomputation; that
+window was mostly *post-load* simulation ticking. Profile the window, not the
+session.
+
+**13k opcodes/frame is the CPU running flat out, not idling.** This is worth
+stating plainly because the first reading of these numbers got it backwards.
+The 65816 runs at 3.58 MHz, so one 60 Hz frame is about 59,600 CPU cycles, and
+at ~5 cycles for an average instruction that is roughly **10k instructions per
+frame** -- not the "several hundred thousand" a first guess suggests. The
+harness agrees independently: `master=89327400` over 250 frames is 357,309
+master cycles per frame against the 357,955 a real SNES has. So the guest is
+saturated for all 140 frames. The freeze is compute-bound.
+
+Per-page during the freeze (`SC_BANK_PROFILE_PAGE` was added to get this --
+the breakdown used to be nailed to bank 03, which is why the load first looked
+like a simulation problem):
+
+    bank 00                          bank 02
+      00:9100  53.8%  (3318/frame)     02:8b00  35.4%  (2110/frame)
+      00:9300  24.5%  (1511/frame)     02:8900  29.0%  (1730/frame)
+      00:9200  11.2%   (691/frame)     02:9100  13.3%   (793/frame)
+
+`00:9100`/`00:9200` are an LZ-style decompressor (`AND #$e0 ; CMP #$e0`,
+bit-shifting, streaming through `$0000,Y` with a `JSR $926d` refill).
+`02:8900` is the VRAM upload: it writes the DMA channel registers
+(`$4300`-`$4306`) and the VRAM address (`$2116`/`$2117`), fires the transfer
+with `STA $420b`, then calls `JSL $008206`.
+
+`00:8206` is `PHP ; REP #$20 ; LDA #$0000 ; COP #$00 ; PLP ; RTL` -- a COP
+syscall. The handler at `00:8211` dispatches through `JSR ($8223,X)`, and
+entry 0 is the vblank wait at `00:930d`:
+
+    00:930d  SEP #$20
+    00:930f  STZ $b9        ; clear the NMI flag
+    00:9311  INC $c7        ; spin...
+    00:9313  LDA $b9
+    00:9315  BEQ $9311      ; ...until the NMI handler sets it
+    00:9317  RTS
+
+**That wait is NOT where the time goes, and a fix aimed at it does nothing.**
+Instrumenting entries to `00:930f` over 250 frames of the load counts only
+**81 waits in total**, eight of them from the upload sites
+(`02:8839`, `02:887e`, `02:88c3`, `02:8908`, twice each). One-DMA-per-vblank
+would need ~140. `00:9300`'s 1511 opcodes/frame is the spin *inside* those few
+waits, about 12% of the window; the other ~88% is real work.
+
+A hook that collapsed this wait was written, gated on force-blank, and thrown
+away: `INIDISP` reads `0f` throughout, so the display is **on at full
+brightness** for the whole freeze -- the screen is static, not blanked -- and
+the gate never fired. Both halves of that idea were wrong, the premise and the
+gate. What makes the intermediate uploads invisible is the layer/tilemap state,
+not force-blank.
+
+So the 2.4 seconds is authentic: a real SNES spends the same time, because the
+work genuinely costs ~1.8M instructions. The graph screen next door is instant
+because it has almost nothing to decompress.
+
+Making it faster therefore means doing the *work* on the host, the way
+`src/simcity_mapgen.c` replaced the generator -- not adjusting timing. The
+target is the decompressor at `00:9100`/`00:9200` (31% of the window) and
+whatever `02:8b00` is (35%, and still unidentified -- it holds no
+`JSL $008206`, so it is not part of the upload pacing). That is an HLE with the
+same bar the generator had to clear: byte-exact output verified against the
+guest before it is trusted.
+
+### `02:899b` -- the overview map is software-rendered, not loaded
+
+`02:8b00` was 35% of the load window and unidentified. It is the per-cell tile
+classifier, and the routine around it is the whole answer to where the 2.4
+seconds goes.
+
+Getting there needed a new tool. `dis_mx.py --starts` fixes one (m,x) for a
+whole range, and this code changes width every few instructions: read at
+`m1x1`, `02:8b00` disassembles as plausible nonsense (`BRK #$90`, `MVN`,
+`ORA [$e0],Y`) and looks like data. `tools/dis_cov.py` decodes each address at
+the width it *actually ran at*, taken from an `SC_MX_BITMAP` capture, and the
+same bytes become obvious code. The page runs `m0x0` -- 16-bit A and 16-bit
+index. **Two separate wrong readings this session came from assuming a width;
+the bitmap is ground truth and costs one run.**
+
+The outer loop, `02:899b`:
+
+    02:899b  REP #$30
+    02:899d  STZ $0d63          ; cell index
+    02:89a0  STZ $0d61          ; row
+    02:89a3  STZ $0d5f          ; column          <- row loop
+    02:89a6  LDY #$0000                           <- 8-column group
+    02:89a9  PHY                                  <- per-cell, 8 times
+             JSR $8b34          ; classify -> colour byte in A
+    02:89b8  STA $0d57,Y        ; into the 8-byte staging row
+    02:89c1  $0d63 += 2         ; cells are words
+    02:89c8  CPY #$0008
+    02:89cb  BNE $89a9
+    02:89cd  JSR $909d          ; transpose the 8 bytes into $7EA000,X
+    02:89d6  $0d5f += 8
+    02:89dc  CMP #$0078         ; 120 columns
+    02:89df  BCC $89a6
+    02:89e1  INC $0d61
+    02:89e7  CMP #$0064         ; 100 rows
+    02:89ea  BCC $89a3
+    02:89ec  RTS
+
+120 x 100 = **12,000 cells**, 1,500 transposer calls. The classifier's measured
+295,338 opcodes over 12,000 calls is 24.6 each, which is what a call-per-cell
+predicts, so the loop and the profile agree.
+
+`02:8b34` reads the city map and classifies the tile:
+
+    02:8b36  LDX $0d63
+    02:8b39  LDA $7f0200,X      ; the map, at the documented address
+    02:8b3d  AND #$03ff         ; the documented 10-bit tile mask
+    02:8b40  TAX                ; then ~300 instructions of ladder
+
+It is a long comparison ladder over tile ids (`$0030`, `$007f`, `$0354`,
+`$0355`, `$0364`, `$0365`, `$0080`, `$0137`, `$01f4`, `$0245`, `$0257`,
+`$0297`, `$02bb`, `$0356`, `$0366`, `$0376`, `$039a` ...) ending in table
+reads -- `$02948e`, `$02937d`, `$029401`, `$0293f1` -- and it branches on
+`$0d49`, the overlay selector already documented above. Animated tiles (ids
+`$14`-`$25`, when `$3e`==3) add a 4-bit animation counter kept at `$0b3b`,
+which the classifier *increments as a side effect*. Some paths use the
+hardware divider (`$4204`/`$4206` -> `$4214`/`$4216`) with the NMI-masking
+`$b3` -> `$b1` dance, the same expensive shape `02:9150` uses.
+
+`02:909d` is the bitplane transposer. For each of eight output bytes it shifts
+one bit out of each of `$0d57`-`$0d5e` and rotates it into A
+(`LSR $0d57 ; ROL A` x8), then stores to `$7EA000,X`. That is eight pixel rows
+becoming one planar SNES tile. `02:8900` then DMAs `$7E____` to VRAM in 2 KB
+chunks.
+
+So **the overview map is not loaded from anywhere. The game software-renders
+the entire city into a bitmap, one tile at a time, then uploads it.** That is
+what 1.8M instructions buy, and why the graph screen next door is instant.
+
+#### What that means for making it fast
+
+`02:899b` is a clean HLE boundary: one RTS-terminated routine, no arguments.
+Its inputs are the map at `$7F0200`, the overlay selector `$0d49`, `$3e`,
+`$40`, the animation counter `$0b3b`, and four ROM tables. Its outputs are the
+bitmap at `$7EA000`, the loop variables `$0d5f`/`$0d61`/`$0d63`, the staging
+bytes `$0d57`-`$0d5e`, and the updated `$0b3b`. Verification is the same bar
+the map generator had to clear: run the guest routine, snapshot `$7EA000`
+onward, run the HLE from the same state, compare byte for byte.
+
+**Measured ceiling, so the work is not oversold.** The map builder is bank 02's
+share of the window: 46%. The other 48% is bank 00, and that one really is a
+decompressor -- re-read at its true `m1x0` width it is a 3-bit command / 5-bit
+length stream (`AND #$e0` / `AND #$1f`, count in Y, `LDA $0000,Y`, dispatch on
+`$00`/`$20`/`$40`), confirming the first reading rather than overturning it.
+So HLE-ing `02:899b` alone takes the load from ~140 frames to roughly 76 --
+worth having, but it halves the wait rather than removing it. Removing the
+wait means doing the decompressor too.
+
+### `00:90dd` -- the stream decompressor, decompiled and replaced
+
+48% of the overview-map load. `src/simcity_decomp.c` does the same work on the
+host; `SC_DECOMP_FAST` is on by default, `=0` disables it.
+
+The listing came from `tools/dis_cov.py`, and that mattered here: this routine
+runs at `m1x0`, and the first attempt to read it assumed `m1x1`. That happened
+to be close enough to produce a *nearly* right answer, which is worse than an
+obviously wrong one. Use the bitmap.
+
+The format is one command byte `c`:
+
+    c == $FF                  end of stream
+    (c & $E0) == $E0          long form:  cmd = (c << 3) & $E0
+                                          len = (((c & 3) << 8) | next) + 1
+    otherwise                 short form: cmd = c & $E0
+                                          len = (c & $1F) + 1
+
+Long form packs its command into bits 4-2, so the `<< 3` lifts those bits into
+the position the short form's command already occupies and both feed one
+dispatch. Then, for `len` bytes:
+
+| cmd | at | what |
+|---|---|---|
+| `$00` | `00:9150` | copy `len` bytes straight from the source |
+| `$20` | `00:916b` | one byte, repeated |
+| `$40` | `00:9187` | two bytes, alternating |
+| `$60` | `00:91c8` | one byte, incrementing each time |
+| `$80` | `00:91e5` | back-reference, 16-bit offset from the START of the output |
+| `$A0` | `00:91e5` | same, each byte XOR `$FF` |
+| `$C0` | `00:9245` | back-reference, 8-bit offset back from the write position |
+| `$E0` | `00:9245` | same, each byte XOR `$FF` |
+
+Both back-reference forms share one loop at `00:9222` -- `$C0` computes its
+read pointer and branches into `$80`'s body -- and they copy a byte at a time
+*through the output*, so an overlapping run (offset 1, length 40) legitimately
+repeats what it just wrote. Do not turn that into a memmove.
+
+Output goes to `$7E8000,X`, X starting from `$000e`. Source is `DB:Y` from
+`$000b`/`$0009`, and `00:926d` handles running off the end of a bank by setting
+Y back to **`$8000`**, not `$0000` -- LoROM maps only the upper half of each
+bank, so the byte after `$xx:FFFF` is `$(xx+1):8000`.
+
+#### Verification
+
+`SC_DECOMP_VERIFY=1` runs the C into a scratch copy of WRAM, lets the ROM run
+untouched, and compares at the RTS. It changes nothing; it only reports. This
+exists because of what the map generator cost: that generator looked plausible
+and was wrong for a whole session, and what caught it was comparing against the
+guest instead of eyeballing the output.
+
+Result, across two unrelated sessions -- the overview-map load and a cold boot
+through the intro:
+
+    decomp: verified=13 mismatched=0
+    cmd hits  00=6003  20=3705  40=3068  60=19  80=1431  a0=53  c0=2752  e0=0
+    bank-wraps=2
+
+Seven of the eight commands and the bank-crossing path are confirmed byte-exact.
+**`$E0` has never been observed executing**, so it is unverified, and the fast
+path *declines* any stream that uses it -- it decompresses into scratch, checks
+the `$E0` counter, and hands the work back to the ROM rather than trusting code
+no measurement has confirmed. A `declined` count appears in the report if that
+ever fires. It has not yet.
+
+#### Measured effect
+
+Overview-map load, B pressed at frame 60:
+
+| | map appears | frozen for |
+|---|---|---|
+| before | frame 210 | 150 frames (~2.5 s) |
+| after | frame 151 | 91 frames (~1.5 s) |
+
+At frame 161 the accelerated screen differs from the original map by **7 pixels
+out of 57,344**, the residue being animation phase rather than content.
+
+The cold boot is a stronger check, because the intro is a long animated
+sequence. Cross-correlating the two runs frame by frame, the accelerated one is
+**exactly 105 frames ahead throughout, at 0.0% pixel difference at every
+matched point** -- identical content, 1.75 s earlier. `qualify` passes both
+ways with matching `logic_changes` and `nmi_serviced`.
+
+The other half of the load is the software renderer at `02:899b` (46%), still
+interpreted. With both replaced the freeze should be a handful of frames.
+
+#### The decompressor HLE must not skip PCs the game hooks
+
+The first version of the `00:90dd` substitution entered at `90dd` and emulated
+the RTS. It was byte-exact and it broke the Sylt scenario, because this project
+hooks PCs *inside* that routine: `00:90eb` captures the source address into
+`s_sylt_decomp_src`, and `00:9106` -- the `PLB` on the end-of-stream path --
+calls `sylt_write_brief_tilemap()`. Jumping from the entry to the return
+stepped over both, so Sylt's briefing and map swap silently never happened.
+Reported from play; **no automated check could have caught it**, because Sylt is
+this project's own addition and nothing in the qualify harness selects it.
+
+The fix generalises, and it is the rule for every HLE here:
+
+* **Enter after the ROM's own prologue**, at `00:90ee` -- DB set from `$000b`,
+  X from `$000e`, `$0011` cleared, no stream byte consumed yet -- so `90eb`
+  executes natively.
+* **Leave by pointing PC at the ROM's own exit**, `00:9106`, instead of
+  unwinding the stack by hand. The ROM runs its real `PLB`/`PLP`/`RTS`, the
+  stack takes care of itself, and any hooked PC in between still fires.
+
+Before replacing a routine, grep for hooks on PCs inside it. `02:899b` was
+checked this way before any code was written: no bank-02 PC is hooked anywhere.
+
+### `02:8b34` -- memoised rather than transcribed
+
+The classifier is ~300 instructions of ladder with a hardware-divider path.
+It is **not** ported to C. It is a deterministic function of the 10-bit tile id
+plus `$0d49`, `$3e` and `$40`, so there are at most 1024 distinct answers and a
+real city uses ~500. The ROM computes each one once; the result is cached; every
+repeat skips the ladder.
+
+That is exact *by construction* -- the numbers come from the ROM, not from a
+reading of it -- which is a far better bargain than hand-porting a ladder whose
+every branch is a chance to be subtly wrong. The map generator is the standing
+warning: transcribed by hand, plausible, and wrong for a whole session.
+
+Two things are never cached. Tile ids `$14`-`$25` are animated: `02:8b83`
+increments `$0b3b` *as a side effect* and folds it into the table index, so the
+answer legitimately differs call to call, and those always run the ROM. And the
+whole cache is flushed when `$0d49`, `$3e` or `$40` change, since the ladder
+branches on all three.
+
+The skip enters at `8b36`, after the entry `REP #$30`, so the widths are
+already what the ROM would leave; it exits via the real `RTS` at `8b96`. Same
+shape as the decompressor's `9106` exit, for the same reason.
+
+`SC_MAPCLS_VERIFY=1` caches but still runs the ROM and compares every call:
+
+    mapcls: cached=8899 distinct=504 mismatched=0
+
+8,899 predictions, 504 distinct tiles, zero mismatches. The ~2,600 uncounted
+calls are the animated ids, which deliberately run the ROM.
+
+### Where the overview-map load now stands
+
+B pressed at frame 60; the map is drawn in a single frame at the end.
+
+| | map appears | frozen for |
+|---|---|---|
+| stock | frame 210 | 150 frames (~2.5 s) |
+| `00:90dd` on the host | frame 151 | 91 frames (~1.5 s) |
+| plus `02:8b34` memoised | frame 129 | 69 frames (~1.15 s) |
+
+**54% of the wait removed, with both substitutions verified against the guest
+rather than judged by eye.** At frame 131 the result differs from the stock map
+by 204 pixels of 57,344 -- animation phase, not content.
+
+The remaining 69 frames are the parts of `02:899b` still interpreted: the
+12,000-iteration outer loop, the bitplane transposer at `02:909d`, the address
+calculation at `02:9136` (which uses the hardware multiplier with the NMI-mask
+dance, once per 8-cell group), and the animated-tile classifier calls. Removing
+those means replacing the whole loop in C, which needs the classifier in C too
+-- so the memo cache does not compose with it, and it is a bigger job than
+either step so far.

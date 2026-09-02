@@ -36,6 +36,7 @@ add_executable(SimCitySNESRecomp
     src/main.c
     src/simcity_mapview.c
     src/simcity_mapgen.c
+        src/simcity_decomp.c
 )
 
 target_include_directories(SimCitySNESRecomp PRIVATE
@@ -168,6 +169,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_mapgen.c
+        src/simcity_decomp.c
         src/simcity_fiber.c
         # src/simcity_fiberdrive.c -- NOT linked here.
         #
@@ -241,6 +243,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_mapgen.c
+        src/simcity_decomp.c
         src/simcity_fiber.c
         src/simcity_fiberdrive.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
@@ -283,6 +286,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_mapgen.c
+        src/simcity_decomp.c
         src/simcity_fiber.c
         # src/simcity_fiberdrive.c -- NOT linked here.
         #

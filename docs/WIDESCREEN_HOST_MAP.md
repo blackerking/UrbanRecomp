@@ -257,3 +257,114 @@ The wood-margin work is unaffected by this revert and remains in place:
 attempt. With it off the city view is pillarboxed. The wood screens -- main
 menu, map select, name entry, both faxes, View Mode -- are widened properly,
 and the flat stats pages carry their background colour out to both edges.
+
+## The motion correction latched, and only the disaster camera showed it
+
+Reported from play: after a disaster, the extension sits **one tile off in both
+axes**, and *only* when the disaster camera moves the map -- ordinary panning
+with A is fine. "Only after the cam" is the signature of a latch rather than a
+tracking error, and that is what it was.
+
+`adj_x`/`adj_y` correct a one-frame lag between the game's cell scroll
+(`$01bd`/`$01bf`) and the PPU's BG2 register, carried as whole cells and
+clamped to +/-1. The comment asserted "at rest it is zero and the picture is
+untouched". That was not true. Nothing drove the value back to zero: it was
+cleared only by a **jump** of 32 px or more, so any standing discrepancy the
+correction happened to pick up stayed forever.
+
+Measured on `savestate_6.bin` with `SC_COMPOSE_DIAG=1`, the disaster camera pans
+the view and the adjustment latches:
+
+    [compose] f=1    sx=21 sy=61 dsx=0 fx=0 fy=0 adj=0,0
+    [compose] f=13   sx=21 sy=71 dsx=0 fx=0 fy=0 adj=0,-1
+    [compose] f=121  sx=21 sy=71 dsx=0 fx=0 fy=0 adj=0,-1
+    ...
+    [compose] f=349  sx=21 sy=71 dsx=0 fx=0 fy=0 adj=0,-1
+
+350+ frames with `dv`, `dh`, `fx` and `fy` all zero -- nothing moving anywhere
+-- and the correction still subtracting a cell.
+
+The fix restores the documented invariant: after **eight consecutive frames**
+with neither the register nor the cell moving, the adjustment decays to zero.
+Eight because the guest scrolls 2 px at a time and a pan never goes that long
+without moving, so this cannot fire mid-pan and undo the lag correction it
+exists to provide. Verified both ways:
+
+* Panning (A + Right) still engages it -- `adj=-1,0` holds across the whole pan.
+* At rest it is `0,0`, on every one of the save states that reach the map screen.
+
+`SC_HOSTMAP_ADJ=0` disables the correction outright, for isolating it.
+`SC_COMPOSE_DIAG=1` now also prints `sy`, `fy` and the live `adj` pair, which is
+what made the latch visible at all -- it previously printed only the horizontal
+half, and this fault is mostly vertical.
+
+**Not caused by the load accelerations.** Checked before touching anything:
+composing the same frame with `SC_MAPCLS=0 SC_DECOMP_FAST=0` and with both on
+gives the same picture apart from one animation step on a sprite.
+
+A scoring metric was tried first -- comparing the host strip against the guest's
+own centre columns, the method that established the "one row up" constant -- and
+**thrown away rather than trusted**: it reported 1.3% agreement for every
+variant, because the state under test has a dialog covering the centre and
+because the host buffer's ARGB does not compare bit-exactly against the PPU's
+output. A metric that cannot tell right from wrong is worse than none.
+
+## Subtractive colour math: the map screens
+
+Reported from play: on the Maps Screen the extension is not darkened the way it
+is on the advisor pages.
+
+The advisor pages are `cgadsub $60` -- additive, halved -- which the `halve`
+branch already reproduced. The map screens are **`cgadsub $a3`**: subtract, NOT
+halved, operand = subscreen. `halve` never fired, so the guest darkened its own
+city and the extension stayed at full brightness.
+
+The runner does not expose the subscreen, so the math cannot be applied
+directly. It does not need to be. The host strip spans the guest's **own**
+columns, so at the same screen x both draw the same cell and the difference is
+exactly what the math did:
+
+    host  b5 94 73   ->   guest  7b 5a 39
+          181 148 115         123  90  57      difference: 58, 58, 58
+
+A uniform subtrahend, derived rather than guessed. So each frame the compositor
+takes the **mode** of (host - guest) per channel over the overlap and subtracts
+it from the extension.
+
+Three things this gets wrong if done naively, all of them found by measurement:
+
+1. **The mean and the median are useless here.** The overlap also holds HUD, the
+   panel and sprites, where the two legitimately differ. This is the same rock
+   two earlier attempts to fit a ratio hit (36% too dark; a tint on other
+   pages). The mode is the value the majority of city pixels agree on.
+
+2. **Clamped channels lie.** Where the subtraction drove a channel to zero the
+   observed difference is smaller than the real subtrahend: `savestate_0` gives
+   host `00,31,ad` -> guest `00,00,73`, i.e. diffs `0,49,58`, where the truth is
+   58 everywhere and green merely ran out of range. Counting those biases each
+   channel by a different amount -- a colour cast, not a dimming. Only unclamped
+   channels are counted.
+
+3. **The `cgadsub` subtract bit is not sufficient.** `savestate_7` is `$b3`,
+   which has that bit set, and subtracts nothing at all -- guest and host are
+   pixel-identical there. Estimating anyway returned **107**, which would have
+   darkened ordinary gameplay badly. So when a large share of the overlap is
+   identical, the answer is zero regardless of what the register says. Only the
+   frame can settle it.
+
+Derived subtrahend, by state:
+
+| state | cgadsub | result |
+|---|---|---|
+| `savestate_4` (LAND VALUE) | `a3` | 58,58,58 |
+| `savestate_0` (map screen) | `a3` | 58,58,58 |
+| `savestate_7`, `_3`, `_5` (play) | `b3` | 0,0,0 |
+| `savestate_6` (advisor) | `60` | 0,0,0 -- `halve` handles it |
+
+Effect on `savestate_4`: the right extension goes from mean brightness 117.1 to
+68.8 against the guest area's 76.8, which it previously overshot by 50%. The
+guest's own columns are untouched (77.2 -> 76.8; the residue is the left margin
+inside the sample window).
+
+`SC_EXT_SUB=0` disables it. `SC_DIM_PROBE=1` prints the derived subtrahend and
+sample guest/host pixel pairs, which is how all of the above was measured.

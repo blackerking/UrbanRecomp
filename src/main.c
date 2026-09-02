@@ -86,6 +86,7 @@ uint8_t    g_ram[0x20000];
  * a German ROM. It compiled and linked without a word. */
 #include "simcity_mapview.h"
 #include "simcity_mapgen.h"
+#include "simcity_decomp.h"
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -1510,6 +1511,10 @@ static unsigned long s_gen_trigger_hits;
 static int s_bank_profile;
 static unsigned long long s_bank_ops[256];
 static unsigned long long s_b3_page[256];
+/* Which bank the per-page breakdown covers. Default 03 (the simulation),
+ * but the overview-map load lives in banks 00/02, and a breakdown nailed
+ * to one bank cannot see that. SC_BANK_PROFILE_PAGE=02. */
+static int s_bank_page_sel = 3;
 static unsigned long long s_tick_count, s_tick_frames_total, s_tick_ops_total;
 static unsigned long long s_tick_frames_max, s_tick_start_frame, s_tick_start_ops;
 
@@ -2203,6 +2208,227 @@ static void sc_maybe_trigger_disaster(void) {
   s_disaster_bit = -1;
 }
 
+/* ── 00:90dd, the stream decompressor ──────────────────────
+ *
+ * 48% of the overview-map load (docs/ROM_MAP.md). src/simcity_decomp.c does
+ * the same work on the host.
+ *
+ * SC_DECOMP_VERIFY=1 is the important mode, and it exists because the map
+ * generator taught the lesson: that generator was WRONG for a whole session
+ * while looking plausible, and what caught it was comparing against the
+ * guest rather than eyeballing output. So this runs the C into a scratch
+ * copy of WRAM, lets the ROM run as normal, and compares at the RTS. It
+ * changes nothing -- it only reports. Only once it reports clean is
+ * SC_DECOMP_FAST worth turning on.
+ */
+static uint8_t sc_decomp_bus_read(void *ctx, uint32_t addr) {
+  (void)ctx;
+  return (uint8_t)snes_read(g_snes, addr);
+}
+
+static uint8_t *s_dec_ref;             /* scratch WRAM image for verify */
+static ScDecompResult s_dec_exp;       /* what the C predicted */
+static int      s_dec_pending;         /* a call is in flight */
+static int      s_dec_armed;           /* 00:90dd seen, 00:90ee not yet */
+static uint16_t s_dec_start_x;
+static unsigned long s_dec_ok, s_dec_mismatch, s_dec_declined, s_dec_fast;
+
+static int sc_decomp_mode(void) {
+  static int mode = -1;                /* 0 off, 1 verify, 2 replace */
+  if (mode < 0) {
+    const char *f = getenv("SC_DECOMP_FAST");
+    const char *v = getenv("SC_DECOMP_VERIFY");
+    /* On by default, like SC_MAPGEN_FAST, and for the same reason: the
+     * substitution is verified byte-exact against the guest rather than
+     * judged by eye. SC_DECOMP_FAST=0 turns it off; SC_DECOMP_VERIFY=1
+     * re-runs the comparison instead of replacing anything. */
+    if (v && *v && *v != '0')   mode = 1;
+    else if (f && *f)           mode = (*f != '0') ? 2 : 0;
+    else                        mode = 2;
+  }
+  return mode;
+}
+
+static void sc_decomp_hook(Interp816 *cpu) {
+  const int mode = sc_decomp_mode();
+  if (!mode) return;
+
+  /* Enter at 00:90ee, not 00:90dd, and leave via 00:9106 rather than by
+   * emulating the RTS. Both details are load-bearing: the Sylt scenario
+   * hack hooks PCs INSIDE this routine -- 00:90eb to capture the source
+   * address, and 00:9106 to write its briefing tilemap. Skipping 90dd to
+   * the return jumped straight over both, and Sylt vanished from the
+   * scenario list. Reported from play; nothing in the qualify harness
+   * would have caught it, because Sylt is this project's own addition.
+   *
+   * 00:90ee is the first instruction after setup (DB set from $000b, X
+   * from $000e, $0011 cleared) and before any stream byte is consumed, so
+   * the ROM does its own prologue and 90eb fires naturally. Setting PC to
+   * 9106 lets the ROM run its real PLB/PLP/RTS, which also means the stack
+   * unwinds itself instead of being unwound by hand.
+   *
+   * 90ee is also the loop-back target, so the arm flag keeps a declined
+   * call from re-entering this on every command the ROM then decodes. */
+  if (cpu->pc == 0x90dd) { s_dec_armed = 1; return; }
+
+  if (cpu->pc == 0x90ee) {
+    if (!s_dec_armed) return;
+    s_dec_armed = 0;
+    const uint8_t  sb = g_ram[0x0b];
+    const uint16_t sy = (uint16_t)(g_ram[0x09] | (g_ram[0x0a] << 8));
+    const uint16_t dx = (uint16_t)(g_ram[0x0e] | (g_ram[0x0f] << 8));
+
+    if (mode == 2) {
+      /* Decompress into scratch first, not straight into WRAM. That buys
+       * the ability to BACK OUT: $e0 is the one command no capture has
+       * ever exercised (see the cmd-hit counters), so if a stream uses it
+       * this hands the work back to the ROM rather than trusting code no
+       * measurement has ever confirmed. Everything else here is verified
+       * byte-exact against the guest across a load and a cold boot. */
+      if (!s_dec_ref) s_dec_ref = (uint8_t *)malloc(0x20000);
+      if (!s_dec_ref) return;
+      memcpy(s_dec_ref, g_ram, 0x20000);
+      const unsigned long e0_before = g_sc_decomp_cmd_hits[7];
+      ScDecompResult r;
+      sc_decomp_run(s_dec_ref, sc_decomp_bus_read, NULL, sb, sy, dx, &r);
+      if (r.bad || g_sc_decomp_cmd_hits[7] != e0_before) {
+        g_sc_decomp_cmd_hits[7] = e0_before;   /* keep the tally honest */
+        s_dec_declined++;
+        return;                        /* leave it to the ROM */
+      }
+      for (uint32_t i = dx; i != (uint32_t)r.x; i++)
+        g_ram[0x8000 + (uint16_t)i] = s_dec_ref[0x8000 + (uint16_t)i];
+      g_ram[0x09] = (uint8_t)r.src_y; g_ram[0x0a] = (uint8_t)(r.src_y >> 8);
+      g_ram[0x0c] = (uint8_t)r.cd;    g_ram[0x0d] = (uint8_t)(r.cd >> 8);
+      g_ram[0x10] = (uint8_t)r.flag;  g_ram[0x11] = 0;
+      cpu->x = r.x;
+      cpu->pc = 0x9106;   /* the ROM's own PLB/PLP/RTS, and Sylt's hook */
+      s_dec_fast++;
+      return;
+    }
+
+    if (!s_dec_ref) s_dec_ref = (uint8_t *)malloc(0x20000);
+    if (!s_dec_ref) return;
+    memcpy(s_dec_ref, g_ram, 0x20000);
+    sc_decomp_run(s_dec_ref, sc_decomp_bus_read, NULL, sb, sy, dx, &s_dec_exp);
+    s_dec_start_x = dx;
+    s_dec_pending = 1;
+    return;
+  }
+
+  /* 00:9108 -- the RTS. The guest has finished; compare. */
+  if (cpu->pc == 0x9108 && s_dec_pending) {
+    s_dec_pending = 0;
+    unsigned long diff = 0;
+    const uint16_t got_x = cpu->x;
+    for (uint32_t i = s_dec_start_x; i != (uint32_t)s_dec_exp.x; i++)
+      if (g_ram[0x8000 + (uint16_t)i] != s_dec_ref[0x8000 + (uint16_t)i]) diff++;
+    const uint16_t got_y = (uint16_t)(g_ram[0x09] | (g_ram[0x0a] << 8));
+    if (diff || got_x != s_dec_exp.x || got_y != s_dec_exp.src_y) {
+      s_dec_mismatch++;
+      if (s_dec_mismatch <= 8)
+        fprintf(stderr, "[decomp] MISMATCH src=%02x:%04x dest=%04x  "
+                        "bytes %u cmds %d  x %04x/%04x  y %04x/%04x  "
+                        "%lu differing\n",
+                s_dec_exp.src_bank, s_dec_exp.src_y, s_dec_start_x,
+                s_dec_exp.bytes_out, s_dec_exp.commands,
+                got_x, s_dec_exp.x, got_y, s_dec_exp.src_y, diff);
+    } else {
+      s_dec_ok++;
+    }
+  }
+}
+
+/* ── 02:8b34, the overview-map cell classifier ───────────────
+ *
+ * 02:899b software-renders the whole city into a bitmap -- 120x100 = 12000
+ * cells, one classifier call each, 46% of the load window. The classifier is
+ * ~300 instructions of comparison ladder over tile ids, with a hardware
+ * divider path and table reads (docs/ROM_MAP.md).
+ *
+ * It is NOT transcribed here, deliberately. It is memoised: the value is a
+ * function of the 10-bit tile id plus a few globals, so there are at most
+ * 1024 distinct answers and a real city uses far fewer. Letting the ROM
+ * compute each one once and caching it is exact BY CONSTRUCTION -- the
+ * numbers come from the ROM, not from my reading of it -- which is a much
+ * better bargain than hand-porting a ladder whose every branch is a chance
+ * to be subtly wrong. The map generator is the cautionary tale: transcribed
+ * by hand, plausible-looking, and wrong for a session.
+ *
+ * Two things are deliberately NOT cached:
+ *
+ *   - tile ids $14-$25, the animated ones. 02:8b83 increments the animation
+ *     counter $0b3b as a SIDE EFFECT and folds it into the table index, so
+ *     the answer legitimately differs call to call. Those run the ROM.
+ *   - anything at all, once $0d49 (the overlay selector), $3e or $40 change.
+ *     The ladder branches on all three, so they are part of the key; the
+ *     cache is flushed rather than keyed, since they change rarely.
+ *
+ * The skip enters at 8b36 (after the entry REP #$30, so the widths are
+ * already what the ROM would leave) and exits by pointing PC at the real RTS
+ * at 8b96 rather than unwinding the stack by hand -- the same shape the
+ * decompressor uses at 00:9106, and for the same reason: the ROM does its own
+ * return, and any PC the game hooks in between still executes.
+ *
+ * SC_MAPCLS=0 disables. SC_MAPCLS_VERIFY=1 caches but still runs the ROM and
+ * compares, which is how the cache was shown to be exact.
+ */
+static uint16_t s_cls_cache[1024];
+static uint8_t  s_cls_valid[1024];
+static uint16_t s_cls_tile;            /* tile id of the call in flight */
+static int      s_cls_pending;         /* 1 = fill, 2 = verify */
+static unsigned s_cls_state = 0xffffffffu;
+static unsigned long s_cls_hits, s_cls_fills, s_cls_mismatch;
+
+static void sc_classifier_hook(Interp816 *cpu) {
+  static int mode = -1;                /* 0 off, 1 verify, 2 replace */
+  if (mode < 0) {
+    const char *e = getenv("SC_MAPCLS");
+    const char *v = getenv("SC_MAPCLS_VERIFY");
+    if (v && *v && *v != '0')  mode = 1;
+    else if (e && *e)          mode = (*e != '0') ? 2 : 0;
+    else                       mode = 2;
+  }
+  if (!mode) return;
+
+  const unsigned st = (unsigned)g_ram[0x0d49] |
+                      ((unsigned)g_ram[0x3e] << 8) |
+                      ((unsigned)g_ram[0x3f] << 12) |
+                      ((unsigned)g_ram[0x40] << 16) |
+                      ((unsigned)g_ram[0x41] << 20);
+  if (st != s_cls_state) {
+    memset(s_cls_valid, 0, sizeof s_cls_valid);
+    s_cls_state = st;
+  }
+
+  if (cpu->pc == 0x8b36) {
+    const uint16_t idx  = (uint16_t)(g_ram[0x0d63] | (g_ram[0x0d64] << 8));
+    const uint16_t cell = (uint16_t)(g_ram[0x10200 + idx] |
+                                     (g_ram[0x10201 + idx] << 8));
+    const uint16_t tile = (uint16_t)(cell & 0x03ff);
+    s_cls_tile = tile;
+    s_cls_pending = 0;
+    if (tile >= 0x14 && tile <= 0x25) return;   /* animated: $0b3b moves */
+    if (!s_cls_valid[tile]) { s_cls_pending = 1; return; }
+    if (mode == 1)          { s_cls_pending = 2; return; }
+    cpu->a  = s_cls_cache[tile];
+    cpu->pc = 0x8b96;                  /* the ROM's own RTS */
+    s_cls_hits++;
+    return;
+  }
+
+  /* 02:89b4 -- the ROM has returned and A holds the colour byte. */
+  if (s_cls_pending == 1) {
+    s_cls_cache[s_cls_tile] = (uint16_t)cpu->a;
+    s_cls_valid[s_cls_tile] = 1;
+    s_cls_fills++;
+  } else if (s_cls_pending == 2) {
+    if ((uint16_t)cpu->a != s_cls_cache[s_cls_tile]) s_cls_mismatch++;
+    else s_cls_hits++;
+  }
+  s_cls_pending = 0;
+}
+
 static bool run_one_frame(void) {
 #ifdef SIMCITY_AOT_TIER
   if (s_fiber_mode) return run_one_frame_fiber();
@@ -2226,7 +2452,7 @@ static bool run_one_frame(void) {
      * first, not assumed. */
     if (s_bank_profile) {
       s_bank_ops[cpu->k]++;
-      if (cpu->k == 0x03) s_b3_page[cpu->pc >> 8]++;
+      if (cpu->k == s_bank_page_sel) s_b3_page[cpu->pc >> 8]++;
       if (cpu->k == 0x03 && cpu->pc == 0x8000) {
         s_tick_count++;
         s_tick_start_frame = s_frames;
@@ -2256,6 +2482,11 @@ static bool run_one_frame(void) {
      * pair bounds the generation exactly. The decompressor at 00:90dd keeps a
      * plain holdoff -- it has no equivalent end marker and is short. */
     if (cpu->k == 0x03 && cpu->pc == 0xd862) s_gen_trigger_hits++;
+    if (cpu->k == 0x02 && (cpu->pc == 0x8b36 || cpu->pc == 0x89b4))
+      sc_classifier_hook(cpu);
+    if (cpu->k == 0x00 && (cpu->pc == 0x90dd || cpu->pc == 0x90ee ||
+                           cpu->pc == 0x9108))
+      sc_decomp_hook(cpu);
 
     /* ── Run the map generator natively, on the INTERPRETER path ───────────
      *
@@ -3572,6 +3803,14 @@ static int s_seam_dir_x = 1, s_seam_dir_y = 1, s_seam_idle_x, s_seam_idle_y;
  * which is why it reads as a defect now. */
 static int s_seam_lead_col = -1;
 static bool s_seam_lead_dirty;
+static int s_hostmap_adj_x, s_hostmap_adj_y;  /* mirrors, for SC_COMPOSE_DIAG */
+static inline uint32_t sc_ext_sub(uint32_t c, int sr, int sg, int sb) {
+  if (!(sr | sg | sb)) return c;
+  int r = (int)((c >> 16) & 0xff) - sr; if (r < 0) r = 0;
+  int g = (int)((c >> 8) & 0xff) - sg;  if (g < 0) g = 0;
+  int b = (int)(c & 0xff) - sb;         if (b < 0) b = 0;
+  return (c & 0xff000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
 static int s_seam_lead_cover;      /* right edge  */
 static int s_seam_lead_left;       /* left edge   */
 static int s_seam_lead_top;        /* top edge    */
@@ -3880,6 +4119,7 @@ static void host_map_compose(void) {
    * The adjustment cancels itself once the cell catches up, so at rest it is
    * zero and the picture is untouched. */
   { static int prev_sy, prev_sx, prev_fy, prev_fx, prev_v, prev_h_, have;
+    static int still;
     static int adj_x, adj_y;
     const int vpix = g_ppu->vScroll[1] & 0xff, hpix = g_ppu->hScroll[1] & 0xff;
     if (have) {
@@ -3898,14 +4138,40 @@ static void host_map_compose(void) {
          * right off its anchor (85662 pixels adrift on one save state). */
         if (adj_y > 1) adj_y = 1; else if (adj_y < -1) adj_y = -1;
         if (adj_x > 1) adj_x = 1; else if (adj_x < -1) adj_x = -1;
+        /* Return to zero once the map genuinely stops.
+         *
+         * The comment above says "at rest it is zero", and that was simply
+         * not true: nothing drove the adjustment back. It was cleared only
+         * by a JUMP (>=32 px), so any standing discrepancy the correction
+         * picked up stayed forever. Measured on savestate_6: the disaster
+         * camera pans the view (sy 61 -> 71), adj_y latches to -1, and stays
+         * -1 for 350+ frames with dv, dh, fx and fy all zero. Reported from
+         * play as the extension sitting one tile off after the disaster cam
+         * moves the map -- and ONLY after that, which is exactly the
+         * signature of a latch rather than a tracking error.
+         *
+         * The correction exists for a ONE-FRAME lag between the cell and the
+         * register while scrolling. With nothing moving there is no lag to
+         * correct, so it must decay. Eight still frames is the threshold
+         * because the guest scrolls 2 px at a time and a pan never goes that
+         * long without moving -- so this cannot fire mid-pan and undo the
+         * lag fix it is there to provide. */
+        if (dv == 0 && dh == 0 && sx == prev_sx && sy == prev_sy) {
+          if (++still >= 8) { adj_x = 0; adj_y = 0; }
+        } else {
+          still = 0;
+        }
       } else {
         adj_x = adj_y = 0;
       }
     }
+    s_hostmap_adj_x = adj_x; s_hostmap_adj_y = adj_y;
     prev_sy = sy; prev_sx = sx; prev_fy = fy; prev_fx = fx;
     prev_v = vpix; prev_h_ = hpix; have = 1;
-    sx += adj_x;
-    sy += adj_y; }
+    { static int use = -1;
+      if (use < 0) { const char *e = getenv("SC_HOSTMAP_ADJ");
+                     use = (e && *e) ? (*e != '0') : 1; }
+      if (use) { sx += adj_x; sy += adj_y; } } }
 
   /* Dim the extension the same way the guest dims the city behind an overlay.
    *
@@ -3919,9 +4185,115 @@ static void host_map_compose(void) {
    * Only this exact shape. Subtractive math against the subscreen cannot be
    * reproduced here, because the value being subtracted is the subscreen and
    * this code does not have it. */
+  /* Subtractive colour math, the shape the map screens use.
+   *
+   * The advisor pages are cgadsub $60 -- additive, halved -- and `halve`
+   * below reproduces them. The LAND VALUE / map screens are cgadsub $a3:
+   * SUBTRACT, not halved, operand = subscreen. `halve` does not fire, so the
+   * extension stayed at full brightness while the guest darkened its own
+   * city. Reported from play as the map screen's right side not being
+   * darker the way the advisor pages are.
+   *
+   * The subscreen is not exposed by the runner, so it cannot be applied
+   * directly. It does not have to be: the host strip spans the guest's OWN
+   * columns, so at the same screen x both draw the same cell, and the
+   * difference IS what the math did. Measured on savestate_4 at a clean
+   * city-vs-city sample: host b5,94,73 -> guest 7b,5a,39, a difference of
+   * exactly 58 on all three channels. A uniform subtrahend.
+   *
+   * So derive it per frame, per channel, as the MODE of (host - guest) over
+   * the overlap. The mode matters: the overlap also contains HUD, the panel
+   * and sprites, where the two legitimately differ, and a mean or median is
+   * dragged around by them -- which is what sank two earlier attempts to fit
+   * a ratio off the frame (36%% too dark, and a tint on other pages). The
+   * modal offset is the value the majority of city pixels agree on, and it
+   * is zero on every screen that does no subtraction, so this is inert
+   * elsewhere -- in normal gameplay guest and host are pixel-identical.
+   *
+   * SC_EXT_SUB=0 disables it. */
+  int dim_r = 0, dim_g = 0, dim_b = 0;
+  { static int on = -1;
+    if (on < 0) { const char *e = getenv("SC_EXT_SUB");
+                  on = (e && *e) ? (*e != '0') : 1; }
+    if (on && PPU_mathEnabled(g_ppu) && PPU_subtractColor(g_ppu) &&
+        PPU_addSubscreen(g_ppu)) {
+      static int hr[256], hg[256], hb[256];
+      memset(hr, 0, sizeof hr); memset(hg, 0, sizeof hg); memset(hb, 0, sizeof hb);
+      long n = 0, eq = 0;
+      for (int y = 0; y + 1 + fy < kVideoHeight; y += 2) {
+        const uint32_t *g =
+            (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
+        const uint32_t *s = (const uint32_t *)(
+            s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
+        for (int x = 0; x < kVideoWidth; x += 2) {
+          const uint32_t gc = g[x + s_ws_extra] & 0xffffffu;
+          const uint32_t sc = s[x + fx + 8] & 0xffffffu;
+          if (!sc) continue;                  /* nothing drawn there */
+          if (gc == sc) { eq++; continue; }   /* untouched by the math */
+          const int dr = (int)((sc >> 16) & 0xff) - (int)((gc >> 16) & 0xff);
+          const int dg = (int)((sc >> 8) & 0xff) - (int)((gc >> 8) & 0xff);
+          const int db = (int)(sc & 0xff) - (int)(gc & 0xff);
+          if (dr < 0 || dg < 0 || db < 0) continue;   /* not a subtraction */
+          /* Skip CLAMPED channels. Where the subtraction drove a channel to
+           * zero the observed difference is smaller than the real subtrahend
+           * -- savestate_0 shows host 00,31,ad -> guest 00,00,73, i.e. diffs
+           * 0,49,58 where the true value is 58 on all three and green simply
+           * ran out of range. Counting those biases each channel downward by
+           * a different amount, which is a colour cast rather than a dimming.
+           * Only an unclamped channel witnesses the true subtrahend. */
+          if ((gc >> 16) & 0xff) { hr[dr]++; n++; }
+          if ((gc >> 8) & 0xff)  { hg[dg]++; }
+          if (gc & 0xff)         { hb[db]++; }
+        }
+      }
+      if (n > 200) {
+        int br = 0, bg = 0, bb = 0;
+        for (int i = 1; i < 256; i++) {
+          if (hr[i] > hr[br]) br = i;
+          if (hg[i] > hg[bg]) bg = i;
+          if (hb[i] > hb[bb]) bb = i;
+        }
+        /* Only accept a subtrahend the majority actually agrees on. Below
+         * that the frame is not doing a uniform subtraction and guessing
+         * would tint it. */
+        /* A channel with too few unclamped witnesses cannot be estimated;
+         * fall back to whichever channel does have agreement, since the
+         * subtrahend measured here is uniform across channels. */
+        /* If a large share of the overlap is IDENTICAL, the math is not
+         * subtracting anything and the differing pixels are HUD, sprites and
+         * seam noise. Their modal difference is meaningless -- measured, it
+         * comes out at 107 on savestate_7, where the probe shows guest and
+         * host pixel-identical and the true answer is zero. cgadsub having
+         * the subtract bit set is NOT sufficient: savestate_7 is $b3 and
+         * subtracts nothing. Only the frame can say. */
+        if (eq * 4 > n) { dim_r = dim_g = dim_b = 0; }
+        else {
+        long tr = 0, tg = 0, tb = 0;
+        for (int i = 0; i < 256; i++) { tr += hr[i]; tg += hg[i]; tb += hb[i]; }
+        const int ok_r = tr > 200 && hr[br] * 4 > tr;
+        const int ok_g = tg > 200 && hg[bg] * 4 > tg;
+        const int ok_b = tb > 200 && hb[bb] * 4 > tb;
+        if (ok_r || ok_g || ok_b) {
+          const int best = ok_b ? bb : (ok_g ? bg : br);
+          dim_r = ok_r ? br : best;
+          dim_g = ok_g ? bg : best;
+          dim_b = ok_b ? bb : best;
+        }
+        }
+      }
+    } }
   const bool halve = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
                      PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
                      (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  { static int md = -1;
+    if (md < 0) { const char *e = getenv("SC_MATH_DIAG"); md = (e && *e) ? 1 : 0; }
+    if (md) { static int nf; if (++nf % 40 == 0)
+      fprintf(stderr, "[math] halve=%d en=%d half=%d addsub=%d sub=%d cgadsub=%02x cgwsel=%02x bd=%04x\n",
+              (int)halve, (int)(PPU_mathEnabled(g_ppu) != 0),
+              (int)(PPU_halfColor(g_ppu) != 0),
+              (int)(PPU_addSubscreen(g_ppu) != 0),
+              (int)(PPU_subtractColor(g_ppu) != 0),
+              g_ppu->cgadsub, g_ppu->cgwsel, g_ppu->cgram[0]); } }
   /* Cover the guest's leading sliver while it is showing wrapped content.
    * The host render already spans the guest's own columns, so this is just
    * a matter of where the strip starts. Zero on every frame the guest's own
@@ -3961,8 +4333,9 @@ static void host_map_compose(void) {
     if (cd < 0) { const char *e = getenv("SC_COMPOSE_DIAG"); cd = (e && *e) ? 1 : 0; }
     if (cd) { static int nf; static int psx = -9999;
       nf++;
-      fprintf(stderr, "[compose] f=%d sx=%d dsx=%d fx=%d origin=%d\n",
-              nf, sx, psx == -9999 ? 0 : sx - psx, fx, sx * 8 + fx);
+      fprintf(stderr, "[compose] f=%d sx=%d sy=%d dsx=%d fx=%d fy=%d adj=%d,%d\n",
+              nf, sx, sy, psx == -9999 ? 0 : sx - psx, fx, fy,
+              s_hostmap_adj_x, s_hostmap_adj_y);
       psx = sx; } }
   const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
   if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
@@ -3970,6 +4343,25 @@ static void host_map_compose(void) {
     return;
   }
 
+  /* SC_DIM_PROBE: the host strip spans the guest's OWN columns, so at the
+   * same screen x the two draw the same city cell. Any difference is what
+   * the guest's colour math did to it -- measured, not inferred. */
+  { static int dp = -1;
+    if (dp < 0) { const char *e = getenv("SC_DIM_PROBE"); dp = (e && *e) ? 1 : 0; }
+    if (dp) { static int nf; if (++nf % 60 == 0) {
+      fprintf(stderr, "[dim] halve=%d cgadsub=%02x sub=%d,%d,%d  ",
+              (int)halve, g_ppu->cgadsub, dim_r, dim_g, dim_b);
+      for (int k = 0; k < 4; k++) {
+        const int yy = 190 + k * 8, xx = 150 + k * 40;
+        const uint32_t *g =
+            (const uint32_t *)(s_guest_pixels + (size_t)yy * s_video_pitch);
+        const uint32_t *s = (const uint32_t *)(
+            s_hostmap_px + (size_t)(yy + 1 + fy) * s_hostmap_pitch);
+        fprintf(stderr, "x%d g=%06x h=%06x  ", xx,
+                g[xx + s_ws_extra] & 0xffffff, s[xx + fx + 8] & 0xffffff);
+      }
+      fputc(10, stderr);
+    } } }
   for (int y = 0; y < kVideoHeight; y++) {
     uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
     const uint32_t *gst =
@@ -3978,21 +4370,21 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
     if (y < lead_t)
-      for (int x = 0; x < kVideoWidth; x++) dst[x] = src[x + fx + 8];
+      for (int x = 0; x < kVideoWidth; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     else if (halve)
       for (int x = 0; x < left_cover; x++) {
         const uint32_t c = src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = 0; x < left_cover; x++) dst[x] = src[x + fx + 8];
+      for (int x = 0; x < left_cover; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     if (halve)
       for (int x = x_start; x < s_video_w; x++) {
         const uint32_t c = src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = x_start; x < s_video_w; x++) dst[x] = src[x + fx + 8];
+      for (int x = x_start; x < s_video_w; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
   }
 }
 
@@ -5709,6 +6101,21 @@ static int run_qualification(uint64_t frames) {
     fprintf(stderr, "\n"); }
 #endif
   fprintf(stderr, "gen: 03:d862 seeding hits=%lu\n", s_gen_trigger_hits);
+  if (s_dec_fast || s_dec_declined)
+    fprintf(stderr, "decomp: replaced=%lu declined=%lu\n",
+            s_dec_fast, s_dec_declined);
+  if (s_cls_hits || s_cls_fills || s_cls_mismatch)
+    fprintf(stderr, "mapcls: cached=%lu distinct=%lu mismatched=%lu\n",
+            s_cls_hits, s_cls_fills, s_cls_mismatch);
+  if (s_dec_ok || s_dec_mismatch)
+    fprintf(stderr, "decomp: verified=%lu mismatched=%lu\n",
+            s_dec_ok, s_dec_mismatch);
+  if (s_dec_ok || s_dec_mismatch || s_dec_fast) {
+    fprintf(stderr, "decomp: cmd hits");
+    for (int i = 0; i < 8; i++)
+      fprintf(stderr, " %02x=%lu", i << 5, g_sc_decomp_cmd_hits[i]);
+    fprintf(stderr, "  bank-wraps=%lu\n", g_sc_decomp_bank_wraps);
+  }
   if (s_bank_profile) {
     unsigned long long tot = 0;
     for (int b = 0; b < 256; b++) tot += s_bank_ops[b];
@@ -5717,15 +6124,15 @@ static int run_qualification(uint64_t frames) {
       if (s_bank_ops[b] * 200 > tot)
         fprintf(stderr, "  bank %02x: %12llu  %5.1f%%\n", b,
                 s_bank_ops[b], 100.0 * (double)s_bank_ops[b] / (double)tot);
-    { unsigned long long b3 = s_bank_ops[3];
-      fprintf(stderr, "  bank-03 hot pages:\n");
+    { unsigned long long b3 = s_bank_ops[s_bank_page_sel];
+      fprintf(stderr, "  bank-%02x hot pages:\n", s_bank_page_sel);
       for (int k = 0; k < 10; k++) {
         int best = -1; unsigned long long bv = 0;
         for (int i = 0; i < 256; i++)
           if (s_b3_page[i] > bv) { bv = s_b3_page[i]; best = i; }
         if (best < 0 || !bv) break;
-        fprintf(stderr, "    03:%02x00-%02xff  %12llu  %5.1f%%\n",
-                best, best, bv, b3 ? 100.0*(double)bv/(double)b3 : 0.0);
+        fprintf(stderr, "    %02x:%02x00-%02xff  %12llu  %5.1f%%\n",
+                s_bank_page_sel, best, best, bv, b3 ? 100.0*(double)bv/(double)b3 : 0.0);
         s_b3_page[best] = 0;
       } }
     if (s_tick_count)
@@ -6334,6 +6741,8 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_NEW_RENDERER");
     if (e && *e) { s_force_legacy = (*e == '0'); if (!s_force_legacy) s_render_flags = 1; } }
   { const char *e = getenv("SC_BANK_PROFILE"); if (e && *e) s_bank_profile = (*e != '0'); }
+  { const char *e = getenv("SC_BANK_PROFILE_PAGE");
+    if (e && *e) s_bank_page_sel = (int)strtol(e, NULL, 16) & 0xff; }
   { const char *e = getenv("SC_WS_CLAMP");
     if (e && *e) { s_ws_clamp = (uint8_t)strtol(e, NULL, 0); s_ws_clamp_auto = false; } }
   { const char *e = getenv("SC_HOST_HDMA");
