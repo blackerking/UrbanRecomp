@@ -1349,6 +1349,17 @@ static void handle_pos_stuff(void) {
           }
         }
       }
+      /* SC_HDMA_DIAG=1: which HDMA channels are live, per frame. The merge
+       * moved HDMA onto the LLE beam timeline (upstream b8ef573), so when a
+       * screen glitches one frame in four the first question is whether HDMA
+       * is involved at all. */
+      if (getenv("SC_HDMA_DIAG") && g_snes && g_snes->dma) {
+        unsigned mask = 0;
+        for (int i = 0; i < 8; i++)
+          if (g_snes->dma->channel[i].hdmaActive) mask |= (1u << i);
+        fprintf(stderr, "[hdma] f=%llu active=%02x\n",
+                (unsigned long long)s_frames, mask);
+      }
       if (getenv("SC_PPU_LAYOUT")) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {
