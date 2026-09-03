@@ -421,12 +421,22 @@ assumption: with the advice up `cgadsub` reads **60** (additive, halved) and
 with it closed **b3**. So the same test that dims the extension now also decides
 where to put the guest.
 
-The subtlety is that shifting the guest right by `gx` means the map either side
-has to shift with it, or the picture tears at the join. Rather than offset every
-sample, the **render** starts `gx/8` cells further left, which leaves src index
-`x` meaning dst index `x` exactly as before -- so the sampling code is
-untouched. `gx` is a multiple of 8 for that reason, and the host render already
-spans enough columns (59 cells = 472 px against a 448 px window plus offsets).
+**Only the guest moves.** The first version also started the render `gx/8`
+cells further left, so the map stayed continuous with the shifted guest. That is
+geometrically right and wrong to look at: the page covers the guest completely,
+so the only thing on screen that actually moved was the map in the margins --
+reported from play as the background map shifting when the advice opens and
+flipping back when it closes.
+
+The game does not scroll when a page opens, so neither should the picture. The
+render origin and the sampling both stay put and the guest slides over the top.
+Measured on the right margin, which the page never covers: after the fix it
+matches the unmoved map (allowing for the halving) on **100.0%** of samples,
+against **48.1%** with the origin shifted.
+
+What that leaves is a few px of guest map at the page border discontinuous with
+the margin. The page border covers it, and it is a far smaller lie than moving
+the whole map.
 
 Verified: the advice page is centred with dimmed map on both sides, and a
 normal city frame is **pixel-identical** to before the change.

@@ -4269,11 +4269,18 @@ static void host_map_compose(void) {
    * reads 60, and with it closed b3. So the same test that dims the
    * extension also decides where to put the guest.
    *
-   * Shifting the guest right by gx means the map either side must shift with
-   * it, or the picture tears at the join. Rather than offset every sample,
-   * the RENDER starts gx/8 cells further left, which leaves src index x
-   * meaning dst index x exactly as before -- so the sampling below is
-   * untouched. gx is a multiple of 8 for that reason.
+   * ONLY the guest moves. The first version also started the render gx/8
+   * cells further left, so the map stayed continuous with the shifted
+   * guest -- geometrically right, and wrong to look at: the page covers
+   * the guest completely, so the only thing on screen that MOVED was the
+   * map in the margins. Reported from play as the background map shifting
+   * when the advice opens and flipping back when it closes.
+   *
+   * The game does not scroll when a page opens, so neither should the
+   * picture. The render origin and the sampling both stay put and the
+   * guest slides over the top. That leaves the few px of guest map at the
+   * page border discontinuous with the margin, which the page border
+   * covers, and which is a far smaller lie than moving the whole map.
    *
    * SC_WS_CENTRE_ADVISOR=0 restores the left-aligned page. */
   const bool advisor_page = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
@@ -4455,8 +4462,7 @@ static void host_map_compose(void) {
               s_hostmap_adj_x, s_hostmap_adj_y);
       psx = sx; } }
   const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
-  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows,
-                        sx - 1 - gx / 8, sy)) {
+  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
     return;
   }
