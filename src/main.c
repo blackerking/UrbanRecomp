@@ -4256,41 +4256,33 @@ static void host_map_compose(void) {
    * Only this exact shape. Subtractive math against the subscreen cannot be
    * reproduced here, because the value being subtracted is the subscreen and
    * this code does not have it. */
-  /* Centre the guest picture on advisor pages.
+  /* Advisor pages are LEFT-ALIGNED, like every other screen.
    *
-   * The compositor normally lands the guest's 256 columns at dst[0..255] and
-   * fills the rest with map, so the extra width is all on the right. For the
-   * city that is the point -- more map ahead of you. For an advisor page it
-   * is not: the page IS the screen, and it sits hard against the left edge
-   * with map beside it. Reported from play as wanting the advice centred.
+   * Centring them was tried and backed out. Moving the page means moving
+   * the guest's whole 256 columns, because at this point panel and city
+   * are already one picture -- so the toolbar left the left edge and the
+   * margins changed with it. Reported from play, twice: first as the map
+   * shifting, then as the widescreen itself shifting.
    *
-   * `halve` already identifies these pages exactly -- cgadsub $60, additive
-   * and halved -- and it is measured, not assumed: with the advice up this
-   * reads 60, and with it closed b3. So the same test that dims the
-   * extension also decides where to put the guest.
+   * The right fix is to composite the page from its OWN layer, and the
+   * layer state says that is exactly how the game draws it: main = $14
+   * (BG3 + OBJ, the page) and sub = $03 (BG1 + BG2, the city). The runner
+   * even has the machinery -- PpuSetOverlayCapture accepted the capture,
+   * armed bg3=1 obj=1.
    *
-   * ONLY the guest moves. The first version also started the render gx/8
-   * cells further left, so the map stayed continuous with the shifted
-   * guest -- geometrically right, and wrong to look at: the page covers
-   * the guest completely, so the only thing on screen that MOVED was the
-   * map in the margins. Reported from play as the background map shifting
-   * when the advice opens and flipping back when it closes.
+   * It exports nothing, and cannot. renderFlags reads 8 (NoSpriteLimits);
+   * bit 0, NewRenderer, is clear, so ppu_runLine dispatches to
+   * ppu_draw_whole_line_legacy, and ppu_legacy.c has ZERO overlay
+   * references. SC_NEW_RENDERER=1 does not flip it either. Overlay
+   * extraction is a new-renderer feature and this project runs the legacy
+   * path -- the same reason the note on s_render_flags gives for the
+   * widescreen clamp fields being dead.
    *
-   * The game does not scroll when a page opens, so neither should the
-   * picture. The render origin and the sampling both stay put and the
-   * guest slides over the top. That leaves the few px of guest map at the
-   * page border discontinuous with the margin, which the page border
-   * covers, and which is a far smaller lie than moving the whole map.
-   *
-   * SC_WS_CENTRE_ADVISOR=0 restores the left-aligned page. */
+   * So centring waits on either the new renderer or an overlay
+   * implementation in the legacy one. Do not retry it at this layer. */
   const bool advisor_page = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
                             PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
                             (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
-  int gx = 0;
-  { static int on = -1;
-    if (on < 0) { const char *e = getenv("SC_WS_CENTRE_ADVISOR");
-                  on = (e && *e) ? (*e != '0') : 1; }
-    if (on && advisor_page) gx = ((s_video_w - kVideoWidth) / 2) & ~7; }
   /* Subtractive colour math, the shape the map screens use.
    *
    * The advisor pages are cgadsub $60 -- additive, halved -- and `halve`
@@ -4492,25 +4484,25 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
     const uint32_t *src =
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
-    memcpy(dst + gx, gst + s_ws_extra, (size_t)kVideoWidth * 4); /* guest */
+    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest */
     if (y < lead_t)
       for (int x = 0; x < kVideoWidth; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     else if (halve)
-      for (int x = 0; x < gx + left_cover; x++) {
+      for (int x = 0; x < left_cover; x++) {
         const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = 0; x < gx + left_cover; x++) dst[x] = blanked ? 0xff000000u
+      for (int x = 0; x < left_cover; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     if (halve)
-      for (int x = gx + x_start; x < s_video_w; x++) {
+      for (int x = x_start; x < s_video_w; x++) {
         const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = gx + x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
+      for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
   }
 }

@@ -408,37 +408,42 @@ outside a blank are pixel-identical to before.
 `SC_COMPOSE_DIAG` now also prints `inidisp`, the force-blank flag and the
 brightness, which is what made this visible in one run.
 
-## Advisor pages are centred, the city is not
+## Advisor pages stay left-aligned, and why centring is blocked
 
-The compositor lands the guest's 256 columns at `dst[0..255]` and fills the
-rest with map, so the extra width is all on the right. For the city that is the
-whole point -- more map ahead of you. For an advisor page it is not: the page
-IS the screen, and it sat hard against the left edge with map beside it.
-Requested from play as wanting the advice centred.
+Requested from play: centre the advice panel in the widened picture. Tried,
+and backed out -- twice, each attempt failing in a way worth recording.
 
-`halve` already identifies those pages exactly, and by measurement rather than
-assumption: with the advice up `cgadsub` reads **60** (additive, halved) and
-with it closed **b3**. So the same test that dims the extension now also decides
-where to put the guest.
+**Attempt 1: move the guest, move the map with it.** Shifting the guest right
+by 96 px also needs the map either side to shift, or the picture tears at the
+join, so the render started 12 cells further left. Geometrically consistent and
+wrong to look at: the page covers the guest completely, so the only thing that
+appeared to move was the map. Reported as the background map shifting when the
+advice opens.
 
-**Only the guest moves.** The first version also started the render `gx/8`
-cells further left, so the map stayed continuous with the shifted guest. That is
-geometrically right and wrong to look at: the page covers the guest completely,
-so the only thing on screen that actually moved was the map in the margins --
-reported from play as the background map shifting when the advice opens and
-flipping back when it closes.
+**Attempt 2: move the guest, leave the map.** The map then measurably stays put
+(the right margin matches the unmoved map on 100.0% of samples). But moving the
+guest moves *everything the guest drew* -- its own map and the HUD toolbar --
+so the toolbar left the left edge and dimmed map filled the strip it vacated.
+Reported as the widescreen itself shifting.
 
-The game does not scroll when a page opens, so neither should the picture. The
-render origin and the sampling both stay put and the guest slides over the top.
-Measured on the right margin, which the page never covers: after the fix it
-matches the unmoved map (allowing for the halving) on **100.0%** of samples,
-against **48.1%** with the origin shifted.
+Both fail for one reason: **at the compositor, the panel and the city are
+already the same pixels.** There is nothing left to move independently.
 
-What that leaves is a few px of guest map at the page border discontinuous with
-the margin. The page border covers it, and it is a far smaller lie than moving
-the whole map.
+**The right fix, and what blocks it.** The game does draw the page on its own
+layer -- while an advisor page is up, `main = $14` (BG3 + OBJ, the page and the
+advisor) and `sub = $03` (BG1 + BG2, the city being dimmed). Compositing the
+captured BG3+OBJ over an unmoved picture would centre the page and nothing
+else, and the runner has the machinery: `PpuSetOverlayCapture` accepts it
+(`armed bg3=1 obj=1 mode=1`).
 
-Verified: the advice page is centred with dimmed map on both sides, and a
-normal city frame is **pixel-identical** to before the change.
+It exports nothing, and cannot. `renderFlags` reads **8** (`NoSpriteLimits`);
+bit 0, `NewRenderer`, is clear, so `ppu_runLine` dispatches to
+`ppu_draw_whole_line_legacy` -- and `ppu_legacy.c` has **zero** overlay
+references. `SC_NEW_RENDERER=1` does not flip it either. Overlay extraction is
+a new-renderer feature and this project runs the legacy path, which is the same
+reason the note on `s_render_flags` gives for the widescreen clamp fields being
+dead.
 
-`SC_WS_CENTRE_ADVISOR=0` restores the left-aligned page.
+So centring waits on either getting the new renderer working or implementing
+overlay extraction in the legacy one. It is not fixable at the compositor, and
+the code says so where the next attempt would start.
