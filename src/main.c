@@ -4353,6 +4353,24 @@ static void host_map_compose(void) {
         }
       }
     } }
+  /* Force blank hides the extension too.
+   *
+   * The host map dims with a fade because pal_entry() runs its colours
+   * through the PPU's brightnessMult table. That covers brightness, and
+   * misses the OTHER way a SNES shows nothing: INIDISP bit 7.
+   *
+   * SimCity ends a fade-out by writing $8f -- force blank ON, brightness
+   * restored to 15 -- so it can rebuild the screen unseen. Measured across
+   * the Information -> View Mode transition: inidisp steps 09, 08 ... 01 with
+   * both halves fading together, and then at the very moment the guest goes
+   * black the extension jumps back to FULL brightness for 14 frames, because
+   * brightnessMult[15] is exactly what it was before the fade started.
+   * Reported from play as the widescreen fading to black, returning to full
+   * brightness, and only then being overwritten by the wood.
+   *
+   * Brightness alone can never express this: the register says 15 and means
+   * nothing is displayed. */
+  const bool blanked = PPU_forcedBlank(g_ppu) != 0;
   const bool halve = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
                      PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
                      (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
@@ -4404,7 +4422,9 @@ static void host_map_compose(void) {
     if (cd < 0) { const char *e = getenv("SC_COMPOSE_DIAG"); cd = (e && *e) ? 1 : 0; }
     if (cd) { static int nf; static int psx = -9999;
       nf++;
-      fprintf(stderr, "[compose] f=%d sx=%d sy=%d dsx=%d fx=%d fy=%d adj=%d,%d\n",
+      fprintf(stderr, "[compose] inidisp=%02x blank=%d bright=%d f=%d sx=%d sy=%d dsx=%d fx=%d fy=%d adj=%d,%d\n",
+              g_ppu->inidisp, (int)(PPU_forcedBlank(g_ppu) != 0),
+              (int)PPU_brightness(g_ppu),
               nf, sx, sy, psx == -9999 ? 0 : sx - psx, fx, fy,
               s_hostmap_adj_x, s_hostmap_adj_y);
       psx = sx; } }
@@ -4441,21 +4461,24 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
     if (y < lead_t)
-      for (int x = 0; x < kVideoWidth; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+      for (int x = 0; x < kVideoWidth; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     else if (halve)
       for (int x = 0; x < left_cover; x++) {
-        const uint32_t c = src[x + fx + 8];
+        const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = 0; x < left_cover; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+      for (int x = 0; x < left_cover; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     if (halve)
       for (int x = x_start; x < s_video_w; x++) {
-        const uint32_t c = src[x + fx + 8];
+        const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = x_start; x < s_video_w; x++) dst[x] = sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+      for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
   }
 }
 

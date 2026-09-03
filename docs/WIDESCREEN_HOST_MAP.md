@@ -368,3 +368,42 @@ inside the sample window).
 
 `SC_EXT_SUB=0` disables it. `SC_DIM_PROBE=1` prints the derived subtrahend and
 sample guest/host pixel pairs, which is how all of the above was measured.
+
+## Fades: brightness was handled, force blank was not
+
+Reported from play: leaving the Information menu for View Mode, "the widescreen
+is fading into black, getting back at full brightness, before it becomes
+overwritten with wood".
+
+The host map already dims with a fade -- `pal_entry()` runs its colours through
+the PPU's `brightnessMult` table for exactly that reason. That covers one of the
+two ways a SNES shows nothing, and missed the other: **INIDISP bit 7**.
+
+Measured across the transition, per frame, mean brightness of the guest's own
+columns against the extension:
+
+| frame | guest | extension |
+|---|---|---|
+| 64-77 | 95.5 -> 6.5 | 89.4 -> 6.3 |
+| **78** | **0.0** | **100.6** |
+| 79-91 | 0.0 | 100.6 |
+| 92-95 | 0.0 | 2.2 |
+
+The fade itself tracks correctly. What breaks is the end of it. `SC_COMPOSE_DIAG`
+shows why: `inidisp` steps `09, 08 ... 01`, and then the game writes **`8f`** --
+force blank ON, brightness restored to **15** -- so it can rebuild the screen
+unseen. `brightnessMult[15]` is exactly what it was before the fade began, so
+the extension springs back to full brightness for fourteen frames while the
+guest displays black.
+
+Brightness alone can never express this: the register reads 15 and means
+*nothing is displayed*. So the compositor now checks `PPU_forcedBlank()` and
+paints the extension black, on both the plain and the halved paths.
+
+After the fix the extension reaches 0.0 on the same frame the guest does and
+stays there; the largest guest/extension gap anywhere in the fade is 5.0, which
+is the two regions holding different terrain, not a brightness mismatch. Frames
+outside a blank are pixel-identical to before.
+
+`SC_COMPOSE_DIAG` now also prints `inidisp`, the force-blank flag and the
+brightness, which is what made this visible in one run.
