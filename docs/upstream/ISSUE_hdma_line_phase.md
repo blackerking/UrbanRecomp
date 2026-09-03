@@ -1,6 +1,6 @@
 # HDMA line phase slips on one frame in four (scenario view screen)
 
-**Repo:** mstan/snesrecomp — observed at `251a966` (main) merged into a
+**Repo:** mstan/snesrecomp â€” observed at `251a966` (main) merged into a
 downstream fork, i.e. with `b8ef573 runtime: execute HDMA on LLE beam timeline`.
 
 **Game:** SimCity (U), scenario view screen (the isometric city on a desk).
@@ -36,7 +36,7 @@ The structure is the tell. Differing scanlines are:
 adjacent. A tear would be a contiguous band; a re-render would be dense. A
 strict 4-line comb is an HDMA cadence.
 
-`hdmaActive` on this screen is `0xe0` — channels 5, 6 and 7 live on every
+`hdmaActive` on this screen is `0xe0` â€” channels 5, 6 and 7 live on every
 frame, which is how the skewed map is drawn.
 
 So: one frame in four, the per-line HDMA writes land on the wrong phase, and
@@ -56,7 +56,7 @@ the older one, and states written by the older build are refused by the newer
 without menu input I could not script reliably.
 
 Worth flagging separately: the OLD runner does not refuse a NEW-format state,
-it **silently mis-loads** it — `logic_changes=0`, `nmi_serviced=0`, wedged at
+it **silently mis-loads** it â€” `logic_changes=0`, `nmi_serviced=0`, wedged at
 `cb:0d33`. The version gate protects the new build from old files but not the
 reverse, which is the same silent-corruption failure the gate was added to
 prevent.
@@ -64,7 +64,7 @@ prevent.
 ## Reproduction
 
 A save state on this screen reproduces it on current `main` (it is in the new
-format, so it loads there). Available on request — this repo is ROM-free and
+format, so it loads there). Available on request â€” this repo is ROM-free and
 does not carry states, so it is not attached here.
 
     SC_DUMP_INTERVAL=1 SC_DUMP_START=60 <runner> --load-state <state> --qualify 120
