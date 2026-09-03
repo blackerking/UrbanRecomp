@@ -407,3 +407,28 @@ outside a blank are pixel-identical to before.
 
 `SC_COMPOSE_DIAG` now also prints `inidisp`, the force-blank flag and the
 brightness, which is what made this visible in one run.
+
+## Advisor pages are centred, the city is not
+
+The compositor lands the guest's 256 columns at `dst[0..255]` and fills the
+rest with map, so the extra width is all on the right. For the city that is the
+whole point -- more map ahead of you. For an advisor page it is not: the page
+IS the screen, and it sat hard against the left edge with map beside it.
+Requested from play as wanting the advice centred.
+
+`halve` already identifies those pages exactly, and by measurement rather than
+assumption: with the advice up `cgadsub` reads **60** (additive, halved) and
+with it closed **b3**. So the same test that dims the extension now also decides
+where to put the guest.
+
+The subtlety is that shifting the guest right by `gx` means the map either side
+has to shift with it, or the picture tears at the join. Rather than offset every
+sample, the **render** starts `gx/8` cells further left, which leaves src index
+`x` meaning dst index `x` exactly as before -- so the sampling code is
+untouched. `gx` is a multiple of 8 for that reason, and the host render already
+spans enough columns (59 cells = 472 px against a 448 px window plus offsets).
+
+Verified: the advice page is centred with dimmed map on both sides, and a
+normal city frame is **pixel-identical** to before the change.
+
+`SC_WS_CENTRE_ADVISOR=0` restores the left-aligned page.

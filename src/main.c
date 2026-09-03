@@ -4256,6 +4256,34 @@ static void host_map_compose(void) {
    * Only this exact shape. Subtractive math against the subscreen cannot be
    * reproduced here, because the value being subtracted is the subscreen and
    * this code does not have it. */
+  /* Centre the guest picture on advisor pages.
+   *
+   * The compositor normally lands the guest's 256 columns at dst[0..255] and
+   * fills the rest with map, so the extra width is all on the right. For the
+   * city that is the point -- more map ahead of you. For an advisor page it
+   * is not: the page IS the screen, and it sits hard against the left edge
+   * with map beside it. Reported from play as wanting the advice centred.
+   *
+   * `halve` already identifies these pages exactly -- cgadsub $60, additive
+   * and halved -- and it is measured, not assumed: with the advice up this
+   * reads 60, and with it closed b3. So the same test that dims the
+   * extension also decides where to put the guest.
+   *
+   * Shifting the guest right by gx means the map either side must shift with
+   * it, or the picture tears at the join. Rather than offset every sample,
+   * the RENDER starts gx/8 cells further left, which leaves src index x
+   * meaning dst index x exactly as before -- so the sampling below is
+   * untouched. gx is a multiple of 8 for that reason.
+   *
+   * SC_WS_CENTRE_ADVISOR=0 restores the left-aligned page. */
+  const bool advisor_page = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
+                            PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
+                            (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  int gx = 0;
+  { static int on = -1;
+    if (on < 0) { const char *e = getenv("SC_WS_CENTRE_ADVISOR");
+                  on = (e && *e) ? (*e != '0') : 1; }
+    if (on && advisor_page) gx = ((s_video_w - kVideoWidth) / 2) & ~7; }
   /* Subtractive colour math, the shape the map screens use.
    *
    * The advisor pages are cgadsub $60 -- additive, halved -- and `halve`
@@ -4371,9 +4399,7 @@ static void host_map_compose(void) {
    * Brightness alone can never express this: the register says 15 and means
    * nothing is displayed. */
   const bool blanked = PPU_forcedBlank(g_ppu) != 0;
-  const bool halve = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
-                     PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
-                     (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  const bool halve = advisor_page;   /* same test, computed above */
   { static int md = -1;
     if (md < 0) { const char *e = getenv("SC_MATH_DIAG"); md = (e && *e) ? 1 : 0; }
     if (md) { static int nf; if (++nf % 40 == 0)
@@ -4429,7 +4455,8 @@ static void host_map_compose(void) {
               s_hostmap_adj_x, s_hostmap_adj_y);
       psx = sx; } }
   const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
-  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
+  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows,
+                        sx - 1 - gx / 8, sy)) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
     return;
   }
@@ -4459,25 +4486,25 @@ static void host_map_compose(void) {
         (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
     const uint32_t *src =
         (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
-    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest, verbatim */
+    memcpy(dst + gx, gst + s_ws_extra, (size_t)kVideoWidth * 4); /* guest */
     if (y < lead_t)
       for (int x = 0; x < kVideoWidth; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     else if (halve)
-      for (int x = 0; x < left_cover; x++) {
+      for (int x = 0; x < gx + left_cover; x++) {
         const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = 0; x < left_cover; x++) dst[x] = blanked ? 0xff000000u
+      for (int x = 0; x < gx + left_cover; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
     if (halve)
-      for (int x = x_start; x < s_video_w; x++) {
+      for (int x = gx + x_start; x < s_video_w; x++) {
         const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
-      for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
+      for (int x = gx + x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
   }
 }
