@@ -161,12 +161,29 @@ Confirmed along the way, and worth keeping: the game does **not** rewrite
 `$01eb` while a menu idles (zero writes over 70 frames), so the poke was never
 being overwritten -- it was simply being ignored.
 
-## 7. Cursor near the left or right edge repeats colour to the border
-Reported 2026-09-04. Not yet reproduced.
+## 7. Colour repeats to the border on the tax menu -- LOCALISED
 
-Driving the map cursor to each edge with `SC_FREEZE=1eb:08` and `1eb:f8` on a
-city state moves it (243 and 237 px change) but produces no streak: the change
-stays inside the guest columns, x=8..138 and 125..242. So it is not the map
-cursor alone. Likely wants a menu open as well -- report 5 pairs a colour break
-with mouse use inside a menu, and these may be one fault. `savestate_8.bin`
-qualifies PASS and is live, so it is the state to work from.
+`savestate_8.bin` is the FISCAL BUDGET menu and **reproduces it standing
+still** -- no mouse needed. Reported as colour repeating to the border, and as
+a black bar when the cursor's last pixel happens to be black; the cursor is a
+red herring, it just supplies whichever colour gets repeated.
+
+Measured, on that state:
+
+* **13 rows, y=41..53, the full right margin (x=352..447). Nothing on the
+  left.** That band is the TAX RATE row.
+* It is **not sprites**: `SC_WS_OBJ_CLIP` 0 vs 1 is 0 px different.
+* It is **not the `s_ws_bg_margins` pass**: making the blank take precedence
+  over that copy changed nothing (tried, reverted -- unverified complexity).
+* The margin blank *should* cover it. Its guard is
+  `(s_ws_clamp_now & 0x0f) == 0x0f && !host_map_screen_live()`, and both hold
+  here -- measured `clamp_now=0f`, `hostmap_live=0`, `$14=00`, `main=14`,
+  `sub=01`.
+
+A frame-level clamp of `0f` cannot explain 13 specific lines. So the clamp
+state almost certainly varies **per line** -- HDMA windowing on that row -- and
+the blank skips exactly those lines, letting the BG tilemap wrap into the
+margin. `SC_CLAMP_DIAG` was added for one run and reverted; the next step is to
+sample `s_ws_clamp_now` per scanline across y=35..60 rather than once a frame,
+and if it dips there, decide whether the blank should key off something other
+than a full clamp.
