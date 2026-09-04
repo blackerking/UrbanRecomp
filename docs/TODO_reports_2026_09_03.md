@@ -24,11 +24,31 @@ The missing pins remain open, and are a different problem entirely.
 ## 2. Locomotive not drawn in the widescreen margins
 `savestate_3.bin` -- the state shows it as it appears in the normal view.
 
-A small moving object that renders in the guest's own columns but not in the
-margins. Almost certainly the same class as the title sign: an unhinted OBJ,
-gated by the strict left/right decode or by `wsOamMotionGrace` expiring. Check
-whether it is in the ambiguous band, and whether upstream's motion classifier
-is holding it (`kPpuWsOamMovingGraceFrames` is 4 frames of unchanged X).
+**Diagnosed, not fixed. It is not an OAM decode problem at all.**
+
+The sprites are there and they are in the ambiguous band: OAM on that state
+shows ten slots at raw 271-291 (the train and the traffic), while every parked
+entry sits at raw 384, outside the band -- the same shape the title screen has,
+where the positive decode is the right one.
+
+But hinting them changes nothing, and neither does `SC_WS_OBJ_CLIP`: both
+measured at **0 pixels difference**. The reason is further down. In the city
+view the margins do not come from the PPU at all. `host_map_compose()` fills
+`dst[256..447]` from the host map render and discards the PPU's own margin
+columns, and the host map draws BG tiles from the city map only. No sprite can
+survive that, however it decodes.
+
+So showing the locomotive means giving the host-map compositor a sprite layer.
+The machinery already exists and does not depend on the dead overlay export:
+`g_snes_ppu_dbg_layer_mask` plus a scratch buffer renders a line again with an
+arbitrary layer mask (`s_ws_bg_margins` uses it for the wood, `s_ws_obj_clip`
+for an OBJ-less pass). An OBJ-only pass (mask `0x10`) composited over the
+margin columns would do it.
+
+Two things to settle when doing it: the off-screen halves of clipped sprites
+that `s_ws_obj_clip` exists to suppress must not come back with it, and the
+per-slot decode hints then start to matter, so the band evidence above becomes
+load-bearing rather than moot.
 
 ## 3. Loan view broken in widescreen
 `savestate_7.bin`
