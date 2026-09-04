@@ -7404,8 +7404,25 @@ int main(int argc, char **argv) {
      * $0100), not the $4218/$4219 hardware layout -- see
      * docs/HANDOVER_metal_marines.md #1. */
     { const uint32_t mb = SDL_GetMouseState(NULL, NULL);
+      /* On a MENU, feed the synthesised d-pad without waiting for a button.
+       *
+       * apply_mouse_delta() pokes $01eb/$01ed, and that is what moves the
+       * cursor in the city view. On the menu pages it does nothing: they
+       * track their own selection, and moving the pointer left the last
+       * d-pad choice selected. Reported from play three ways -- the mouse
+       * not activating buttons in the tax menu, not working on normal menus,
+       * and working only while a button is held. The last one is the tell:
+       * holding LEFT is what lets the synthesised direction through here,
+       * and the direction is the only thing a menu reacts to.
+       *
+       * Not fed unconditionally, because in the city view the poke ALREADY
+       * moves the cursor -- adding the d-pad there would move it twice per
+       * frame. host_map_screen_live() is the existing discriminator: it is
+       * false for exactly the pages that report $14 == 0 without BG2, which
+       * are the menu pages this is for. */
+      const bool mouse_on_menu = !host_map_screen_live();
       if (s_mouse_enabled && s_mouse_dir_frames > 0 &&
-          (mb & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+          ((mb & SDL_BUTTON(SDL_BUTTON_LEFT)) || mouse_on_menu)) {
         input |= s_mouse_dir;
         s_mouse_dir_frames--;
       } else if (s_mouse_dir_frames > 0) {

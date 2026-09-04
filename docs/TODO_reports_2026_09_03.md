@@ -132,25 +132,41 @@ derives its subtrahend per frame from a modal host-vs-guest difference, check
 whether the menu plus pointer defeats that estimator -- `SC_EXT_SUB=0` and
 `SC_DIM_PROBE=1` will say quickly whether it is that or something else.
 
-## 6. Mouse does not move at all once the menu is open
-`savestate_9.bin` -- the INFORMATION menu over a city.
+## 6. Mouse does not work on menus -- FIXED (needs confirming in play)
 
-Established: the menu cursor **does** respond to the D-pad, and `$01eb` moves
-with it -- `a2 -> c2`, exactly `0x20` per press, the icon spacing. And the game
-does **not** rewrite `$01eb` while the menu sits idle: zero writes across 70
-frames with `SC_ADDR_TRACE=01eb SC_CADENCE_WATCH=1`. So the mouse's poke is not
-being overwritten.
+`savestate_9.bin` (INFORMATION menu), and reported again as: the mouse does not
+activate buttons in the tax menu, the last d-pad choice stays selected; the
+mouse does not work on normal menus; **and it does work while a button is
+held**.
 
-The likely shape is therefore that the menu only repositions its cursor sprite
-when it PROCESSES a movement, so writing `$01eb` behind its back changes the
-variable and nothing else. If so the fix is to feed mouse movement as synthetic
-D-pad presses while a menu is open, rather than poking the ladder --
-`s_mouse_dir` / `s_mouse_dir_frames` already implement that shape for the
-button-held pan.
+That last report is the one that solved it. Two paths move the cursor:
 
-**Not yet proven, and the obvious test does not work.** This save state is
-frozen awaiting input (`qualify` reports `video_changes=0`), so forcing a
-variable with `SC_FREEZE` changes nothing on screen no matter which variable it
-is -- `$01eb`, `$012b` and `$00e1` all came back at 0 px difference, which is
-not evidence about any of them. Any test here has to make the game redraw,
-e.g. by injecting a press in the same run, or be done interactively.
+* `apply_mouse_delta()` pokes `$01eb`/`$01ed` whenever the pointer moves. That
+  is what works in the city view.
+* a synthesised d-pad, `s_mouse_dir`, which was consumed **only while the LEFT
+  button was held**.
+
+The menu pages track their own selection and do not take it from `$01eb`, so
+the poke does nothing there and the direction is the only thing they react to
+-- which is exactly why holding a button made the mouse work and letting go
+made it stop.
+
+The direction is now fed on menu pages without a button. Not unconditionally:
+in the city view the poke already moves the cursor, so feeding the d-pad there
+as well would move it twice per frame. `host_map_screen_live()` is the
+discriminator, and it is the existing one -- false for exactly the pages that
+report `$14 == 0` without BG2 enabled, which are the menu pages.
+
+Confirmed along the way, and worth keeping: the game does **not** rewrite
+`$01eb` while a menu idles (zero writes over 70 frames), so the poke was never
+being overwritten -- it was simply being ignored.
+
+## 7. Cursor near the left or right edge repeats colour to the border
+Reported 2026-09-04. Not yet reproduced.
+
+Driving the map cursor to each edge with `SC_FREEZE=1eb:08` and `1eb:f8` on a
+city state moves it (243 and 237 px change) but produces no streak: the change
+stays inside the guest columns, x=8..138 and 125..242. So it is not the map
+cursor alone. Likely wants a menu open as well -- report 5 pairs a colour break
+with mouse use inside a menu, and these may be one fault. `savestate_8.bin`
+qualifies PASS and is live, so it is the state to work from.
