@@ -2947,13 +2947,48 @@ static void ws_fill_flat_margins(void) {
     if (both) flat_rows++;
   }
   if (flat_rows * 4 < kVideoHeight * 3) return;   /* not a flat-background screen */
+  /* Fill with the SCREEN's background colour, not each row's own edge pixel.
+   *
+   * Per-row is wrong wherever something real reaches the edge. On the tax
+   * menu the panel very nearly touches the guest's right edge, so rows
+   * 41..53 -- the TAX RATE row -- smeared the panel's colour across the
+   * whole margin, and with the mouse cursor sitting there they smeared its
+   * black. Reported from play as colour repeating to the border, and as a
+   * black bar "because the last pixel of the cursor is black". The cursor
+   * only ever supplied the colour: savestate_8 shows the same band
+   * standing still, with no mouse involved.
+   *
+   * Found by snapshotting one margin pixel through the end-of-frame path:
+   * row45[400] is 000000 after ws_hide_backdrop_furniture() and ffdeb5
+   * after this function, which put the write here and nowhere else.
+   *
+   * The margin exists to continue a flat background, and the screen has
+   * already had to prove it HAS one to reach here, so paint the colour the
+   * rows agree on. Note the split: the flat run still qualifies a row using
+   * that row's OWN edge, and only the colour painted comes from the
+   * screen. Testing flatness against the background instead was tried and
+   * is wrong in the other direction -- a row whose edge is the panel is
+   * perfectly flat, just not in the background colour, so it failed, was
+   * skipped, and kept the blank's black. That trades a coloured stripe for
+   * a black one. */
+  uint32_t bg_edge = 0; int bg_votes = -1;
+  for (int y = 0; y < kVideoHeight; y++) {
+    const uint32_t cand = ((const uint32_t *)(s_video_pixels +
+                           (size_t)y * s_video_pitch))[right0 - 1];
+    int v = 0;
+    for (int y2 = 0; y2 < kVideoHeight; y2++)
+      if (((const uint32_t *)(s_video_pixels +
+            (size_t)y2 * s_video_pitch))[right0 - 1] == cand) v++;
+    if (v > bg_votes) { bg_votes = v; bg_edge = cand; }
+  }
   for (int y = 0; y < kVideoHeight; y++) {
     uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
     for (int side = 0; side < 2; side++) {
-      const uint32_t edge = side ? row[right0 - 1] : row[s_ws_extra];
+      const uint32_t row_edge = side ? row[right0 - 1] : row[s_ws_extra];
+      const uint32_t edge = bg_edge;
       bool flat = true;
       for (int k = 1; k < SC_WS_FLAT_RUN && flat; k++)
-        if (row[side ? right0 - 1 - k : s_ws_extra + k] != edge) flat = false;
+        if (row[side ? right0 - 1 - k : s_ws_extra + k] != row_edge) flat = false;
       if (!flat) continue;
       const int x0 = side ? right0 : 0;
       const int x1 = side ? s_video_w : s_ws_extra;

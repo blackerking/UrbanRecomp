@@ -161,53 +161,41 @@ Confirmed along the way, and worth keeping: the game does **not** rewrite
 `$01eb` while a menu idles (zero writes over 70 frames), so the poke was never
 being overwritten -- it was simply being ignored.
 
-## 7. Colour repeats to the border on the tax menu -- LOCALISED
+## 7. Colour repeats to the border on the tax menu -- FIXED
 
-`savestate_8.bin` is the FISCAL BUDGET menu and **reproduces it standing
-still** -- no mouse needed. Reported as colour repeating to the border, and as
-a black bar when the cursor's last pixel happens to be black; the cursor is a
-red herring, it just supplies whichever colour gets repeated.
+`savestate_8.bin` reproduces it **standing still**, no mouse needed. The cursor
+was a red herring throughout: it only supplied whichever colour got repeated,
+which is why it looked like a black bar when its last pixel was black.
 
-Measured, on that state:
+Found by snapshotting one margin pixel through the end-of-frame path:
 
-* **13 rows, y=41..53, the full right margin (x=352..447). Nothing on the
-  left.** That band is the TAX RATE row.
-* It is **not sprites**: `SC_WS_OBJ_CLIP` 0 vs 1 is 0 px different.
-* It is **not the `s_ws_bg_margins` pass**: making the blank take precedence
-  over that copy changed nothing (tried, reverted -- unverified complexity).
-* The margin blank *should* cover it. Its guard is
-  `(s_ws_clamp_now & 0x0f) == 0x0f && !host_map_screen_live()`, and both hold
-  here -- measured `clamp_now=0f`, `hostmap_live=0`, `$14=00`, `main=14`,
-  `sub=01`.
+    before_all              row45[400]=000000
+    after_hide_furniture    row45[400]=000000
+    after_fill_flat         row45[400]=ffdeb5   <- here
+    after_fill_margins      row45[400]=ffdeb5
 
-### Per-scanline clamp sampled: the hypothesis was wrong
+`ws_fill_flat_margins()` extends a flat background into the margin using **each
+row's own edge pixel**. On the tax menu the panel very nearly touches the
+guest's right edge, so rows 41..53 -- the TAX RATE row -- painted the panel's
+colour across the whole margin.
 
-`s_ws_clamp_now` is assigned **once per frame** (one write site), so it cannot
-vary by line and the HDMA-windowing theory is dead.
+Fixed by splitting the two jobs the edge pixel was doing: the flat run still
+qualifies a row using that row's own edge, and the colour painted is now the
+one the majority of rows agree on (`bg_edge`, 213 of 224 votes here). Those 576
+stray pixels become background; the black count is unchanged; and savestates
+1, 2, 5, 7 and 9 are all pixel-identical.
 
-The blank is not the problem either. Instrumented, it runs on **all 224 lines**,
-and reading the margin immediately after it writes shows `row[400] = 000000` on
-both line 45 and line 100. The margins really are black when the blank finishes.
+Getting there ruled out, each by measurement: sprites (`SC_WS_OBJ_CLIP` 0 vs 1,
+0 px), the `s_ws_bg_margins` copy (instrumented, does not run here), the
+per-line margin blank (runs on all 224 lines and leaves black), and a per-line
+clamp (`s_ws_clamp_now` has one write site, per frame).
 
-Yet the finished frame has green margins with content on 13 rows. So the
-margins are written **after the per-line loop**, by something later.
+One wrong turn worth keeping: testing flatness against `bg_edge` too. A row
+whose edge is the panel is perfectly flat, just not in the background colour,
+so it failed the test, was skipped, and kept the blank's black -- trading a
+coloured stripe for a black one. The run decides WHETHER a row is
+background-like; `bg_edge` decides WHAT to paint.
 
-Excluded so far, each by measurement rather than reading:
-
-* sprites -- `SC_WS_OBJ_CLIP` 0 vs 1 is 0 px different;
-* the `s_ws_bg_margins` copy -- instrumented, it does not run on this screen;
-* the per-line margin blank -- runs on every line and leaves black;
-* `ws_fill_flat_margins()` -- filling from the screen's modal background colour
-  instead of each row's own edge pixel changed nothing, because that function
-  *skips* these rows: its `uniform` guard already treats a margin with content
-  in it as "something drew here". Which is itself the clue -- the content is
-  present before that function runs.
-
-**Next step.** Find the write that lands between the per-line blank and the
-finished frame. `ws_fill_flat_margins()` is called from somewhere in the
-end-of-frame path; whatever runs before it there is the candidate. The cheap
-version is to snapshot `row[400]` at each stage of that path for line 45 and
-see which stage turns it from black to content.
 
 A frame-level clamp of `0f` cannot explain 13 specific lines. So the clamp
 state almost certainly varies **per line** -- HDMA windowing on that row -- and
