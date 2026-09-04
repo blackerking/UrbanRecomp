@@ -45,10 +45,35 @@ arbitrary layer mask (`s_ws_bg_margins` uses it for the wood, `s_ws_obj_clip`
 for an OBJ-less pass). An OBJ-only pass (mask `0x10`) composited over the
 margin columns would do it.
 
-Two things to settle when doing it: the off-screen halves of clipped sprites
-that `s_ws_obj_clip` exists to suppress must not come back with it, and the
-per-slot decode hints then start to matter, so the band evidence above becomes
-load-bearing rather than moot.
+### Attempt 1, reverted: the pass works, the decode does not
+
+Built and measured, then backed out because it does not yet show anything and
+should not sit in the tree enabled. What was learned is worth keeping.
+
+The OBJ-only pass itself **works**. `g_snes_ppu_dbg_layer_mask = 0x10` plus a
+scratch buffer and a `PpuBeginDrawing` retarget renders sprites in isolation --
+row 110 of that save state comes back with 28 non-backdrop pixels. Compositing
+it over the margin columns works too, once two mistakes are out of the way:
+
+* Map `dst[x]` to `objlayer[x + s_ws_extra]`. `dst[kVideoWidth]` is the column
+  just right of the guest's edge, which the PPU rendered at `kVideoWidth +
+  s_ws_extra` in its widened frame. Only `s_ws_extra` px of the wider host
+  strip can carry sprites at all; the rest has no PPU coverage.
+* Test transparency on **RGB only**. The render buffer leaves the alpha byte
+  clear, so comparing the whole word makes every backdrop pixel look opaque --
+  which painted the entire margin solid black, 20941 px of it.
+
+**What still blocks it.** The band sprites never reach the margin columns: on
+row 110 the pass has content only at x=112..141, inside the guest area, and the
+train's slots (raw 271-291, y=110/126) render nothing. Setting the right-hints
+for the city view makes **no difference at all** -- byte-identical output with
+and without -- so the hint is not reaching the decode. `s_ws_oam_strict`
+defaults to true and the block sits before the `PpuWsSetOamRightHints()` call,
+so the next step is simply to instrument whether that block fires, and whether
+anything clears `s_oam_right_hints` between the two points.
+
+Also still to settle once it draws: the off-screen halves of clipped sprites
+that `s_ws_obj_clip` exists to suppress must not come back with it.
 
 ## 3. Loan view broken in widescreen
 `savestate_7.bin`
