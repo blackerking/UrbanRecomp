@@ -7202,6 +7202,37 @@ int main(int argc, char **argv) {
       }
     }
     const uint8_t *keys = SDL_GetKeyboardState(NULL);
+    /* Throw away the pointer delta that accumulated while the window was not
+     * ours.
+     *
+     * SDL_GetRelativeMouseState() reports movement since the LAST call, and
+     * it keeps accumulating while the window is unfocused or the pointer is
+     * outside it. Alt-tab away, move the mouse across the desktop, come back,
+     * and the next call returns that whole journey in one delta -- so the
+     * cursor jumps somewhere far from where the pointer actually is.
+     * Reported from play as the mouse "not on spot when the cursor gets back
+     * to the window".
+     *
+     * The F3 toggle already does exactly this discard for the same reason.
+     * This is that, on regaining focus or the pointer re-entering.
+     *
+     * Polled from the window flags rather than handled as an event, because
+     * the event spelling differs between SDL2 and SDL3 (SDL_WINDOWEVENT with
+     * a sub-type vs SDL_EVENT_WINDOW_*) while these two flags do not. This
+     * file has already been bitten three times by SDL2/SDL3 renames that keep
+     * compiling, so the version-neutral spelling is the safer one. */
+    { static bool had_focus = true;
+      const uint32_t wf = (uint32_t)SDL_GetWindowFlags(window);
+      const bool has_focus = (wf & (SDL_WINDOW_INPUT_FOCUS |
+                                    SDL_WINDOW_MOUSE_FOCUS)) != 0;
+      if (has_focus && !had_focus) {
+#if SNESRECOMP_SDL3
+        { float fx = 0.0f, fy = 0.0f; SDL_GetRelativeMouseState(&fx, &fy); }
+#else
+        SDL_GetRelativeMouseState(NULL, NULL);
+#endif
+      }
+      had_focus = has_focus; }
     if (s_mouse_enabled) {
       /* SDL reports the pointer delta in HOST SCREEN pixels; the cursor lives
        * in SNES pixels. Feeding one straight into the other made the cursor

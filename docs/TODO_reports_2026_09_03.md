@@ -108,13 +108,21 @@ map-continuity half of that problem but not the other half. Worth checking
 whether the loan view has any HUD to displace -- if it does not, centring it may
 be safe where the advisor pages were not.
 
-## 4. Mouse pointer is off-spot after refocusing the window
-Not a save state.
+## 4. Mouse pointer off-spot after refocusing -- FIXED
 
-The pointer works, but its position is wrong when the cursor re-enters the
-window. Likely a delta/absolute mismatch on focus regain. The host-mouse code
-is the ported simcity-mouse patch in `main.c`, accumulating into `$7E01EB` (X)
-and `$7E01ED` (Y).
+`SDL_GetRelativeMouseState()` reports movement since the last call and keeps
+accumulating while the window is unfocused or the pointer is outside it. Alt-tab
+away, move across the desktop, come back, and the next call returns that whole
+journey as one delta, so the cursor jumps far from the pointer.
+
+The F3 toggle already discarded the stale delta for exactly this reason; the
+same discard now happens on regaining focus or the pointer re-entering, polled
+from `SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS` rather than handled as an
+event -- those two flag names are spelled the same in SDL2 and SDL3 while the
+events are not, and this file has been bitten three times by SDL renames that
+still compile.
+
+Needs confirming in play; it cannot be exercised headlessly.
 
 ## 5. Widescreen colours break when the mouse is used inside the menu
 `savestate_8.bin`
@@ -125,7 +133,24 @@ whether the menu plus pointer defeats that estimator -- `SC_EXT_SUB=0` and
 `SC_DIM_PROBE=1` will say quickly whether it is that or something else.
 
 ## 6. Mouse does not move at all once the menu is open
-`savestate_9.bin`
+`savestate_9.bin` -- the INFORMATION menu over a city.
 
-Distinct from 4 and 5: no movement, not wrong movement. Suspect the menu path
-stops feeding the cursor ladder, or swallows the reads.
+Established: the menu cursor **does** respond to the D-pad, and `$01eb` moves
+with it -- `a2 -> c2`, exactly `0x20` per press, the icon spacing. And the game
+does **not** rewrite `$01eb` while the menu sits idle: zero writes across 70
+frames with `SC_ADDR_TRACE=01eb SC_CADENCE_WATCH=1`. So the mouse's poke is not
+being overwritten.
+
+The likely shape is therefore that the menu only repositions its cursor sprite
+when it PROCESSES a movement, so writing `$01eb` behind its back changes the
+variable and nothing else. If so the fix is to feed mouse movement as synthetic
+D-pad presses while a menu is open, rather than poking the ladder --
+`s_mouse_dir` / `s_mouse_dir_frames` already implement that shape for the
+button-held pan.
+
+**Not yet proven, and the obvious test does not work.** This save state is
+frozen awaiting input (`qualify` reports `video_changes=0`), so forcing a
+variable with `SC_FREEZE` changes nothing on screen no matter which variable it
+is -- `$01eb`, `$012b` and `$00e1` all came back at 0 px difference, which is
+not evidence about any of them. Any test here has to make the game redraw,
+e.g. by injecting a press in the same run, or be done interactively.
