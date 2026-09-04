@@ -180,6 +180,35 @@ Measured, on that state:
   here -- measured `clamp_now=0f`, `hostmap_live=0`, `$14=00`, `main=14`,
   `sub=01`.
 
+### Per-scanline clamp sampled: the hypothesis was wrong
+
+`s_ws_clamp_now` is assigned **once per frame** (one write site), so it cannot
+vary by line and the HDMA-windowing theory is dead.
+
+The blank is not the problem either. Instrumented, it runs on **all 224 lines**,
+and reading the margin immediately after it writes shows `row[400] = 000000` on
+both line 45 and line 100. The margins really are black when the blank finishes.
+
+Yet the finished frame has green margins with content on 13 rows. So the
+margins are written **after the per-line loop**, by something later.
+
+Excluded so far, each by measurement rather than reading:
+
+* sprites -- `SC_WS_OBJ_CLIP` 0 vs 1 is 0 px different;
+* the `s_ws_bg_margins` copy -- instrumented, it does not run on this screen;
+* the per-line margin blank -- runs on every line and leaves black;
+* `ws_fill_flat_margins()` -- filling from the screen's modal background colour
+  instead of each row's own edge pixel changed nothing, because that function
+  *skips* these rows: its `uniform` guard already treats a margin with content
+  in it as "something drew here". Which is itself the clue -- the content is
+  present before that function runs.
+
+**Next step.** Find the write that lands between the per-line blank and the
+finished frame. `ws_fill_flat_margins()` is called from somewhere in the
+end-of-frame path; whatever runs before it there is the candidate. The cheap
+version is to snapshot `row[400]` at each stage of that path for line 45 and
+see which stage turns it from black to content.
+
 A frame-level clamp of `0f` cannot explain 13 specific lines. So the clamp
 state almost certainly varies **per line** -- HDMA windowing on that row -- and
 the blank skips exactly those lines, letting the BG tilemap wrap into the
