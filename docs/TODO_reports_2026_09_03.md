@@ -63,14 +63,37 @@ it over the margin columns works too, once two mistakes are out of the way:
   clear, so comparing the whole word makes every backdrop pixel look opaque --
   which painted the entire margin solid black, 20941 px of it.
 
-**What still blocks it.** The band sprites never reach the margin columns: on
-row 110 the pass has content only at x=112..141, inside the guest area, and the
-train's slots (raw 271-291, y=110/126) render nothing. Setting the right-hints
-for the city view makes **no difference at all** -- byte-identical output with
-and without -- so the hint is not reaching the decode. `s_ws_oam_strict`
-defaults to true and the block sits before the `PpuWsSetOamRightHints()` call,
-so the next step is simply to instrument whether that block fires, and whether
-anything clears `s_oam_right_hints` between the two points.
+**The hint DOES reach the decode.** That earlier suspicion was wrong, and the
+correction matters: there was simply nothing in the band for it to act on in
+the frames being measured. The 28 pixels the pass produced on row 110 sit at
+x=112..141 -- that is the vehicle at guest x 16..45, nowhere near the edge.
+A "0 px difference" was measuring an empty margin, not a broken hint.
+
+**What actually blocks it, most likely: the game culls its own sprites at the
+view edge.** Evidence, none of it yet conclusive:
+
+* Frame-differencing the whole picture over 200 frames of panning shows every
+  moving object inside x < 256 and **margin = 0 on every single step**.
+* With the OBJ pass composited, a 200-frame pan adds **0 px** in the margin --
+  no sprite ever appears in those columns of the isolated pass either.
+* The band entries (raw 271-291) render nothing even with the permissive
+  decode: `SC_WS_OAM=0` against strict, with the host map off so the PPU's own
+  margins are visible, is **0 px different**. So those are park slots, not
+  objects, and this game parks at 271-291 as well as at 384.
+
+If the game does cull, no decode or compositing change can ever show the
+locomotive there -- it is not in OAM to be shown, and it would have to be
+synthesised host-side the way the map already is.
+
+**Do not repeat this test badly.** `SNESRECOMP_LAYER_MASK` cannot be used to
+check whether something is a sprite: the host's own per-line passes
+(`s_ws_bg_margins`, `s_ws_obj_clip`) write `g_snes_ppu_dbg_layer_mask` every
+line and clobber it, so the env reads as having no effect. Isolate a layer with
+a scratch-buffer pass instead.
+
+The next step is to settle the culling question directly: log OAM across a pan
+and see whether ANY slot ever holds a decoded x in [256, 352) while also being
+drawn.
 
 Also still to settle once it draws: the off-screen halves of clipped sprites
 that `s_ws_obj_clip` exists to suppress must not come back with it.
