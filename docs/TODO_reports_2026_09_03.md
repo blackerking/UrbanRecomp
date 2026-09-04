@@ -11,14 +11,15 @@ Two symptoms on one screen. The missing won-marks are already understood and
 recorded at the OAM-hint block in `main.c`: the marks for the widescreen-only
 columns are not in OAM at all, so no decode change can bring them back.
 
-The **blinking cursor on the left** is new and is a real lead. While testing a
-blanket left-hint release, exactly such an artefact appeared -- a stray green
-selection bracket at x=16..71, drawn from slots 2 and 11 (tiles 76/78 with flip
-bits `f4`/`b4`), a second bracket the game parks off-screen-left. That
-experiment was reverted, so if a blinking cursor is visible NOW it is either a
-different object or something reaches the margin by another route. Start by
-dumping OAM on the screen (`SC_OAM_BAND=2`) and comparing against the reverted
-experiment's capture.
+The **blinking cursor on the left is FIXED** (submodule `ed3c249`). It was a
+second selection bracket the game blinks by flipping it 256 px left, to a
+position hardware clips and the margin did not. It reached the margin through
+my own `1d9cd45`: gating the edge clip on the motion grace let it through,
+because every toggle looked like motion. The classifier now requires a *step*
+(<= 32 px) rather than any X change. Measured: 128 stray green pixels -> 0,
+with the title sign still crossing the margin correctly.
+
+The missing pins remain open, and are a different problem entirely.
 
 ## 2. Locomotive not drawn in the widescreen margins
 `savestate_3.bin` -- the state shows it as it appears in the normal view.
