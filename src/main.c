@@ -1360,6 +1360,23 @@ static void handle_pos_stuff(void) {
         fprintf(stderr, "[hdma] f=%llu active=%02x\n",
                 (unsigned long long)s_frames, mask);
       }
+      /* SC_OAM_TRACK=1: every frame, every OAM slot that is on-screen
+       * vertically and sits anywhere near the right edge. The question it
+       * answers is whether the game CULLS its sprites at x=255: if it does,
+       * slots walk up to the edge and vanish; if it does not, a slot keeps
+       * moving smoothly through [256, 352) and widescreen could show it. */
+      if (getenv("SC_OAM_TRACK") && g_ppu) {
+        for (int i = 0; i < 128; i++) {
+          const unsigned lo = g_ppu->oam[i * 2];
+          const unsigned hi = g_ppu->oam[i * 2 + 1];
+          const unsigned hb = g_ppu->highOam[i >> 3];
+          const unsigned x9 = (lo & 0xff) | (((hb >> ((i & 7) * 2)) & 1) << 8);
+          const unsigned y = (lo >> 8) & 0xff;
+          if (y < 224 && x9 >= 180 && x9 < 400)
+            fprintf(stderr, "[oamtrk] f=%llu slot=%d x=%u y=%u tile=%u\n",
+                    (unsigned long long)s_frames, i, x9, y, hi & 0xff);
+        }
+      }
       if (getenv("SC_PPU_LAYOUT")) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {

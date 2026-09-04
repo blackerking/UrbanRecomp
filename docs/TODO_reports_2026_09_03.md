@@ -63,40 +63,37 @@ it over the margin columns works too, once two mistakes are out of the way:
   clear, so comparing the whole word makes every backdrop pixel look opaque --
   which painted the entire margin solid black, 20941 px of it.
 
-**The hint DOES reach the decode.** That earlier suspicion was wrong, and the
-correction matters: there was simply nothing in the band for it to act on in
-the frames being measured. The 28 pixels the pass produced on row 110 sit at
-x=112..141 -- that is the vehicle at guest x 16..45, nowhere near the edge.
-A "0 px difference" was measuring an empty margin, not a broken hint.
+**The hint DOES reach the decode.** That earlier suspicion was wrong: there was
+simply nothing in the band for it to act on in the frames being measured. The
+28 px the pass produced on row 110 sit at x=112..141 -- the vehicle at guest
+x 16..45, nowhere near the edge. "0 px difference" was measuring an empty
+margin, not a broken hint.
 
-**What actually blocks it, most likely: the game culls its own sprites at the
-view edge.** Evidence, none of it yet conclusive:
+### CLOSED: the game culls its sprites at the view edge
 
-* Frame-differencing the whole picture over 200 frames of panning shows every
-  moving object inside x < 256 and **margin = 0 on every single step**.
-* With the OBJ pass composited, a 200-frame pan adds **0 px** in the margin --
-  no sprite ever appears in those columns of the isolated pass either.
-* The band entries (raw 271-291) render nothing even with the permissive
-  decode: `SC_WS_OAM=0` against strict, with the host map off so the PPU's own
-  margins are visible, is **0 px different**. So those are park slots, not
-  objects, and this game parks at 271-291 as well as at 384.
+`SC_OAM_TRACK=1` logs every on-screen OAM slot near the right edge, every
+frame. Across a 240-frame pan, of 43 slots seen there:
 
-If the game does cull, no decode or compositing change can ever show the
-locomotive there -- it is not in OAM to be shown, and it would have to be
-synthesised host-side the way the map already is.
+* **not one** slot's X ever moves through 256;
+* the only two that move at all reach a maximum X of **252** and 219;
+* slot 109 (tile 111) walks smoothly right at 4 px a frame -- 200, 204, 208
+  ... 248, **252** -- and then simply stops existing. It is removed from OAM.
+
+That is the game culling. A sprite is dropped as soon as it passes the edge of
+the 256 px view, so there is nothing in OAM for a widened margin to draw,
+whatever the decode does and whatever the compositor samples.
+
+**So this cannot be fixed by decode or compositing, and both attempts at it
+were sound code aimed at the wrong layer.** Showing the locomotive in the
+margin would mean synthesising it host-side from the game's own vehicle state,
+the way the map is already drawn host-side -- a far larger feature than a
+rendering fix, and one that would have to find and read that state first.
 
 **Do not repeat this test badly.** `SNESRECOMP_LAYER_MASK` cannot be used to
-check whether something is a sprite: the host's own per-line passes
+ask whether something is a sprite: the host's own per-line passes
 (`s_ws_bg_margins`, `s_ws_obj_clip`) write `g_snes_ppu_dbg_layer_mask` every
 line and clobber it, so the env reads as having no effect. Isolate a layer with
 a scratch-buffer pass instead.
-
-The next step is to settle the culling question directly: log OAM across a pan
-and see whether ANY slot ever holds a decoded x in [256, 352) while also being
-drawn.
-
-Also still to settle once it draws: the off-screen halves of clipped sprites
-that `s_ws_obj_clip` exists to suppress must not come back with it.
 
 ## 3. Loan view broken in widescreen
 `savestate_7.bin`
