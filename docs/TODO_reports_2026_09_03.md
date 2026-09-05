@@ -224,3 +224,54 @@ margin. `SC_CLAMP_DIAG` was added for one run and reverted; the next step is to
 sample `s_ws_clamp_now` per scanline across y=35..60 rather than once a frame,
 and if it dips there, decide whether the blank should key off something other
 than a full clamp.
+
+## 8. Selector pins and win marks missing on the outer columns -- CLOSED
+
+Reported 2026-09-05: on the scenario selector the pins AND the win marks are
+missing on the left and right columns. Same root cause as the locomotive, and
+now confirmed directly on that screen.
+
+Dumping OAM on `savestate_2.bin` (`SC_OAM_BAND=2`), the pin sprites -- tiles
+142/143/175/185 on the two card rows -- exist at guest x = **120, 200, 216
+only**, all inside the 256 px view, plus one parked at -40. Nothing is emitted
+for the columns widescreen reveals. The game culls its sprites to its own view,
+exactly as the OAM tracker showed for the train.
+
+**Not mine, and not the classifier change.** Rebuilt against the previous
+submodule commit (`1d9cd45`, before the step test) and rendered the same state:
+**0 px difference**. The outer pins were already absent.
+
+So the only way to show them is to synthesise them host-side -- the pin colours
+and the win flags at `$700007` are both readable -- which is the same feature
+the locomotive would need, and a much larger job than a rendering fix.
+
+## 9. Loan -> map transition: margins flash before the black
+Reported 2026-09-05. Reproduced and measured; NOT fixed.
+
+Leaving the loan screen with B, per frame, guest columns against margins:
+
+| frames | guest | margins |
+|---|---|---|
+| 65-78 | 125.8 -> 8.5 | 176.3 -> 12.0 (tracking correctly) |
+| **79-90** | **0.0** | **189.3** -- full-brightness sky, twelve frames |
+| 91+ | 0.0 | 0.0 |
+
+The shape is the force-blank flash fixed earlier for the host-map compositor:
+the guest reaches black and the margins snap back to their pre-fade content.
+
+But it is **not** force blank here. Extending the per-line margin blank to fire
+whenever `PPU_forcedBlank()` is set changed nothing (tried, reverted), so the
+game must be fading brightness to 0 rather than setting INIDISP bit 7 on this
+path -- and the margins are simply never repainted during those frames, keeping
+what was last drawn.
+
+Note this screen no longer goes through `host_map_compose()` at all (report 3),
+so its `blanked` handling cannot apply; whatever paints these margins is on the
+other path.
+
+**Next step, and a warning about the obvious one.** A probe placed just before
+the per-line margin blank produced *no output at all* across frames 74-92, so
+that block is not reached during the transition -- a different path runs. Find
+which one first, rather than instrumenting the blank again. The stage-probe
+technique that solved the tax-menu smear is the right tool: snapshot one margin
+pixel at each end-of-frame stage, but for a frame in the middle of the flash.
