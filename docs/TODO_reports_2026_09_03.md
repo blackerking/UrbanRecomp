@@ -329,3 +329,40 @@ hook is reverted; only the decode fix is kept.
 The `01:f11a` analysis in `ROM_MAP.md` still stands as a description of the
 routine -- an 8-bit X stepped per frame, recycled via `$00c22c` on carry -- but
 its conclusion, that this is why objects vanish at the edge, does not.
+
+## Moving objects now cross the right margin -- FIXED
+
+Both halves were needed, which is why each measured 0 px alone:
+
+1. **The decode.** `PpuDecodeOamX` wraps the ambiguous band unless the slot is
+   hinted, so the traffic was thrown away before anything could draw it.
+2. **The compositor.** `host_map_compose()` fills the margin from a BG-only
+   host render, so a correctly decoded sprite was painted over anyway. An
+   OBJ-only pass (`g_snes_ppu_dbg_layer_mask = 0x10`) into a scratch buffer now
+   supplies those columns.
+
+Measured on `savestate_3` while panning: the object steps 4 px a frame from
+x=260 to x=349 across frames 94..116 -- exactly the window where slot 109 holds
+raw X 256..348 -- where before there was nothing.
+
+### The hint has to be per slot
+
+Hinting the whole band was too coarse. The city view parks HUD sprites in it as
+well, and a blanket hint decoded them positive and printed the date, "1902 JA",
+across the right margin of `savestate_9`.
+
+The classifier already separates them: traffic steps 4 px a frame and carries
+motion grace, parked HUD text never moves. Hinting only slots with
+`wsOamMotionGrace` keeps the boat and drops the HUD -- verified both ways, the
+object still appears and `savestate_9` is pixel-identical again.
+
+Verified: the guest's own columns change by **0 px**, and savestates 1, 2, 3, 5,
+7, 8 and 9 all render pixel-identical at rest.
+
+`SC_WS_CITY_OAM_RIGHT=0` and `SC_WS_MARGIN_OBJ=0` disable the two halves
+independently.
+
+**Note on the far end.** Beyond raw X 352 the decode is unconditional -- those
+values mean negative positions on hardware -- so an object leaving to the right
+still disappears once it passes 351 rather than running off the true edge. That
+is a separate limit and is not addressed here.

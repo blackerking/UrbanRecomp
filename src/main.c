@@ -652,6 +652,9 @@ static uint8_t *s_ws_scratch;
  * View Mode did, and its margins came out as the city's black wrapping in
  * rather than the wood the pass had drawn. */
 static uint8_t *s_ws_scratch_bg;
+/* OBJ-only re-render, so the host-map margins can carry sprites. */
+static uint8_t *s_ws_obj_layer;
+static int s_margin_obj_on = 1;   /* SC_WS_MARGIN_OBJ */
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
  *
@@ -911,6 +914,22 @@ static void handle_pos_stuff(void) {
         PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask |= 0x10;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
+      /* Margin sprites for the host-map view.
+       *
+       * host_map_compose() builds the picture as the guest's 256 columns
+       * followed by host-rendered map, and the host map draws BG tiles only,
+       * so any sprite past the guest's edge is discarded however it decodes.
+       * Render the line again with OBJ alone and hand that to the compositor.
+       *
+       * SC_WS_MARGIN_OBJ=0 disables it. */
+      if (s_ws_extra > 0 && s_ws_obj_layer && snes->vPos > 0 &&
+          snes->vPos <= kVideoHeight && s_margin_obj_on && host_map_screen_live()) {
+        g_snes_ppu_dbg_layer_mask = 0x10;          /* OBJ alone */
+        PpuBeginDrawing(g_ppu, s_ws_obj_layer, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
       /* SC_PASS_DIAG: render the SAME line twice into two surfaces, with
@@ -1240,6 +1259,39 @@ static void handle_pos_stuff(void) {
          * stays strict everywhere else -- the scenario selector's parked
          * sprites DO land in the band, which is what the strict default is
          * for. SC_WS_TITLE_OAM_RIGHT=0 restores the wrap. */
+        /* The city view wants the positive decode as well.
+         *
+         * Traffic really does enter the right margin: slot 109 runs raw X
+         * 256 -> 348 at 4 px a frame, about 24 frames inside the ambiguous
+         * band, before going on to 352..396 which decodes to -160..-116 and
+         * is correctly invisible. Strict wraps the whole run away, which is
+         * the locomotive missing from the margin.
+         *
+         * This is only half of it -- host_map_compose() fills those columns
+         * from a BG-only render, so the margin OBJ pass below is the other
+         * half. Neither shows anything alone.
+         *
+         * SC_WS_CITY_OAM_RIGHT=0 restores the wrap. */
+        if (s_ws_oam_strict && g_ram[0x14] == 0x00 && host_map_screen_live()) {
+          static int on = -1;
+          if (on < 0) { const char *e = getenv("SC_WS_CITY_OAM_RIGHT");
+                        on = (e && *e) ? (*e != '0') : 1; }
+          /* Only the slots that are MOVING.
+           *
+           * Hinting the whole band was too coarse: the city view parks HUD
+           * sprites there too, and the blanket hint decoded them positive
+           * and printed the date -- "1902 JA" -- across the right margin.
+           * That is exactly the ambiguity the strict default exists for.
+           *
+           * The classifier already separates the two: traffic steps 4 px a
+           * frame and carries motion grace, while parked HUD text does not
+           * move at all. So hint per slot on that. */
+          if (on && g_ppu) {
+            for (int s = 0; s < 128; s++)
+              if (g_ppu->wsOamMotionGrace[s])
+                s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+          }
+        }
         if (s_ws_oam_strict && g_ram[0x14] == 0x01 && s_ws_widen_title) {
           static int on = -1;
           if (on < 0) {
@@ -4494,6 +4546,11 @@ static void host_map_compose(void) {
    * Brightness alone can never express this: the register says 15 and means
    * nothing is displayed. */
   const bool blanked = PPU_forcedBlank(g_ppu) != 0;
+  uint32_t s_margin_backdrop;
+  { const uint16_t bd = g_ppu->cgram[0];
+    const uint8_t *bm = g_ppu->brightnessMult;
+    s_margin_backdrop = 0xff000000u | ((uint32_t)bm[bd & 31] << 16) |
+                        ((uint32_t)bm[(bd >> 5) & 31] << 8) | bm[(bd >> 10) & 31]; }
   const bool halve = advisor_page;   /* same test, computed above */
   { static int md = -1;
     if (md < 0) { const char *e = getenv("SC_MATH_DIAG"); md = (e && *e) ? 1 : 0; }
@@ -4600,6 +4657,22 @@ static void host_map_compose(void) {
     else
       for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
                         : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+    /* Sprites the host map cannot draw. dst[x] past the guest's edge was
+     * rendered by the PPU at x + s_ws_extra, and only s_ws_extra px of the
+     * wider strip has PPU coverage. Transparency is RGB-only: the render
+     * buffer leaves alpha clear, so comparing the whole word makes every
+     * backdrop pixel look opaque and paints the margin solid black. */
+    if (s_ws_obj_layer && s_margin_obj_on && !blanked) {
+      const uint32_t *ol =
+          (const uint32_t *)(s_ws_obj_layer + (size_t)y * s_video_pitch);
+      int hi = kVideoWidth + s_ws_extra;
+      if (hi > s_video_w) hi = s_video_w;
+      for (int x = kVideoWidth; x < hi; x++) {
+        const uint32_t c = ol[x + s_ws_extra];
+        if ((c & 0x00ffffffu) != (s_margin_backdrop & 0x00ffffffu))
+          dst[x] = 0xff000000u | (c & 0x00ffffffu);
+      }
+    }
   }
 }
 
@@ -6951,6 +7024,8 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
     if (e && *e) s_ws_obj_clip = (*e != '0'); }
+  { const char *e = getenv("SC_WS_MARGIN_OBJ");
+    if (e && *e) s_margin_obj_on = (*e != '0'); }
   { const char *e = getenv("SC_WS_OAM");
     if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");
@@ -6993,6 +7068,7 @@ int main(int argc, char **argv) {
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
     s_ws_scratch = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
     s_ws_scratch_bg = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
+    s_ws_obj_layer = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
     /* The per-frame choice above owns this now -- see the mode note there. */
     fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
             s_ws_extra, s_video_w, kVideoHeight);
