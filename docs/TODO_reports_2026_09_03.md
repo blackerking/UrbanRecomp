@@ -426,3 +426,66 @@ per line into buffers sized from `kVideoWidthMax = 256 + 96*2 = 448`, and
 both scratch surfaces. All of those have to grow together, and `main.c` still
 clamps `SC_WIDESCREEN` to 96 with a comment claiming that is the runner's cap --
 which is now stale.
+
+## The motion classifier only ever saw dx = 0 -- fixed
+
+The widescreen margins admit an unhinted moving sprite on the strength of
+`wsOamMotionGrace`, a per-slot countdown the PPU refreshes each frame when the
+slot's X has stepped. Measured on the city view, that countdown was never alive
+for longer than a single frame, so no game-authored object could hold one:
+
+| | longest unbroken run of frames with any slot in grace | frames with grace |
+|---|---|---|
+| before | **1** | 119 of 896 |
+| after | **68** | 475 of 897 |
+
+A moving sprite needs grace on EVERY frame to stay drawn in a margin, so at a
+run length of 1 the answer was effectively always no. That is the train the
+report describes, and the same countdown feeds `s_oam_right_hints`, so the city
+view's right margin was starved by the same fault.
+
+**The cause is a frame-boundary test that a multi-pass host defeats.**
+`PpuUpdateWidescreenOamHistory` guarded its body with "skip unless the line
+number stopped advancing", on the reasoning that lines rise 1..224 within a
+frame and only wrap between them. True for a host that renders each line once.
+This host does not: the city view re-renders every line into scratch surfaces
+to isolate the backgrounds and the OBJ layer, and the second pass over a line
+arrives with `line == lastLine` -- which the old test read as a new frame. The
+body ran on the order of once per line instead of once per frame, and since OAM
+does not change between two passes over the same line, every repeat saw
+`dx == 0`: the first pass set the grace, the repeats decremented it straight
+back to zero. Directly observed, the stored previous X equalled the current X
+on every single frame.
+
+The fix tests for the line number going BACKWARDS, which a repeated line never
+does. All nine save states are pixel-identical at rest.
+
+### Two things this cost, recorded so they are not repeated
+
+**The instrument caused the symptom it measured.** The probe built to watch this
+armed an extra OBJ-isolation render pass, which on the title -- where no margin
+pass runs and each line is otherwise rendered once -- created the very
+double-render that breaks the classifier. Every title measurement in this chase
+is therefore suspect. The result above is from the city view with no probe pass
+armed, which is why it is the one quoted.
+
+**A build that did not rebuild.** Two rounds of "baseline vs fixed" reported 0
+pixels different because both dumps came from the same binary. Hash the
+executable between the two builds; do not trust an empty error grep.
+
+## Known bug: the title's SimCity sign in the left margin
+
+Not fixed, and deliberately left. The sign travels out through the left margin
+correctly, but it then PARKS at x = -32 for about 1026 frames before the
+sequence repeats. Hardware clips it; a 96 px margin does not, so it would sit
+visible against the left border for the best part of twenty seconds -- which is
+the "sticking to the left border for a whole round" already reported from play
+and already reverted once.
+
+The margin gate hides a parked object once its grace expires, which is what
+stops that. The cost is that the sign fades rather than leaving cleanly. Both
+behaviours come from the same rule and no measurement taken here separates a
+sign that has finished its travel from one that is merely between steps.
+
+Anything further needs the title's own sequence data rather than a heuristic --
+the ROM knows when the sign's move ends, and the classifier can only guess.
