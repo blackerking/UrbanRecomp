@@ -3567,3 +3567,42 @@ dance, once per 8-cell group), and the animated-tile classifier calls. Removing
 those means replacing the whole loop in C, which needs the classifier in C too
 -- so the memo cache does not compose with it, and it is a bigger job than
 either step so far.
+
+### `01:f11a` -- why moving objects die at the right edge
+
+Reported from play: the locomotive and the selector pins are missing "only in
+widescreen". That framing is right, and an earlier note here calling it
+"culling" was too vague. The mechanism is an **8-bit overflow**, not a clip:
+
+    01:f124  LDA $7e21b5,X     ; sprite Y in shadow OAM
+    01:f128  CMP #$e0          ; parked? -> skip
+    01:f12c  LDA $7c           ; per-frame delta
+    01:f130  LDA $7e21b4,X     ; sprite X -- EIGHT BITS
+    01:f135  ADC $7c
+    01:f137  STA $7e21b4,X
+    01:f13b  BCC $f175         ; no carry: still on screen, done
+    01:f13f  JSL $00c22c       ; CARRY: X went past 255 -> despawn
+
+So an object is destroyed at the moment its X would exceed 255. Measured
+independently before the code was found: `SC_OAM_TRACK=1` across a 240-frame pan
+shows slot 109 walking 200, 204, 208 ... 248, **252** at 4 px a frame and then
+ceasing to exist, and of 43 slots seen near the edge not one ever holds an X
+through 256.
+
+The ROM's model has no room for the margin. X in shadow OAM is one byte; the
+9th bit lives in the separate high-OAM table the ROM manages elsewhere, and
+this routine cannot reach it. Nothing in OAM to reveal, so no decode setting,
+hint or compositing change can help -- consistent with the marquee-lights
+finding above, and with `SC_WS_OBJ_CLIP` and the right-hints both measuring 0 px.
+
+**What a fix would take.** A host hook on the carry path at `01:f13b`: instead
+of letting it despawn, keep the object alive and carry its X into the 9th bit
+for the width of the margin, then despawn at 256 + extraRight. That is a
+behaviour change, not a presentation one -- the same conclusion the marquee
+lights reached -- and it has to cope with the ROM continuing to add to a value
+it believes is 8-bit.
+
+The selector's missing pins are the same family seen from the other end: the
+ROM emits a pin per card it believes is on screen, so the columns widescreen
+reveals get none. Recorded already as a known gap for the ninth card; it is the
+same for the outer shipped ones.
