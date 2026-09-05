@@ -276,3 +276,56 @@ And the diagnostics that "proved" the block was never reached were gated on
 `s_frames`, which **`load_state()` restores from the save file** -- it starts
 around 31196, not 0, so no frame gate ever matched. Dump filenames use a
 separate run-relative counter. Gate probes on a counter you increment yourself.
+
+## CORRECTION (2026-09-05): the "game culls sprites" finding was wrong
+
+Reports 2 and 8 -- the locomotive, and the selector's outer pins and win marks
+-- were closed on the grounds that the sprites do not exist beyond the guest's
+view. **That was wrong, and the cause was a bug in my own diagnostic.**
+
+`SC_OAM_BAND` and `SC_OAM_TRACK` decoded the 9th X bit as
+`highOam[i >> 3] >> ((i & 7) * 2)`. High OAM packs **four** sprites per byte,
+two bits each, so it is `highOam[i >> 2] >> ((i & 3) * 2)`. Read the wrong way
+the shift runs off the end of the byte and bit 8 comes back as zero for most
+slots -- so every sprite looked confined to x < 256, which is exactly the
+evidence I used to declare culling.
+
+With the decode fixed, on the same pan of the same save state:
+
+| slot | X range | tile |
+|---|---|---|
+| 39 | 198..384 | 0 |
+| 109 | **256..396** | 111 |
+| 123 | 236..260 | 78 |
+
+Slot 109 is the mover the tracker followed. It goes to **396**, well into the
+margin. The objects are there.
+
+The user said from the start that the train and the pins are missing "only in
+widescreen". That was right, and my measurement was what was wrong.
+
+### What actually hides them
+
+Two layers, and both have to be dealt with:
+
+1. **The decode.** `PpuDecodeOamX` wraps `x >= 256 + extraRight` unconditionally,
+   and wraps `[256, 256+extraRight)` too unless the slot is hinted. Slot 109
+   spends part of its run beyond 352, where nothing but a wider `extraRight`
+   can help, and part inside the band, where a hint would.
+2. **The compositor.** In the city view `host_map_compose()` fills
+   `dst[256..447]` from the host map, which draws BG tiles only, so even a
+   correctly decoded sprite is painted over. That is why the right-hints and
+   the OBJ margin pass each measured 0 px *individually* -- and why testing
+   them together still failed, since the part of the run beyond 352 stays
+   wrapped regardless.
+
+### Also wrong, and now reverted
+
+The `01:f13b` carry path was read as the cull and a hook written to defer it.
+It makes no measurable difference (`SC_WS_OBJ_MARGIN` 0 vs 1: identical slot
+ranges), because that carry is not what removes these objects from view. The
+hook is reverted; only the decode fix is kept.
+
+The `01:f11a` analysis in `ROM_MAP.md` still stands as a description of the
+routine -- an 8-bit X stepped per frame, recycled via `$00c22c` on carry -- but
+its conclusion, that this is why objects vanish at the edge, does not.

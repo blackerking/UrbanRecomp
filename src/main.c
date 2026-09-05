@@ -1343,6 +1343,12 @@ static void handle_pos_stuff(void) {
        * this rather than a blanket switch either way. Y is printed because
        * a parked sprite is usually parked in Y as well (>= 224), which
        * separates the two cases without guessing. */
+      /* High OAM packs FOUR sprites per byte, two bits each: byte i>>2,
+       * shift (i&3)*2. Read as i>>3 with shift (i&7)*2 -- as this did --
+       * the shift runs off the end of the byte and the 9th X bit comes
+       * back as zero for most slots. That is not cosmetic: it made every
+       * sprite look confined to x < 256 and produced a confident, wrong
+       * conclusion that the game culls its objects at the view edge. */
       if (getenv("SC_OAM_BAND") && g_ppu) {
         static int done = 0;
         if (!done && s_frames > 20) {
@@ -1352,8 +1358,8 @@ static void handle_pos_stuff(void) {
           for (int i = 0; i < 128; i++) {
             const unsigned lo = g_ppu->oam[i * 2];
             const unsigned hi = g_ppu->oam[i * 2 + 1];
-            const unsigned hbits = g_ppu->highOam[i >> 3];
-            const unsigned x9 = (lo & 0xff) | (((hbits >> ((i & 7) * 2)) & 1) << 8);
+            const unsigned hbits = g_ppu->highOam[i >> 2];
+            const unsigned x9 = (lo & 0xff) | (((hbits >> ((i & 3) * 2)) & 1) << 8);
             const unsigned y = (lo >> 8) & 0xff;
             const unsigned tile = hi & 0xff;
             const unsigned attr = (hi >> 8) & 0xff;
@@ -1385,8 +1391,8 @@ static void handle_pos_stuff(void) {
         for (int i = 0; i < 128; i++) {
           const unsigned lo = g_ppu->oam[i * 2];
           const unsigned hi = g_ppu->oam[i * 2 + 1];
-          const unsigned hb = g_ppu->highOam[i >> 3];
-          const unsigned x9 = (lo & 0xff) | (((hb >> ((i & 7) * 2)) & 1) << 8);
+          const unsigned hb = g_ppu->highOam[i >> 2];
+          const unsigned x9 = (lo & 0xff) | (((hb >> ((i & 3) * 2)) & 1) << 8);
           const unsigned y = (lo >> 8) & 0xff;
           if (y < 224 && x9 >= 180 && x9 < 400)
             fprintf(stderr, "[oamtrk] f=%llu slot=%d x=%u y=%u tile=%u\n",
