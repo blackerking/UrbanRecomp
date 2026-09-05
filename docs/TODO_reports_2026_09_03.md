@@ -388,3 +388,41 @@ margins.
 After the change the border/panel ratio holds at **0.21 for every frame** of the
 fade and both reach 0 together. All eight save states are pixel-identical at
 rest.
+
+## The train shows one tile then vanishes -- diagnosed, not fixed
+
+Reported from play: on the normal map the train is fine, then in the margin
+"it is shown just one tile and then it disappears suddenly".
+
+Both halves of that are now explained, and one of my guesses is disproved.
+
+**It really is one tile.** Tracking OAM across a pan, slots 100-108 sit
+permanently parked at x=384 and only **slot 109 moves**. The object is a single
+sprite, so "just one tile" is not a rendering fault -- that is the whole object.
+My guess that this and the intro sign were one fault, multi-sprite objects
+losing members individually, is wrong for the train at least.
+
+**The sudden disappearance is an architectural mismatch**, not a decode or
+compositing bug:
+
+* the composited picture is 448 px -- the guest's 256 columns at `dst[0..255]`,
+  then **192 px** of host map at `dst[256..447]`;
+* the PPU renders `extraRight = 96`, which covers only `dst[256..351]`.
+
+So beyond dst 351 there is no PPU output to composite at all, and the sprite
+stops dead halfway across the visible margin. That is also why the margin OBJ
+pass measured a clean crossing from x=260 to x=349 and then nothing.
+
+**The route, and why it is not a one-liner.** The runner already has both
+pieces: `kPpuExtraLeftRight` is now **272** (upstream raised it for ultrawide),
+and `PpuSetExtraSideSpace(left, right, bottom)` sets an asymmetric per-side
+margin within that budget. Keeping `extraLeft = 96` preserves every existing
+offset (the compositor reads the guest at `gst + s_ws_extra`), so asking for
+`right = 192` would give the PPU coverage across the whole strip.
+
+What blocks it is buffer width. The PPU would render 96 + 256 + 192 = **544 px**
+per line into buffers sized from `kVideoWidthMax = 256 + 96*2 = 448`, and
+`PpuBeginDrawing` is handed `s_video_pitch` for the frame, the OBJ layer and
+both scratch surfaces. All of those have to grow together, and `main.c` still
+clamps `SC_WIDESCREEN` to 96 with a comment claiming that is the runner's cap --
+which is now stale.
