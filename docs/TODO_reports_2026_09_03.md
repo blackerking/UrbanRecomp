@@ -95,18 +95,38 @@ ask whether something is a sprite: the host's own per-line passes
 line and clobber it, so the env reads as having no effect. Isolate a layer with
 a scratch-buffer pass instead.
 
-## 3. Loan view broken in widescreen
-`savestate_7.bin`
+## 3. Loan view broken in widescreen -- FIXED
 
-Requested: centre the screen and colour the borders like the History / TAX
-pages.
+`savestate_7.bin`. The bank scene showed city terrain smeared across both
+margins.
 
-**Read the centring note in the compositor first.** Moving the guest moves
-everything the guest drew, HUD included, which is why advisor-page centring was
-backed out twice. Colouring the borders instead of showing map removes the
-map-continuity half of that problem but not the other half. Worth checking
-whether the loan view has any HUD to displace -- if it does not, centring it may
-be safe where the advisor pages were not.
+It was the host map, drawing exactly what it was told to.
+`host_map_screen_live()` accepted the loan screen as the city view, because its
+BG2 test allows the map on **either** screen and the bank puts BG2 on the
+subscreen. Two things then followed: the host map painted terrain into the
+margins, and the margin blank was skipped, since that is guarded off whenever
+this function says yes -- so nothing could clean up after it.
+
+Enable bits separate the three cases that reach that test:
+
+| screen | main | sub | |
+|---|---|---|---|
+| city | `17` BG1\|BG2\|BG3\|OBJ | `04` | BG2 on MAIN |
+| advice | `14` BG3\|OBJ | `03` | BG2 sub, BG1 sub |
+| loan | `15` BG1\|BG3\|OBJ | `02` | BG2 sub, **BG1 MAIN** |
+
+So the map on the subscreen only, while BG1 holds the main screen, means the
+picture belongs to that BG1 scene and the city is merely showing through colour
+math. Testing "BG2 on main" instead would also have caught the loan screen --
+and would have dropped the advice page with it, whose dimmed city in the
+margins is wanted.
+
+With the host map out of the way the existing machinery does the rest: the
+margins are blanked and then filled with the screen's own sky colour, which is
+the "borders coloured like History or TAX" that was asked for.
+
+Verified: savestates 1, 2, 3, 5, 8 and 9 are pixel-identical, and so is the
+advice page with the panel open.
 
 ## 4. Mouse pointer off-spot after refocusing -- FIXED
 

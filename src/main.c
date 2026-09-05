@@ -3830,6 +3830,28 @@ static bool host_map_screen_live(void) {
    * Without both, the host map painted terrain across all five. */
   if (!(((g_ppu->screenEnabled[0] | g_ppu->screenEnabled[1]) >> 1) & 1))
     return false;                       /* BG2 = the map, on either screen */
+  /* The bank/loan screen is a full-screen art scene, not the city.
+   *
+   * It reports $14 == 0 with BG2 enabled on the SUBSCREEN, so the test above
+   * passed it and the host map painted city terrain into both margins --
+   * reported from play as the loan view being broken in widescreen. The
+   * margin blank could not clean up after it either, since that is skipped
+   * whenever this function says yes.
+   *
+   * Enable bits separate the three cases that reach here:
+   *
+   *   city    main=17 (BG1|BG2|BG3|OBJ)  sub=04    BG2 on MAIN
+   *   advice  main=14 (BG3|OBJ)          sub=03    BG2 sub, BG1 sub
+   *   loan    main=15 (BG1|BG3|OBJ)      sub=02    BG2 sub, BG1 MAIN
+   *
+   * So: the map only on the subscreen while BG1 holds the main screen means
+   * the picture belongs to that BG1 scene, and the city is merely showing
+   * through colour math. Testing "BG2 on main" instead would have caught the
+   * loan screen too, and would also have dropped the advice page, whose
+   * dimmed city in the margins is wanted. */
+  if (!((g_ppu->screenEnabled[0] >> 1) & 1) &&
+      ((g_ppu->screenEnabled[0] >> 0) & 1))
+    return false;                       /* BG1 scene over a subscreen map */
   if (s_wood_widened) return false;     /* View Mode */
   return true;
 }
