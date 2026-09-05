@@ -4461,7 +4461,41 @@ static void host_map_compose(void) {
   { static int on = -1;
     if (on < 0) { const char *e = getenv("SC_EXT_SUB");
                   on = (e && *e) ? (*e != '0') : 1; }
-    if (on && PPU_mathEnabled(g_ppu) && PPU_subtractColor(g_ppu) &&
+    /* Only at FULL brightness.
+     *
+     * The subtrahend is derived from the difference between the guest's own
+     * columns and the host render of the same cells. During a fade those two
+     * do not track each other exactly, and the estimator reads the gap as
+     * colour math -- so the margin was dimmed on top of the fade and lagged
+     * behind it, then snapped level when the fade finished. Measured leaving
+     * the loan screen: the margin/guest ratio falls 1.06 -> 0.42 across the
+     * fade-in and jumps back to 1.06 the frame it completes. Reported from
+     * play as the fading not being synchronous.
+     *
+     * Every screen that really does subtract sits at brightness 15, so
+     * requiring that costs nothing and removes the whole class: with the
+     * estimator off the ratio holds at 1.06 for every frame of the fade. */
+    /* Not while the picture is CHANGING BRIGHTNESS.
+     *
+     * The subtrahend is derived from the difference between the guest's own
+     * columns and the host render of the same cells. Mid-fade those two do
+     * not track exactly, the estimator reads the gap as colour math, and the
+     * margin gets dimmed on top of the fade -- so it lags and then snaps
+     * level when the fade ends. Measured leaving the loan screen: the
+     * margin/guest ratio falls 1.06 -> 0.42 across the fade-in and returns to
+     * 1.06 the frame it completes. Reported from play as the fading not being
+     * synchronous.
+     *
+     * Testing brightness == 15 does NOT catch it: this game fades per
+     * scanline, so the register still reads 15 when the compositor runs.
+     * What does catch it is the master brightness moving at all between
+     * frames -- a screen that genuinely subtracts sits still. */
+    static int last_bright = -1;
+    const int bright_now = (int)g_ppu->inidisp;
+    const bool settled = (last_bright == bright_now);
+    last_bright = bright_now;
+    if (on && settled &&
+        PPU_mathEnabled(g_ppu) && PPU_subtractColor(g_ppu) &&
         PPU_addSubscreen(g_ppu)) {
       static int hr[256], hg[256], hb[256];
       memset(hr, 0, sizeof hr); memset(hg, 0, sizeof hg); memset(hb, 0, sizeof hb);
