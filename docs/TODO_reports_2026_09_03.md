@@ -245,33 +245,34 @@ So the only way to show them is to synthesise them host-side -- the pin colours
 and the win flags at `$700007` are both readable -- which is the same feature
 the locomotive would need, and a much larger job than a rendering fix.
 
-## 9. Loan -> map transition: margins flash before the black
-Reported 2026-09-05. Reproduced and measured; NOT fixed.
+## 9. Loan -> map transition: margins flash before the black -- FIXED
 
-Leaving the loan screen with B, per frame, guest columns against margins:
+Leaving the loan screen, the guest faded 125.8 -> 8.5 with the margins tracking
+it, then the frame the guest reached 0 the margins snapped to 189.3 -- full
+brightness -- and held it for twelve frames.
 
-| frames | guest | margins |
-|---|---|---|
-| 65-78 | 125.8 -> 8.5 | 176.3 -> 12.0 (tracking correctly) |
-| **79-90** | **0.0** | **189.3** -- full-brightness sky, twelve frames |
-| 91+ | 0.0 | 0.0 |
+The per-line margin blank was painting it. It writes the backdrop through
+`brightnessMult`, and SimCity ends a fade by writing `$8f`: force blank on,
+**brightness restored to 15**. So it computed `cgram[0]` at full intensity and
+painted the sky into the margins while the guest was black. The PPU had already
+blanked the line correctly; this painted over it.
 
-The shape is the force-blank flash fixed earlier for the host-map compositor:
-the guest reaches black and the margins snap back to their pre-fade content.
+Probing one margin pixel through a single line said it outright:
 
-But it is **not** force blank here. Extending the per-line margin blank to fire
-whenever `PPU_forcedBlank()` is set changed nothing (tried, reverted), so the
-game must be fading brightness to 0 rather than setting INIDISP bit 7 on this
-path -- and the margins are simply never repainted during those frames, keeping
-what was last drawn.
+    after_runLine        row100[400]=000000  blank=1
+    after_margin_blank   row100[400]=adbdce  blank=1
 
-Note this screen no longer goes through `host_map_compose()` at all (report 3),
-so its `blanked` handling cannot apply; whatever paints these margins is on the
-other path.
+Fixed by painting black when `PPU_forcedBlank()` -- the same test the
+compositor already uses, on the path that runs when the compositor does not.
+Margins now reach 0.0 on the same frame the guest does. Savestates 1, 2, 3, 5,
+7, 8 and 9 are pixel-identical at rest.
 
-**Next step, and a warning about the obvious one.** A probe placed just before
-the per-line margin blank produced *no output at all* across frames 74-92, so
-that block is not reached during the transition -- a different path runs. Find
-which one first, rather than instrumenting the blank again. The stage-probe
-technique that solved the tax-menu smear is the right tool: snapshot one margin
-pixel at each end-of-frame stage, but for a frame in the middle of the flash.
+**Two false trails, both worth recording.** An earlier attempt added
+`PPU_forcedBlank()` to this block's *condition* rather than to the colour it
+writes -- so it still painted bright sky, and "changed nothing" looked like
+evidence that force blank was not involved. It was.
+
+And the diagnostics that "proved" the block was never reached were gated on
+`s_frames`, which **`load_state()` restores from the save file** -- it starts
+around 31196, not 0, so no frame gate ever matched. Dump filenames use a
+separate run-relative counter. Gate probes on a counter you increment yourself.

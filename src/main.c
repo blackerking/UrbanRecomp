@@ -949,11 +949,27 @@ static void handle_pos_stuff(void) {
       if (s_ws_extra > 0 && snes->vPos >= 1 && snes->vPos <= kVideoHeight &&
           (s_ws_clamp_now & 0x0fu) == 0x0fu &&
           !(s_host_map && host_map_screen_live())) {
+        /* Force blank paints BLACK, not the backdrop.
+         *
+         * brightnessMult covers a fade, and misses the other way a SNES shows
+         * nothing. SimCity ends a fade by writing $8f -- force blank on,
+         * brightness restored to 15 -- so this computed cgram[0] at FULL
+         * intensity and painted the sky into the margins while the guest was
+         * black. Leaving the loan screen that is twelve frames of bright sky
+         * either side of a black picture, reported from play as the
+         * transition back to the map not fading correctly.
+         *
+         * Found by probing one margin pixel through the line: after
+         * ppu_runLine it is 000000, and after this block adbdce. The PPU had
+         * already blanked the line correctly; this painted over it.
+         *
+         * The same fault the compositor handles with its own `blanked` test,
+         * on the path that runs when the compositor does not. */
         const uint16_t bd = g_ppu->cgram[0];
-        const uint32_t back = 0xFF000000u
+        const uint32_t back = PPU_forcedBlank(g_ppu) ? 0xFF000000u : (0xFF000000u
             | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
             | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
-            | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
+            | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f]);
         uint32_t *row = (uint32_t *)(s_video_pixels +
                                      (size_t)(snes->vPos - 1) * (size_t)s_video_pitch);
         for (int x = 0; x < s_ws_extra; x++) row[x] = back;
