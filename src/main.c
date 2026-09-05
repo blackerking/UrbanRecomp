@@ -2997,7 +2997,20 @@ static void ws_hide_backdrop_furniture(void) {
  * content out there is skipped row by row. */
 #define SC_WS_FLAT_RUN 8
 static void ws_fill_flat_margins(void) {
-  if (!ws_display_settled()) return;
+  /* Runs DURING a fade as well, not only once the display has settled.
+   *
+   * ws_display_settled() demands brightness == 15, so through a fade this
+   * was skipped and the margins kept the per-line blank's black while the
+   * guest dimmed gradually. Measured on the city overview, dismissing it:
+   * the panel walks 216 -> 15 over fourteen frames while the border drops
+   * from 49 to 0 in ONE. Reported from play as the green border being drawn
+   * to black too fast.
+   *
+   * Nothing here needs full brightness. The colour painted is the guest's
+   * own edge pixel, which the PPU has already dimmed by the same amount, so
+   * the margin tracks the fade for free. Force blank still bars it -- then
+   * there is genuinely nothing to show, and the blank owns the margins. */
+  if (!g_ppu || PPU_forcedBlank(g_ppu)) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
   const int right0 = s_video_w - s_ws_extra;
   /* All rows or none: this is a property of the SCREEN, not of a row.

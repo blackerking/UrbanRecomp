@@ -366,3 +366,25 @@ independently.
 values mean negative positions on hardware -- so an object leaving to the right
 still disappears once it passes 351 rather than running off the true edge. That
 is a separate limit and is not addressed here.
+
+## Overview / Vote / History: the border went black in one frame -- FIXED
+
+Reported from play: dismissing the city overview, the green border is "drawn to
+black too fast", while the fade back into the map is on point.
+
+`ws_fill_flat_margins()` was gated on `ws_display_settled()`, which demands
+`brightness == 0x0f`. So the moment a fade starts the fill stops running and the
+margins keep the per-line blank's black, while the guest dims gradually.
+Measured on `savestate_4` (dismiss with X -- the pad bit, not the physical
+label): the panel walks 216 -> 15 over fourteen frames while the border drops
+49 -> 0 in **one**.
+
+Nothing in that function needs full brightness. The colour it paints is the
+guest's own edge pixel, which the PPU has already dimmed by the same amount, so
+running it during a fade makes the margin track for free. Force blank still bars
+it -- there is genuinely nothing to show then, and the per-line blank owns the
+margins.
+
+After the change the border/panel ratio holds at **0.21 for every frame** of the
+fade and both reach 0 together. All eight save states are pixel-identical at
+rest.
