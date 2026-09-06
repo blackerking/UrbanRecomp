@@ -3606,3 +3606,85 @@ The selector's missing pins are the same family seen from the other end: the
 ROM emits a pin per card it believes is on screen, so the columns widescreen
 reveals get none. Recorded already as a known gap for the ninth card; it is the
 same for the outer shipped ones.
+
+## The train and the plane: what they actually are
+
+Asked for as "decomp the train function and the plane function". There is no
+such function, and finding that out took ruling out two plausible systems.
+
+### Ruled out: `$0ced` is not a traffic table
+
+`$0ced` is real -- 10 slots of 6 bytes, free marker `$ffff`, allocator
+`03:c42a` taking a type in `A` -- but it holds **news characters**, not
+vehicles. Every allocation site, with the event each posts through `03:be04`:
+
+| site | type | event | |
+|---|---|---|---|
+| `03:ba3a` | `$0A` | `$23` | disaster block |
+| `03:ba7a` | `$07` | `$09` | |
+| `03:bb15` | `$0E` | `$0A` | |
+| `03:bba3`, `03:bbf5` | `$0B` | `$20` | the monster, already known |
+| `03:bc77` | `$0C` | `$21` | |
+| `03:bd37` | `$14` | `$30` | |
+| `03:bdf6` | `$08` | `$24` | |
+| `03:c3f4` | `$13` | `$31`/`$2f` | population milestone |
+| `03:c4cc` | `$01` | `$27`/`$26` | milestone, gated on pop >= `$7530` |
+| `03:c624`, `03:c66d`, `03:c682` | `$00` | -- | tutorial setup |
+
+The only per-frame consumer of the type is the drawer at `02:b66a`, which adds
+`$10` and uses it as a graphic index. Nothing steps a position. The dialog
+block confirms the cast: Bowser, earthquake, fire, flood, plane crash,
+tornado, meltdown, shipwreck -- and **no train-crash message at all**.
+
+### Ruled out: the `02:bc8f` sprite cluster
+
+Draws ids `$0D`, `$0E`, `$0F`, `$10`, `$0C` at hardcoded coordinates
+(`$80,$80`, `$88`, `$32`, `$74`). A fixed panel, not map objects.
+
+### What they are: animated tiles
+
+Both are **map tiles whose graphic index carries a rolling phase**, not
+sprites and not entities. The whole mechanism is `02:8b34`:
+
+```c
+unsigned classify(unsigned cell) {
+  unsigned tile = map[cell] & 0x03ff;          /* $7f0200,X */
+  unsigned cls;
+  if      (tile < 0x30)                cls = tile;   /* terrain maps 1:1 */
+  else if (tile == 0x7f  ||                          /* monster stamp   */
+           tile == 0x364 || tile == 0x365) cls = 0x28;
+  else if (tile == 0x354 || tile == 0x355) cls = 0x01;
+  else return other_ladder(tile);              /* 02:8b97 */
+
+  if (cls >= 0x14 && cls < 0x26) {             /* the animated band */
+    if (mode == 3 && scenario == 7) cls = 0x14;      /* pinned */
+    else {
+      anim = (anim + 1) & 0x0f;                /* $0b3b, 02:8b83 */
+      cls += anim;
+    }
+  }
+  return cls;
+}
+```
+
+`$0b3b` advances **once per classified cell**, not once per frame. So
+consecutive animated cells along a road or a rail receive consecutive frames,
+and that rolling phase down a line of tiles is what reads on screen as a
+vehicle travelling along it. Nothing holds a train's position because no train
+exists as an object: classes `$14`-`$25` are the animated band, and the
+apparent motion is an artefact of the counter's phase walking the cells.
+
+**Why this matters for widescreen.** The counter is a side effect of
+classification, so the number of cells classified sets the phase. The host map
+renderer classifies the margins as well as the guest's columns, so its phase
+runs ahead of the guest's, and a vehicle that reads as continuous inside the
+authentic 256 need not line up across the boundary. That is the shape of
+"shown just one tile and then it disappears suddenly", and it is a phase
+problem, not a clipping one -- which is why the OAM work never found it.
+
+### Still open
+
+Which class in `$14`-`$25` is the train and which is the plane. The band is 18
+entries and nothing here names them; the map is `tile id -> graphic`, and that
+table has not been read. A capture with a train on screen, or the tile set in
+`extracted_assets/`, would settle it in one step.
