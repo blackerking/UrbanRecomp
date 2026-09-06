@@ -489,3 +489,131 @@ sign that has finished its travel from one that is merely between steps.
 
 Anything further needs the title's own sequence data rather than a heuristic --
 the ROM knows when the sign's move ends, and the classifier can only guess.
+
+## The ninth scenario had no win/lose rules at all -- fixed
+
+Reported from play: "Sylt is losing after a short time." It was losing every
+time, immediately and unavoidably.
+
+Every per-scenario table the ROM indexes with `$0040` holds EIGHT entries, and
+they sit back to back, so index 8 reads the first entry of whatever table
+follows. `03:cec8` already repaired the seed. Three more were still short:
+
+| table | what index 8 read | fix |
+|---|---|---|
+| deadline year `$03c5b3` | `5`, the first entry of the countdown table | 2057 |
+| objective ladder `03:c557`+ | ran `Y = 0..6`, fell through writing NO result | a rule of its own, below |
+| win-mark mask `$03e334` | `0xbb22` | bit 8 |
+
+**How the loss happened.** `03:c502` computes deadline minus `$0b53` and walks
+`$0ccb` down a 5,4,3,2,1,0 countdown, evaluating the objective at the end.
+Against a deadline of 5 and a start year of 2047 the `SBC` borrows, `03:c51e`
+clamps the remainder to 0, and all six countdown steps are consumed in six
+calls. `$0deb` is 1 there against the `CMP #$0004` at `03:c54b`, so the verdict
+was always a loss. Confirmed in play afterwards: `$3e=3 $40=8 year=2047
+A=0809`, `$0ccb` steady at 0 across 59 samples, `$0d87` never written.
+
+The win-mark table matters even though nothing could win before: with the
+objective repaired, `0xbb22` would have gone to SRAM `$700007` via `03:e326`,
+scattering marks across scenarios never played and setting bit 15, the game's
+own "all six beaten" flag. Bit 8 is free -- the six scenarios own 0-5, Las
+Vegas and free play 6-7.
+
+### Known bug: Sylt shows no win mark
+
+Not fixed, by decision. The drawer at `03:ded0` walks exactly eight bits with
+two eight-entry coordinate tables (`$03df20`, `$03df30`), so bit 8 has no
+coordinates and paints nothing. Showing it means synthesising the sprite host
+side, which needs the mark's tile and palette; `SC_MARK_DIAG=1` prints both
+from a real mark the next time one passes the selector, so that groundwork is
+done. The win itself records correctly in SRAM -- only the card is unmarked.
+
+Also still unverified: that Sylt can be WON. The premature loss is measured
+fixed; reaching 2057 at city class 4 has not been played through.
+
+## The city name -- fixed
+
+Reported from play: Sylt was called PRACTICE on the fast-travel minimap and in
+view mode. Nothing was corrupt. `03:cf19` copies a length-prefixed name to
+`$0b5b` from a pointer table at `$03cf32`, and that table is one of the few
+indexed by `$0040` that is NOT short: it has a real ninth entry, and the ninth
+entry is the practice map's own name, which index 8 legitimately is.
+
+| idx | 0-5 | 6 | 7 | 8 |
+|---|---|---|---|---|
+| | CISCO BERN TOKYO DETROIT BOSTON RIO | LASVEGAS | FREEDOM | **PRACTICE** |
+
+Rewritten in place at `03:cf31`, in the `A = 0x0a` alphabet the briefing writer
+already uses. One stored name feeds both the minimap and view mode, so both
+follow.
+
+**The gate took two attempts, and the first was wrong.** Index 8 is also the
+tutorial, so the rename has to distinguish them. The latch was cleared only at
+`03:ddb6`, the selector -- which the tutorial never reaches, because it starts
+from the main menu. A latch left set by a Sylt session survived into the next
+practice map and renamed it: "now the Practice map shows Sylt". It is now
+cleared at `03:ce2e`, the map-loader entry BOTH maps pass through, and set
+again at the swap, so it describes the load in progress and nothing earlier --
+and it does so whichever order the seed and the swap run in.
+
+## The selector's marks are not a job for the motion classifier -- fixed
+
+Reported from play once the classifier started working: on the selector the red
+marks "are visible only when the screen is moving, not when it stands still",
+and the parked green bracket "gets back with small fragments" during a scroll.
+
+Both are the temporal fallback doing exactly what it says. `03:ded0` places
+each mark at `$df30,Y` MINUS the smooth-scroll `$16`; at the ninth column `$16`
+is `$50`, so bits 0 and 3 -- column 0, San Francisco and Detroit -- land at
+`14 - 80 = -66`, inside the left margin. Genuine margin content, admitted while
+its X changed and dropped when it stopped.
+
+A heuristic is the wrong tool on a screen the host can enumerate. The runner
+gained `wsOamMotionGraceOn`; the selector turns it off and hints the marks by
+name instead, their positions recomputed from the ROM's own two tables and the
+live scroll and matched against OAM. Nothing else in the margins is claimed,
+so the bracket stays out.
+
+### What Sylt's win condition should be -- decided
+
+The full set, decompiled from `03:c548`:
+
+| idx | scenario | start -> deadline | objective |
+|---|---|---|---|
+| 0 | San Francisco | 1906 -> 1911 | *(nothing further)* |
+| 1 | Bern | 1965 -> 1975 | traffic `$0c05` **< 80** |
+| 2 | Tokyo | 1961 -> 1966 | score `$0ded` **>= 500** |
+| 3 | Detroit | 1972 -> 1982 | crime `$0c01` **< 60** |
+| 4 | Boston | 2010 -> 2015 | score **>= 500** |
+| 5 | Rio | 2047 -> 2057 | score **>= 500** |
+| 6 | Las Vegas | 2096 -> 2106 | *(nothing further)* |
+| 7 | free play | -- | never judged |
+
+`$0ded` is the city score, initialised to exactly `#$01f4` = 500 at `03:b485`
+in the block that clears the evaluation counters, so ">= 500" means back to
+where it started. `$0c01`/`$0c05` are two of the four statistics copied
+together to the evaluation page at `03:b582`, and they line up with Detroit's
+and Bern's themes.
+
+**The gate none of the entries above mentions.** `03:c54b` tests `$0deb >= 4`
+before any per-scenario objective is reached, and the class ladder at
+`03:81d8` prices class 4 at **100,000 inhabitants**:
+
+| class | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| people | <2k | 2k | 10k | 50k | **100k** | 500k |
+
+So every stock scenario secretly requires 100k. Sylt starts at 3,400 on a
+small island -- the real one holds about 18,000 -- so under that gate it could
+not have been won at all whatever objective it was given, and adding a score
+test would only have been strictly harder, the class gate coming first either
+way.
+
+**Decided: score >= 500 and city class >= 2, within the ten years already
+set (2047 -> 2057).** Both halves are the ROM's own measures rather than
+invented ones: the score bar three stock scenarios already use, and a size
+floor of 10,000 that an island can plausibly reach. Implemented at `03:c548`,
+ahead of the class gate, jumping to the ROM's own `c5a7`/`c5ac` so the result
+is still stored in one place. The earlier hook that routed index 8 into the
+ladder alongside scenarios 0 and 6 is gone -- it sat *after* the class gate and
+so could never have fired.

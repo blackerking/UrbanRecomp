@@ -1323,6 +1323,58 @@ static void handle_pos_stuff(void) {
          * the same X tiles the on-screen marks use). Hardware clips those
          * entirely; a 96 px margin does not. Whether they land on the right
          * cards is the thing to look at. */
+        /* The scenario selector's margin sprites are NOT a job for the
+         * motion classifier.
+         *
+         * The won-mark drawer at 03:ded0 puts each mark at $df30,Y MINUS the
+         * smooth-scroll $16. Scrolled to the ninth column, $16 is $50, so the
+         * marks for bits 0 and 3 -- column 0, San Francisco and Detroit --
+         * land at x = 14 - 80 = -66, inside the left margin. They are genuine
+         * margin content, and with the classifier deciding, they appeared
+         * only while the screen was moving and vanished when it stopped.
+         * Reported from play exactly that way. The same grace also let the
+         * parked second selection bracket back in as fragments during a
+         * scroll -- the ghost this file already fought once.
+         *
+         * So on this screen the fallback is switched off and the marks are
+         * hinted by name instead. Their positions are not a guess: they are
+         * recomputed from the ROM's own two tables and the live scroll, and
+         * matched against OAM. Nothing else in the margins is claimed. */
+        if (s_ws_oam_strict && g_ram[0x14] == 0x0b && g_ppu) {
+          static const unsigned kMarkX[8] =
+              { 0x0e, 0x5e, 0xae, 0x0e, 0x5e, 0xae, 0xfe, 0xfe };
+          static const unsigned kMarkY[8] =
+              { 0x14, 0x14, 0x14, 0x6c, 0x6c, 0x6c, 0x14, 0x6c };
+          g_ppu->wsOamMotionGraceOn = 0;
+          const unsigned scroll = g_ram[0x16] | ((unsigned)g_ram[0x17] << 8);
+          const unsigned mask   = g_ram[0x42] | ((unsigned)g_ram[0x43] << 8);
+          for (int b = 0; b < 8; b++) {
+            if (!((mask >> b) & 1u)) continue;
+            const unsigned ex = (kMarkX[b] - scroll) & 0x1ffu;
+            const unsigned ey = kMarkY[b] & 0xffu;
+            if (ex < 256u) continue;          /* on screen; needs no hint */
+            for (int s = 0; s < 128; s++) {
+              const unsigned lo = g_ppu->oam[s * 2];
+              const unsigned hb = g_ppu->highOam[s >> 2];
+              const unsigned x9 =
+                  (lo & 0xffu) | (((hb >> ((s & 3) * 2)) & 1u) << 8);
+              if (x9 != ex || ((lo >> 8) & 0xffu) != ey) continue;
+              /* Past the ambiguous band it decodes negative, so it is the
+               * LEFT hint that admits it; inside the band it is the right. */
+              if (x9 >= 256u + (unsigned)g_ppu->extraRightCur)
+                s_oam_left_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+              else
+                s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+              if (getenv("SC_MARK_DIAG"))
+                fprintf(stderr, "[mark] bit=%d slot=%d x9=%u y=%u tile=%u"
+                                " attr=%02x scroll=%u\n",
+                        b, s, x9, ey, g_ppu->oam[s * 2 + 1] & 0xff,
+                        (g_ppu->oam[s * 2 + 1] >> 8) & 0xff, scroll);
+            }
+          }
+        } else if (g_ppu) {
+          g_ppu->wsOamMotionGraceOn = 1;
+        }
         /* The scenario selector's missing won-marks CANNOT be fixed here.
          *
          * Reported from play: widescreen reveals two card columns the
@@ -2136,9 +2188,19 @@ static bool s_ninth_scenario;
 static uint8_t *s_sylt_map;
 static long s_sylt_map_len;
 static bool s_sylt_map_armed;   /* only when the ninth column is confirmed */
+/* Set once Sylt's map is actually in place, cleared on the way back to the
+ * selector. Index 8 is the practice map as well, so "$0040 == 8" alone
+ * cannot tell the two apart after the arm has been consumed. */
+static bool s_sylt_city;
 static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
                                       * Past the tilemap's own 359 px, which
                                       * selector_extend_tilemap() fills in. */
+
+/* One character of the stored city name, for SC_SCEN_DIAG. */
+static char nmc(unsigned i) {
+  const unsigned v = g_ram[0x0b5b + 1 + i];
+  return (v >= 0x0a && v <= 0x23) ? (char)(0x41 + v - 0x0a) : 0x2e;
+}
 
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
   if (!s_ninth_scenario || bank != 0x03) return;
@@ -2158,6 +2220,7 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
        * same routine if the ninth column is confirmed. Backing out of Sylt
        * without starting it therefore cannot leave it armed for the tutorial. */
       s_sylt_map_armed = false;
+      s_sylt_city = false;
       selector_extend_tilemap();
       sylt_place_card();
       break;
@@ -2218,6 +2281,116 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       if (g_ram[0x52] == 4) {
         g_ram[0x22] = (uint8_t)(s_ninth_scroll & 0xff);
         g_ram[0x23] = (uint8_t)((s_ninth_scroll >> 8) & 0xff);
+      }
+      break;
+    /* ---- The ninth scenario's win/lose rules ------------------------
+     *
+     * Every per-scenario table the ROM indexes with $0040 has EIGHT entries,
+     * and they are laid out back to back, so index 8 reads the first entry of
+     * whatever table follows. 03:cec8 below already repairs the seed. These
+     * three cases repair the rest, all of it reached only in scenario mode --
+     * $3e == 3, which 03:c502 and 03:e2f5 test for themselves. The practice
+     * map shares index 8 and is excluded by that same test.
+     *
+     * Reported from play as "Sylt is losing after a short time", and it was
+     * losing every time, immediately and unavoidably. */
+    case 0xce2e:   /* entry to the map loader, for EVERY map */
+      /* Clear the latch here, not just on the way to the selector.
+       *
+       * It was cleared at 03:ddb6 alone, which the tutorial never reaches --
+       * it is started from the main menu, not the scenario selector. So a
+       * latch left set by a Sylt session survived into the next practice map
+       * and renamed it. Reported from play: "now the Practice map shows
+       * Sylt".
+       *
+       * Both maps load through here, so clearing on entry and setting again
+       * at the swap below makes the latch describe THIS load and nothing
+       * earlier -- and it does so whichever way round the seed and the swap
+       * happen to run. */
+      s_sylt_city = false;
+      break;
+    case 0xcf31:   /* 03:cf19 has just copied the city name to $0b5b */
+      /* The name table at $03cf32 is one of the few tables indexed by $0040
+       * that is NOT short -- it has a real ninth entry, $cf79, and that entry
+       * is the practice map's own name. So Sylt loads correctly named
+       * PRACTICE, and that name is what the fast-travel minimap and the view
+       * mode draw. Reported from play.
+       *
+       * $0b5b holds a length byte then the characters, in the same A = 0x0a
+       * alphabet the briefing uses. Rewritten in place; the table itself is
+       * ROM and repointing it would change the fingerprint.
+       *
+       * Gated on the arm OR the latch so the order of the seed against the
+       * map swap does not matter: whichever ran first, one of the two is set
+       * for Sylt and neither is for the tutorial, which shares index 8 and
+       * has to keep its own name. */
+      if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8 &&
+          (s_sylt_map_armed || s_sylt_city)) {
+        static const uint8_t kSylt[] = { 0x04, 0x1c, 0x22, 0x15, 0x1d };  /* SYLT */
+        for (unsigned i = 0; i < sizeof kSylt; i++)
+          g_ram[0x0b5b + i] = kSylt[i];
+        /* Blank what the longer name left behind. The length byte is
+         * what gets drawn, so this is not visible either way, but a
+         * buffer reading SYLTTICE is a trap for the next reader. */
+        for (unsigned i = sizeof kSylt; i <= 8; i++)
+          g_ram[0x0b5b + i] = 0;
+      }
+      break;
+    case 0xc518:   /* 03:c515 LDA $c5b3,Y has just read the deadline year */
+      /* The deadline table at $03c5b3 ends at index 7 (the $ffff free-play
+       * sentinel); index 8 falls into the countdown table at $03c5c3 and
+       * reads 5. Against a start year of 2047 the SBC at 03:c519 borrows,
+       * 03:c51e clamps the remainder to 0, and the countdown at $0ccb walks
+       * all six of its steps in six calls -- so the scenario reaches its
+       * verdict almost at once. $0deb is 1 there against the CMP #$0004 at
+       * 03:c54b, so the verdict is always a loss.
+       *
+       * 2057 is Rio's deadline, which is the right one to borrow: the Sylt
+       * patch repoints index 5, so the rest of its seed is Rio's too, and it
+       * matches the ten-year limit Las Vegas uses. */
+      if (g_cpu && g_ram[0x3e] == 3 &&
+          (g_ram[0x40] | (g_ram[0x41] << 8)) == 8)
+        g_cpu->a = 2057;
+      break;
+    case 0xc548:   /* the countdown has expired: verdict time */
+      /* Sylt decides its own, ahead of the ROM's gate.
+       *
+       * 03:c54b applies CMP #$0004 to $0deb before any per-scenario objective
+       * is looked at, and the ladder at 03:81d8 prices city class 4 at
+       * 100,000 inhabitants. So every stock scenario secretly requires 100k.
+       * Sylt starts at 3,400 on a small island -- the real one holds about
+       * 18,000 -- so under that gate it could never be won at all, whatever
+       * objective it was given, and a score test bolted on afterwards would
+       * only have been strictly harder.
+       *
+       * Its rule instead: the city score back to where it started, and a
+       * size floor an island can actually reach. $0ded is the score, set to
+       * exactly 500 at 03:b485 when the evaluation counters are cleared, and
+       * three stock scenarios already win on ">= 500". Class 2 is 10,000
+       * people. Both are the ROM's own measures, not invented ones.
+       *
+       * Jumping straight to the ROM's own store keeps the result in one
+       * place: c5a7 loads 2 (win), c5ac loads 1 (lose), both fall into the
+       * STA $0d87 at c5af. */
+      if (g_cpu && (g_ram[0x40] | (g_ram[0x41] << 8)) == 8 && g_ram[0x3e] == 3) {
+        const unsigned cls   = g_ram[0x0deb] | ((unsigned)g_ram[0x0dec] << 8);
+        const unsigned score = g_ram[0x0ded] | ((unsigned)g_ram[0x0dee] << 8);
+        g_cpu->pc = (cls >= 2u && score >= 500u) ? 0xc5a7 : 0xc5ac;
+      }
+      break;
+    case 0xe30a:   /* the win-mark setter, ORA $e334,Y */
+      /* Its mask table is eight entries as well; index 8 reads 0xbb22, which
+       * 03:e326 would commit to SRAM $700007 -- scattering win marks across
+       * scenarios that were never played and setting bit 15, the game's own
+       * "every scenario beaten" flag. Bit 8 is free: the six scenarios own
+       * bits 0-5, Las Vegas and free play 6-7, and the all-beaten flag is 15.
+       *
+       * Do the OR here and step over the instruction. The ROM's own drawer at
+       * 03:ded0 walks only eight bits, so bit 8 paints no mark on the card --
+       * a cosmetic gap, against corrupting the six that do. */
+      if (g_cpu && g_cpu->y == 16 && g_ram[0x3e] == 3) {
+        g_cpu->a = (uint16_t)(g_cpu->a | 0x0100u);
+        g_cpu->pc = 0xe30d;
       }
       break;
     case 0xcec8:   /* 03:ce8b has just seeded from its 8-entry tables */
@@ -2746,6 +2919,26 @@ static bool run_one_frame(void) {
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
+    if (getenv("SC_SCEN_DIAG") && cpu->k == 0x03 &&
+        (cpu->pc == 0xc518 || cpu->pc == 0xc5a2 || cpu->pc == 0xe30a ||
+         cpu->pc == 0xcf31 || cpu->pc == 0xce2e || cpu->pc == 0xce5e ||
+         cpu->pc == 0xc548)) {
+      fprintf(stderr, "[scen] pc=%04x $3e=%u $40=%u year=%u $0ccb=%u"
+                      " $0deb=%u $0d87=%u A=%04x name=%c%c%c%c%c%c%c%c/%u\n",
+              cpu->pc, g_ram[0x3e], g_ram[0x40] | (g_ram[0x41] << 8),
+              g_ram[0x0b53] | (g_ram[0x0b54] << 8), g_ram[0x0ccb],
+              g_ram[0x0deb] | (g_ram[0x0dec] << 8),
+              g_ram[0x0d87] | (g_ram[0x0d88] << 8), (unsigned)cpu->a,
+              nmc(0),
+              nmc(1),
+              nmc(2),
+              nmc(3),
+              nmc(4),
+              nmc(5),
+              nmc(6),
+              nmc(7),
+              g_ram[0x0b5b]);
+    }
     if (cpu->k == 0x03 && cpu->pc == 0xddb6) s_selector_frame = s_frames;
     /* 0b:fbe7 is the free-play welcome block the ROM hands index 8. Keyed
      * on the source, so if it ever selects a different one this simply
@@ -2756,6 +2949,7 @@ static bool run_one_frame(void) {
        * to unpack it. Swap in Sylt's, then disarm so the next scenario --
        * practice included -- loads its own. */
       s_sylt_map_armed = false;
+      s_sylt_city = true;
       memcpy(&g_ram[0x8000], s_sylt_map, (size_t)s_sylt_map_len);
       fprintf(stderr, "[sylt] map swapped in at $7E8000 (%ld bytes)",
               s_sylt_map_len);
