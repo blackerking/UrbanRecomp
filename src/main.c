@@ -1537,6 +1537,26 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
+      /* SC_VRAM_DUMP=<path>: one snapshot of VRAM plus the BG1 tilemap
+       * address, taken at vblank. Written to settle the font mapping --
+       * which byte the dialog renderer turns into which CHR tile -- by
+       * correlation against the offline tileset, rather than by guessing
+       * a stride. One-shot: the first frame that asks for it. */
+      { static int done; const char *vd = getenv("SC_VRAM_DUMP");
+        if (vd && *vd && !done && g_ppu) {
+          done = 1;
+          FILE *f = fopen(vd, "wb");
+          if (f) {
+            fwrite(g_ppu->vram, 2, 0x8000, f);
+            fclose(f);
+            fprintf(stderr, "[vram] dumped 64KB to %s  bg1map=$%04x "
+                            "bg1chr=$%04x bg3map=$%04x bg3chr=$%04x\n",
+                    vd, (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
+                    (unsigned)PPU_bgTileAdr(g_ppu, 0),
+                    (unsigned)PPU_bgTilemapAdr(g_ppu, 2),
+                    (unsigned)PPU_bgTileAdr(g_ppu, 2));
+          }
+        } }
       ws_hide_backdrop_furniture();
       ws_fill_flat_margins();
       ws_fill_margins();
@@ -2181,6 +2201,32 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * Done with PC hooks rather than ROM patches: each of the three sites is a
  * value the host can simply overwrite the instant the ROM has written it,
  * which needs no free ROM space and leaves every byte of the image intact. */
+/* Exact-fingerprint match against the pristine US image. Every ROM-address
+ * hook in this file is a US address, so all of them have to be gated on it:
+ * the other four regions are the same game at different offsets, where the
+ * same PC is some unrelated instruction. */
+static bool s_rom_is_us = true;
+static uint32_t s_tr_off, s_tr_len;  /* SC_TRANSLATION, for the recheck */
+/* Translated scenario briefings, keyed by the address they decompress FROM.
+ * The game unpacks each briefing through 00:90dd, so the substitution goes
+ * in at the decompressor's exit -- the same hook Sylt's own briefing has
+ * used all along, generalised from one address to the twelve. */
+enum { kMaxBriefs = 16 };
+static uint32_t s_brief_src[kMaxBriefs], s_brief_len[kMaxBriefs];
+static uint8_t *s_brief_data[kMaxBriefs];
+static int      s_brief_count;
+static uint32_t s_brief_decomp_src, s_brief_out;
+/* Scenario picture tiles -- the cards and the HUD word-strips. Artwork, not
+ * text, so a translation of them is a different set of pixels rather than a
+ * different string. Substituted at the same decompressor exit. */
+static uint8_t *s_scen_tiles; static uint32_t s_scen_tiles_len;
+/* Accent glyphs the US font has no drawing for. Each is a tile index into
+ * the decompressed font plus its 16 stored bytes; the dialog renderer
+ * indexes that font by character code, so the index IS the code. */
+enum { kMaxGlyphs = 32, kFontTile = 16 };
+static uint16_t s_glyph_idx[kMaxGlyphs];
+static uint8_t  s_glyph_px[kMaxGlyphs][kFontTile];
+static int      s_glyph_count;
 static bool s_ninth_scenario;
 /* Declared here rather than beside load_sylt_map(): the arm is set from the
  * selector hook and the swap runs in the opcode loop, both of which come
@@ -2203,7 +2249,7 @@ static char nmc(unsigned i) {
 }
 
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
-  if (!s_ninth_scenario || bank != 0x03) return;
+  if (!s_ninth_scenario || !s_rom_is_us || bank != 0x03) return;
   switch (pc) {
     case 0xddb6:   /* selector entry, before anything reads the cursor.
                     * Coming back from a scenario the ROM re-derives $52/$54
@@ -2943,7 +2989,7 @@ static bool run_one_frame(void) {
     /* 0b:fbe7 is the free-play welcome block the ROM hands index 8. Keyed
      * on the source, so if it ever selects a different one this simply
      * does not fire rather than corrupting whatever did load. */
-    if (s_ninth_scenario && cpu->k == 0x03 && cpu->pc == 0xce5e &&
+    if (s_ninth_scenario && s_rom_is_us && cpu->k == 0x03 && cpu->pc == 0xce5e &&
         s_sylt_map_armed && s_sylt_map) {
       /* 03:ce2e has decompressed the scenario's map to $7E8000 and is about
        * to unpack it. Swap in Sylt's, then disarm so the next scenario --
@@ -2955,7 +3001,7 @@ static bool run_one_frame(void) {
               s_sylt_map_len);
       fputc('\n', stderr);
     }
-    if (s_ninth_scenario && cpu->k == 0x00) {
+    if (s_ninth_scenario && s_rom_is_us && cpu->k == 0x00) {
       if (cpu->pc == 0x90eb)
         s_sylt_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
                             ((uint32_t)g_ram[0x0a] << 8);
@@ -2967,6 +3013,69 @@ static bool run_one_frame(void) {
          * read here and consumed later by the map swap at 03:ce5e, which runs
          * after this. */
         sylt_write_brief_tilemap();
+    }
+    /* Translated briefings, same exit hook, generalised to the twelve
+     * packets. Placed AFTER Sylt so its own briefing still wins on the
+     * packet the two share (0B:FBE7, the free-play welcome block Sylt
+     * borrows): a translation of the English text there would otherwise
+     * overwrite the ninth scenario's own words. */
+    if ((s_brief_count || s_scen_tiles_len || s_glyph_count ||
+         getenv("SC_BRIEF_DIAG")) &&
+        cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb) {
+        s_brief_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
+                             ((uint32_t)g_ram[0x0a] << 8);
+        s_brief_out = 0x8000u + (g_ram[0x0e] | ((uint32_t)g_ram[0x0f] << 8));
+      } else if (cpu->pc == 0x9106) {
+        /* SC_BRIEF_DIAG=1: every briefing-range unpack, with the screen
+         * it happened on. Pairing the twelve packets across regions cannot
+         * be done from the ROM -- there is no pointer table, and matching
+         * layouts is defeated by translations being longer. Watching which
+         * source the game asks for on which screen is the way to pair
+         * them, and it needs no reading of the text at all. */
+        if (getenv("SC_BRIEF_DIAG")) {
+          static uint32_t seen[32]; static int nseen;
+          int dup = 0;
+          for (int i = 0; i < nseen; i++) if (seen[i] == s_brief_decomp_src) dup = 1;
+          if (!dup && nseen < 32) {
+            seen[nseen++] = s_brief_decomp_src;
+            fprintf(stderr, "[brief] src=%06X out=$%05X screen=$%02x%s\n",
+                    (unsigned)s_brief_decomp_src,
+                    (unsigned)s_brief_out, g_ram[0x14],
+                    g_ram[0x14] == 0x0b ? "  <-- SCENARIO SELECTOR" : "");
+          }
+        }
+        const bool sylt_owns = s_ninth_scenario && s_sylt_map_armed &&
+                               s_brief_decomp_src == 0x0bfbe7u;
+        if (!sylt_owns) {
+          if (s_glyph_count && s_brief_decomp_src == 0x09C0FBu) {
+            for (int i = 0; i < s_glyph_count; i++) {
+              size_t at = (size_t)s_brief_out
+                        + (size_t)s_glyph_idx[i] * kFontTile;
+              if (at + kFontTile <= sizeof g_ram)
+                memcpy(&g_ram[at], s_glyph_px[i], kFontTile);
+            }
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: %d accent glyphs written into "
+                                "the font\n", s_glyph_count); }
+          }
+          if (s_scen_tiles_len && s_brief_decomp_src == 0x09875Cu &&
+              (size_t)s_brief_out + s_scen_tiles_len <= sizeof g_ram) {
+            memcpy(&g_ram[s_brief_out], s_scen_tiles, s_scen_tiles_len);
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: scenario tiles substituted\n"); }
+          }
+          for (int i = 0; i < s_brief_count; i++) {
+            if (s_brief_src[i] != s_brief_decomp_src) continue;
+            if ((size_t)s_brief_out + s_brief_len[i] <= sizeof g_ram)
+              memcpy(&g_ram[s_brief_out], s_brief_data[i], s_brief_len[i]);
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: briefing %06X substituted\n",
+                        (unsigned)s_brief_decomp_src); }
+            break;
+          }
+        }
+      }
     }
     if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
@@ -5631,7 +5740,6 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
  * consume them, so execution stays on paths the game really takes. */
 /* The loaded ROM image, so the UFO population gate can be lifted for the
  * duration of a triggered event. Set in main() once the ROM is read. */
-static bool s_rom_is_us = true;
 static uint8_t *s_rom_data;
 static uint32_t s_rom_size;
 
@@ -7029,6 +7137,120 @@ int main(int argc, char **argv) {
     ScMapView_SetRomIsUs(s_rom_is_us);
     fprintf(stderr, "rom: %s  region=%s (%02x)  fnv=%08x%s\n",
             rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
+
+    /* SC_TRANSLATION=<file.bin> -- a translated message block, from
+     * tools/text_tool.py pack.
+     *
+     * Applied to the IN-MEMORY image, and deliberately after the fingerprint
+     * above has been taken. Patching the ROM file instead would change that
+     * fingerprint, and it gates the host map renderer, SC_FIBER, the cursor
+     * cadence patch and the view fix -- so a translator would silently lose
+     * four features by translating. This way the file on disk is never
+     * touched and a translation ships as its own small blob, carrying only
+     * its author's words and no ROM content.
+     *
+     * Latin releases store the block as characters. Japan stores tile
+     * indices, so there is nothing here to overwrite. */
+    { const char *tr = getenv("SC_TRANSLATION");
+      if (tr && *tr) {
+        /* Blob from tools/text_tool.py: "SCTR", ver, target region, record
+         * count, payload length, then the message block itself.
+         *
+         * We run the US image and only the US image -- every ROM-address
+         * hook in this file, the AOT tier and the host map renderer are keyed
+         * to it. Other ROMs are donors: their text is lifted out and laid
+         * over the US block, so a player gets German or French text with the
+         * US build's features intact.
+         *
+         * A translation may be LONGER than the English original -- German
+         * runs 278 bytes over, French 395. That is fine: 9597 bytes of $FF
+         * filler follow the block, up to the $080000 bank boundary, and the
+         * extra separators read as empty records past the last real one,
+         * which nothing asks for. Hence the budget rather than a size match. */
+        enum { kTrOff = 0x07A868u, kTrBudget = 0x080000u - 0x07A868u };
+        uint32_t got = 0;
+        uint8_t *blob = read_file(tr, &got);
+        if (!blob)
+          fprintf(stderr, "SC_TRANSLATION: cannot read '%s'\n", tr);
+        else if (got < 12 || memcmp(blob, "SCTR", 4) != 0)
+          fprintf(stderr, "SC_TRANSLATION: '%s' is not a translation blob -- "
+                          "make one with tools/text_tool.py import\n", tr);
+        else {
+          const uint32_t recs = (uint32_t)blob[6] | ((uint32_t)blob[7] << 8);
+          const uint32_t len  = (uint32_t)blob[8]  | ((uint32_t)blob[9] << 8)
+                              | ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
+          if (!s_rom_is_us)
+            fprintf(stderr, "SC_TRANSLATION: these blobs target the US image; "
+                            "run the US ROM and use the other one as the donor\n");
+          else if (len + 12u > got || len > kTrBudget)
+            fprintf(stderr, "SC_TRANSLATION: '%s' is malformed or too long "
+                            "(%u bytes, budget %u)\n",
+                    tr, (unsigned)len, (unsigned)kTrBudget);
+          else if (kTrOff + len > rom_size)
+            fprintf(stderr, "SC_TRANSLATION: ROM too short\n");
+          else {
+            memcpy(rom_data + kTrOff, blob + 12, len);
+            s_tr_off = kTrOff; s_tr_len = len;
+            /* v2 blobs carry the briefings after the text. */
+            if (blob[4] >= 2 && 12u + len + 2u <= got) {
+              const uint8_t *q = blob + 12 + len;
+              int nb = q[0] | (q[1] << 8); q += 2;
+              for (int i = 0; i < nb && i < kMaxBriefs; i++) {
+                if ((size_t)(q - blob) + 8u > got) break;
+                uint32_t src = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                             | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                uint32_t bl  = (uint32_t)q[4] | ((uint32_t)q[5] << 8)
+                             | ((uint32_t)q[6] << 16) | ((uint32_t)q[7] << 24);
+                q += 8;
+                if ((size_t)(q - blob) + bl > got) break;
+                s_brief_data[s_brief_count] = (uint8_t *)malloc(bl);
+                if (!s_brief_data[s_brief_count]) break;
+                memcpy(s_brief_data[s_brief_count], q, bl);
+                s_brief_src[s_brief_count] = src;
+                s_brief_len[s_brief_count] = bl;
+                s_brief_count++;
+                q += bl;
+              }
+              if (blob[4] >= 3 && (size_t)(q - blob) + 4u <= got) {
+                uint32_t tl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                            | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                q += 4;
+                if (tl && (size_t)(q - blob) + tl <= got) {
+                  s_scen_tiles = (uint8_t *)malloc(tl);
+                  if (s_scen_tiles) {
+                    memcpy(s_scen_tiles, q, tl);
+                    s_scen_tiles_len = tl;
+                  }
+                  q += tl;
+                }
+                if (blob[4] >= 4 && (size_t)(q - blob) + 2u <= got) {
+                  int ng = q[0] | (q[1] << 8); q += 2;
+                  for (int i = 0; i < ng && s_glyph_count < kMaxGlyphs; i++) {
+                    if ((size_t)(q - blob) + 2u + kFontTile > got) break;
+                    s_glyph_idx[s_glyph_count] = (uint16_t)(q[0] | (q[1] << 8));
+                    memcpy(s_glyph_px[s_glyph_count], q + 2, kFontTile);
+                    s_glyph_count++;
+                    q += 2 + kFontTile;
+                  }
+                }
+              }
+            }
+            fprintf(stderr, "translation: %s applied (%u messages, %u bytes "
+                            "at $%06X, %u spare)\n",
+                    tr, (unsigned)recs, (unsigned)len, (unsigned)kTrOff,
+                    (unsigned)(kTrBudget - len));
+            if (s_glyph_count)
+              fprintf(stderr, "translation: %d accent glyphs loaded\n",
+                      s_glyph_count);
+            if (s_scen_tiles_len)
+              fprintf(stderr, "translation: scenario picture tiles loaded\n");
+            if (s_brief_count)
+              fprintf(stderr, "translation: %d scenario briefings loaded\n",
+                      s_brief_count);
+          }
+        }
+        free(blob);
+      } }
   }
 #ifdef SIMCITY_AOT_TIER
   /* Decided HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
@@ -7242,6 +7464,16 @@ int main(int argc, char **argv) {
   if (!snes_loadRom(g_snes, rom_data, (int)rom_size)) {
     fprintf(stderr, "loadRom failed for '%s'\n", rom_path);
     return 1;
+  }
+  /* cart_init() copies the ROM, so confirm the translation survived into
+   * the buffer that actually executes. This file already records one
+   * patch that landed in the wrong copy and silently did nothing. */
+  if (s_tr_len) {
+    const uint8_t *live = sc_live_rom();
+    if (!live || memcmp(live + s_tr_off, rom_data + s_tr_off, s_tr_len) != 0)
+      fprintf(stderr, "translation: LOST -- the cart copy does not carry it\n");
+    else
+      fprintf(stderr, "translation: live in the cart image\n");
   }
   snes_reset(g_snes, true);
   { const char *e = getenv("SC_WIDESCREEN");
