@@ -3066,10 +3066,16 @@ static bool run_one_frame(void) {
          * source the game asks for on which screen is the way to pair
          * them, and it needs no reading of the text at all. */
         if (getenv("SC_BRIEF_DIAG")) {
-          static uint32_t seen[32]; static int nseen;
+          /* Keyed on source AND screen: one source serving two screens is
+           * exactly the case that would make a briefing substitution appear
+           * on a page it does not belong to. Sylt already shares 0B:FBE7
+           * with the free-play welcome, so reuse is known to happen. */
+          static uint32_t seen[64]; static uint8_t seens[64]; static int nseen;
           int dup = 0;
-          for (int i = 0; i < nseen; i++) if (seen[i] == s_brief_decomp_src) dup = 1;
-          if (!dup && nseen < 32) {
+          for (int i = 0; i < nseen; i++)
+            if (seen[i] == s_brief_decomp_src && seens[i] == g_ram[0x14]) dup = 1;
+          if (!dup && nseen < 64) {
+            seens[nseen] = g_ram[0x14];
             seen[nseen++] = s_brief_decomp_src;
             fprintf(stderr, "[brief] src=%06X out=$%05X screen=$%02x%s\n",
                     (unsigned)s_brief_decomp_src,
@@ -7282,6 +7288,28 @@ int main(int argc, char **argv) {
           else {
             memcpy(rom_data + kTrOff, blob + 12, len);
             s_tr_off = kTrOff; s_tr_len = len;
+            /* The messages are reached through a POINTER TABLE, not by
+             * counting separators. It sits immediately before the block at
+             * $07A800 -- 52 entries of a 16-bit bank-relative address --
+             * and every entry matches a record start in the stock image.
+             *
+             * A translation whose records are different lengths therefore
+             * leaves every pointer aiming into the middle of some other
+             * message. Reported from play as wrong text, broken line
+             * breaks, a message reduced to one line and a stray tile --
+             * four symptoms, one cause. Rebuild it from what we wrote. */
+            { enum { kPtrTab = 0x07A800u, kPtrBase = 0xA868u, kPtrCount = 52 };
+              uint32_t rec = 0; int n = 0;
+              for (uint32_t i = 0; i <= len && n < kPtrCount; i++) {
+                if (i == 0 || (i < len && blob[12 + i - 1] == 0xFF)) {
+                  uint32_t a = kPtrBase + rec;
+                  rom_data[kPtrTab + n * 2]     = (uint8_t)(a & 0xff);
+                  rom_data[kPtrTab + n * 2 + 1] = (uint8_t)(a >> 8);
+                  n++;
+                }
+                if (i < len && blob[12 + i] == 0xFF) rec = i + 1;
+              }
+              fprintf(stderr, "translation: %d message pointers rebuilt\n", n); }
             /* v2 blobs carry the briefings after the text. */
             if (blob[4] >= 2 && 12u + len + 2u <= got) {
               const uint8_t *q = blob + 12 + len;
