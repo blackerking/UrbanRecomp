@@ -1548,16 +1548,22 @@ static void handle_pos_stuff(void) {
        * which byte the dialog renderer turns into which CHR tile -- by
        * correlation against the offline tileset, rather than by guessing
        * a stride. One-shot: the first frame that asks for it. */
+      /* SC_VRAM_DUMP_ON=<screen id> waits for that screen instead of firing
+       * on the first frame, so a capture of the scenario selector ($0b)
+       * does not depend on hitting a key at the right moment. */
       { static int done; const char *vd = getenv("SC_VRAM_DUMP");
-        if (vd && *vd && !done && g_ppu) {
+        const char *von = getenv("SC_VRAM_DUMP_ON");
+        const int want = von && *von ? (int)strtol(von, NULL, 16) : -1;
+        if (vd && *vd && !done && g_ppu &&
+            (want < 0 || g_ram[0x14] == (uint8_t)want)) {
           done = 1;
           FILE *f = fopen(vd, "wb");
           if (f) {
             fwrite(g_ppu->vram, 2, 0x8000, f);
             fclose(f);
-            fprintf(stderr, "[vram] dumped 64KB to %s  bg1map=$%04x "
+            fprintf(stderr, "[vram] dumped 64KB to %s  screen=$%02x bg1map=$%04x "
                             "bg1chr=$%04x bg3map=$%04x bg3chr=$%04x\n",
-                    vd, (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
+                    vd, g_ram[0x14], (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
                     (unsigned)PPU_bgTileAdr(g_ppu, 0),
                     (unsigned)PPU_bgTilemapAdr(g_ppu, 2),
                     (unsigned)PPU_bgTileAdr(g_ppu, 2));
@@ -2244,6 +2250,7 @@ enum { kBpPages = 16, kBpLines = 56, kBpChars = 33 };
 static uint32_t s_bp_src[kBpPages];
 static char     s_bp_title[kBpPages][kBpChars];
 static uint8_t  s_bp_nlines[kBpPages];
+static uint8_t  s_bp_row[kBpPages], s_bp_col[kBpPages];
 static char     s_bp_line[kBpPages][kBpLines][kBpChars];
 static int      s_bp_count;
 /* Accented glyphs for the BRIEFING bank -- a different typeface from the
@@ -3092,6 +3099,15 @@ static bool run_one_frame(void) {
                 fprintf(stderr, "translation: %d accent glyphs written into "
                                 "the font\n", s_glyph_count); }
           }
+          /* Order matters: the wholesale tileset copy lands FIRST, then the
+           * accented glyphs on top of it. The other way round the copy
+           * simply erased them. */
+          if (s_scen_tiles_len && s_brief_decomp_src == 0x09875Cu &&
+              (size_t)s_brief_out + s_scen_tiles_len <= sizeof g_ram) {
+            memcpy(&g_ram[s_brief_out], s_scen_tiles, s_scen_tiles_len);
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: scenario tiles substituted\n"); }
+          }
           if (s_sg_count && s_brief_decomp_src == 0x09875Cu) {
             for (int i = 0; i < s_sg_count; i++) {
               size_t at = (size_t)s_brief_out + (size_t)s_sg_idx[i] * 16u;
@@ -3101,12 +3117,6 @@ static bool run_one_frame(void) {
             { static int said; if (!said++)
                 fprintf(stderr, "translation: %d briefing glyphs into the "
                                 "scenario tileset\n", s_sg_count); }
-          }
-          if (s_scen_tiles_len && s_brief_decomp_src == 0x09875Cu &&
-              (size_t)s_brief_out + s_scen_tiles_len <= sizeof g_ram) {
-            memcpy(&g_ram[s_brief_out], s_scen_tiles, s_scen_tiles_len);
-            { static int said; if (!said++)
-                fprintf(stderr, "translation: scenario tiles substituted\n"); }
           }
           for (int i = 0; i < s_brief_count; i++) {
             if (s_brief_src[i] != s_brief_decomp_src) continue;
@@ -6412,7 +6422,11 @@ static void brief_put(uint8_t *dst, int row, int col, const char *s,
     /* NOT $69D: that is the German slot number, and on the US side $69D is
      * up+13 -- the letter N, which is what it drew. The donor's hyphen is
      * copied into this free slot instead. */
-    else if (c == '-')            t = 0x6F5u;
+    else if (c == '-')            t = 0x6ECu;
+    else if (c == 0xE9u)          t = 0x6EDu;   /* e-acute, French */
+    else if (c == 0xE8u)          t = 0x6EEu;   /* e-grave, French */
+    else if (c == 0xE2u)          t = 0x6EFu;   /* a-circumflex     */
+    else if (c == 0xEFu)          t = 0x6F0u;   /* i-diaeresis      */
     /* space, and anything with no glyph, stays blank */
     const size_t i = (size_t)(row * SC_BRIEF_COLS + col) * 2u;
     dst[i]     = (uint8_t)(t & 0xffu);
@@ -6464,8 +6478,11 @@ static bool brief_compose_page(uint32_t src, uint8_t *dst) {
     }
     if (s_bp_title[i][0])
       brief_put(dst, 2, 5, s_bp_title[i], 0x000u, 0x030u);
+    /* the page's OWN origin, not a fixed row 4 column 4: the pages do
+     * not share one layout. */
     for (int k = 0; k < s_bp_nlines[i]; k++)
-      brief_put(dst, 4 + k, 4, s_bp_line[i][k], 0x690u, 0x6C0u);
+      brief_put(dst, s_bp_row[i] + k, s_bp_col[i], s_bp_line[i][k],
+                0x690u, 0x6C0u);
     return true;
   }
   return false;
@@ -7319,6 +7336,14 @@ int main(int argc, char **argv) {
                       s_bp_src[s_bp_count] = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
                         | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
                       q += 4;
+                      if (blob[4] >= 7) {
+                        if (q + 2 > e) break;
+                        s_bp_row[s_bp_count] = q[0];
+                        s_bp_col[s_bp_count] = q[1];
+                        q += 2;
+                      } else {
+                        s_bp_row[s_bp_count] = 4; s_bp_col[s_bp_count] = 4;
+                      }
                       unsigned tl = *q++;
                       if (q + tl > e) break;
                       if (tl > kBpChars - 1) tl = kBpChars - 1;

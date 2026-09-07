@@ -295,16 +295,31 @@ BRIEF_BANKS = {"us": (0x690, 0x6c0), "eu": (0x690, 0x6c0),
 # lines that say "10" and "5" before the word for years -- $6a1,$6a0 and $6a5
 # -- which fixes the digit base at $6a0 and checks itself.
 BRIEF_EXTRA = {0x69c: ",", 0x69d: "-", 0x69e: ".",
-               0x6f1: "ü", 0x6f4: "ä", 0x704: "ö", 0x70b: "ß"}
+               0x6f1: "ü", 0x6f4: "ä", 0x704: "ö", 0x70b: "ß",
+               0x6f2: "é", 0x6fa: "è", 0x697: "'",
+               0x6f3: "â", 0x6fb: "ï"}
+# French shares German's arrangement -- MEASURED, not assumed: it uses the same
+# comma/hyphen/period slots and the same $6a0 digit base, and its lower case
+# letters rank e s t n i a r o, which is French's own frequency order.
 BRIEF_DIGITS = {"de": 0x6a0, "fr": 0x6a0}
 
 # donor tile -> the US tile it is copied to. The umlauts keep their numbers
 # because those are blank on the US side. The HYPHEN cannot: $69d on the US
 # side is up+13, the letter N -- which is exactly what it drew. It gets a free
 # slot instead.
+# donor tile -> the US tile it is copied to. The umlauts keep their numbers
+# because those are blank on the US side. The HYPHEN cannot: $69d on the US
+# side is up+13, the letter N -- which is exactly what it drew.
+#
+# Its slot is $6ec rather than $6f5: French USES $6f5 for an accent of its own,
+# so a hyphen parked there would collide the moment French is translated.
+# $6ec is blank in the US tileset and untouched by all three regions.
 BRIEF_EXTRA_COPY = {0x6f1: 0x6f1, 0x6f4: 0x6f4, 0x704: 0x704, 0x70b: 0x70b,
-                    0x69d: 0x6f5}
-BRIEF_HYPHEN_US = 0x6f5
+                    0x69d: 0x6ec, 0x6f2: 0x6ed, 0x6fa: 0x6ee,
+                    0x6f3: 0x6ef, 0x6fb: 0x6f0}
+# The apostrophe ($697) needs no copy: the US already draws one at up+$1E,
+# and brief_put maps it there.
+BRIEF_HYPHEN_US = 0x6ec
 
 
 def _dec_bank(t, up, lo=None, digits=None):
@@ -344,10 +359,25 @@ def brief_rows_text(data, title_base, body_base, space_alias=None,
             line += c
         rows.append(line.rstrip())
     title = rows[BRIEF_TITLE_ROW].strip() if len(rows) > BRIEF_TITLE_ROW else ""
-    body = [r[BRIEF_BODY_COL:].rstrip() for r in rows[BRIEF_BODY_ROW:]]
+
+    # Take each page's OWN origin rather than forcing row 4 / column 4. The
+    # pages do not share one layout: composing them all at the same place put
+    # text "somewhere in the middle of the textfield", reported from play.
+    first = None
+    left = BRIEF_COLS
+    for r in range(BRIEF_TITLE_ROW + 1, len(rows)):
+        stripped = rows[r].rstrip()
+        if not stripped:
+            continue
+        if first is None:
+            first = r
+        left = min(left, len(rows[r]) - len(rows[r].lstrip()))
+    if first is None:
+        return title, [], BRIEF_BODY_ROW, BRIEF_BODY_COL
+    body = [r[left:].rstrip() for r in rows[first:]]
     while body and not body[-1]:
         body.pop()
-    return title, body
+    return title, body, first, left
 
 
 def detect_region(rom_path):
@@ -375,7 +405,7 @@ def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
     if len(body) > TARGET_BUDGET:
         sys.exit("translation needs %d bytes; the US image has room for %d. "
                  "Shorten the longest messages." % (len(body), TARGET_BUDGET))
-    out = (MAGIC + bytes([6, 0x01])
+    out = (MAGIC + bytes([7, 0x01])
            + len(records).to_bytes(2, "little")
            + len(body).to_bytes(4, "little") + body)
     out += len(briefs).to_bytes(2, "little")
@@ -567,14 +597,17 @@ def cmd_import(a):
             for line in body:
                 if len(line) > BRIEF_BODY_MAX:
                     bad.append("page %d line %d > %d" % (q["page"], len(line), BRIEF_BODY_MAX))
-            pages.append((q["src"], title, body))
+            pages.append((q["src"], title, body,
+                          o.get("row", BRIEF_BODY_ROW) if o else q.get("row", BRIEF_BODY_ROW),
+                          o.get("col", BRIEF_BODY_COL) if o else q.get("col", BRIEF_BODY_COL)))
         if bad:
             for m in bad[:10]:
                 print("  " + m, file=sys.stderr)
             sys.exit("%d briefing line(s) run off the paper" % len(bad))
         buf = bytearray(len(pages).to_bytes(2, "little"))
-        for src, title, body in pages:
+        for src, title, body, brow, bcol in pages:
             buf += src.to_bytes(4, "little")
+            buf += bytes([brow & 0xff, bcol & 0xff])
             tb = title.encode("latin-1", "replace")[:BRIEF_TITLE_MAX]
             buf += bytes([len(tb)]) + tb
             buf += bytes([min(len(body), 255)])
@@ -612,9 +645,11 @@ def _briefs_doc(rom_path):
     bb, blo = BRIEF_BANKS[ver]
     pages = []
     for i, (src, d) in enumerate(brief_packets(rom_path, ver)):
-        title, body = brief_rows_text(d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
-                                      digits=BRIEF_DIGITS.get(ver))
-        pages.append({"page": i, "src": src, "title": title, "body": body})
+        title, body, brow, bcol = brief_rows_text(
+            d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
+            digits=BRIEF_DIGITS.get(ver))
+        pages.append({"page": i, "src": src, "title": title, "body": body,
+                      "row": brow, "col": bcol})
     return {"version": ver, "pages": pages}
 
 
@@ -625,9 +660,11 @@ def cmd_briefs(a):
     bb, blo = BRIEF_BANKS[ver]
     pages = []
     for i, (src, d) in enumerate(brief_packets(a.rom, ver)):
-        title, body = brief_rows_text(d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
-                                      digits=BRIEF_DIGITS.get(ver))
-        pages.append({"page": i, "src": src, "title": title, "body": body})
+        title, body, brow, bcol = brief_rows_text(
+            d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
+            digits=BRIEF_DIGITS.get(ver))
+        pages.append({"page": i, "src": src, "title": title, "body": body,
+                      "row": brow, "col": bcol})
     doc = {
         "_readme": [
             "One entry per briefing page: the tutorial, the scenarios and the",
