@@ -806,6 +806,12 @@ static void ws_fill_flat_margins(void);
 static void ws_hide_backdrop_furniture(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
+/* Briefing page geometry -- up here because the composer is called from the
+ * opcode loop, which comes earlier in this file than the composer itself. */
+#define SC_BRIEF_COLS 32
+#define SC_BRIEF_ROWS 64
+#define SC_BRIEF_BLANK 0x3FFu
+static bool brief_compose_page(uint32_t src, uint8_t *dst);
 /* OFF by default, still. The compositor it depends on works now, but the gate
  * that decides WHICH screen it may draw on does not separate cleanly: the
  * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
@@ -2227,6 +2233,24 @@ enum { kMaxGlyphs = 32, kFontTile = 16 };
 static uint16_t s_glyph_idx[kMaxGlyphs];
 static uint8_t  s_glyph_px[kMaxGlyphs][kFontTile];
 static int      s_glyph_count;
+/* Translated briefing pages, carried as STRINGS and composed here the way
+ * sylt_write_brief_tilemap() composes Sylt's. Nothing about the donor's
+ * tilemap travels: bases, space aliases, punctuation layout and page
+ * pairing all stop mattering, because this side does the drawing.
+ *
+ * The title uses a different glyph bank than the body ($000/$030 against
+ * $690/$6c0) -- that is what makes it a different colour on screen. */
+enum { kBpPages = 16, kBpLines = 56, kBpChars = 33 };
+static uint32_t s_bp_src[kBpPages];
+static char     s_bp_title[kBpPages][kBpChars];
+static uint8_t  s_bp_nlines[kBpPages];
+static char     s_bp_line[kBpPages][kBpLines][kBpChars];
+static int      s_bp_count;
+/* Accented glyphs for the BRIEFING bank -- a different typeface from the
+ * dialog font, so separate from the 16 font accents. */
+static uint16_t s_sg_idx[kMaxGlyphs];
+static uint8_t  s_sg_px[kMaxGlyphs][16];
+static int      s_sg_count;
 static bool s_ninth_scenario;
 /* Declared here rather than beside load_sylt_map(): the arm is set from the
  * selector hook and the swap runs in the opcode loop, both of which come
@@ -3019,7 +3043,8 @@ static bool run_one_frame(void) {
      * packet the two share (0B:FBE7, the free-play welcome block Sylt
      * borrows): a translation of the English text there would otherwise
      * overwrite the ninth scenario's own words. */
-    if ((s_brief_count || s_scen_tiles_len || s_glyph_count ||
+    if ((s_brief_count || s_scen_tiles_len || s_glyph_count || s_bp_count ||
+         s_sg_count ||
          getenv("SC_BRIEF_DIAG")) &&
         cpu->k == 0x00) {
       if (cpu->pc == 0x90eb) {
@@ -3048,6 +3073,14 @@ static bool run_one_frame(void) {
         const bool sylt_owns = s_ninth_scenario && s_sylt_map_armed &&
                                s_brief_decomp_src == 0x0bfbe7u;
         if (!sylt_owns) {
+          if (s_bp_count &&
+              (size_t)s_brief_out + SC_BRIEF_COLS * SC_BRIEF_ROWS * 2u
+                  <= sizeof g_ram &&
+              brief_compose_page(s_brief_decomp_src, &g_ram[s_brief_out])) {
+            static int said; if (!said++)
+              fprintf(stderr, "translation: briefing %06X composed from strings\n",
+                      (unsigned)s_brief_decomp_src);
+          }
           if (s_glyph_count && s_brief_decomp_src == 0x09C0FBu) {
             for (int i = 0; i < s_glyph_count; i++) {
               size_t at = (size_t)s_brief_out
@@ -3058,6 +3091,16 @@ static bool run_one_frame(void) {
             { static int said; if (!said++)
                 fprintf(stderr, "translation: %d accent glyphs written into "
                                 "the font\n", s_glyph_count); }
+          }
+          if (s_sg_count && s_brief_decomp_src == 0x09875Cu) {
+            for (int i = 0; i < s_sg_count; i++) {
+              size_t at = (size_t)s_brief_out + (size_t)s_sg_idx[i] * 16u;
+              if (at + 16u <= sizeof g_ram)
+                memcpy(&g_ram[at], s_sg_px[i], 16);
+            }
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: %d briefing glyphs into the "
+                                "scenario tileset\n", s_sg_count); }
           }
           if (s_scen_tiles_len && s_brief_decomp_src == 0x09875Cu &&
               (size_t)s_brief_out + s_scen_tiles_len <= sizeof g_ram) {
@@ -6342,22 +6385,34 @@ static void sylt_place_card(void) {
  * "as egas, .S.A. 096". The stored tilemaps are complete -- decoding block 7
  * gives "Las Vegas, the world's largest gambling city," in full -- so that is
  * a display bug, not a data one, and it is not this feature's to fix. */
-#define SC_BRIEF_COLS 32
-#define SC_BRIEF_ROWS 64
-#define SC_BRIEF_BLANK 0x3FFu
 
 static void brief_put(uint8_t *dst, int row, int col, const char *s,
                       unsigned up, unsigned lo) {
   for (; *s; s++, col++) {
     if (col < 0 || col >= SC_BRIEF_COLS) continue;
     unsigned t = SC_BRIEF_BLANK;
-    const char c = *s;
+    /* unsigned: the accented characters arrive as Latin-1 bytes >= $80,
+     * which a signed char would make negative and never match. */
+    const unsigned char c = (unsigned char)*s;
     if (c >= 'A' && c <= 'Z')      t = up + (unsigned)(c - 'A');
     else if (c >= 'a' && c <= 'z') t = lo + (unsigned)(c - 'a');
     else if (c >= '0' && c <= '9') t = up + 0x20u + (unsigned)(c - '0');
     else if (c == ',')             t = up + 0x1Cu;
     else if (c == '.')             t = up + 0x1Du;
     else if (c == 39)              t = up + 0x1Eu;   /* apostrophe, unescaped */
+    /* Slots outside the two letter banks, identified from the German
+     * words they sit inside. Fixed tile numbers rather than up-relative:
+     * the four accented ones are blank in the US tileset, so the donor's
+     * artwork is copied in at the same numbers; the hyphen the US draws
+     * already. */
+    else if (c == 0xFCu)          t = 0x6F1u;   /* u-umlaut */
+    else if (c == 0xE4u)          t = 0x6F4u;   /* a-umlaut */
+    else if (c == 0xF6u)          t = 0x704u;   /* o-umlaut */
+    else if (c == 0xDFu)          t = 0x70Bu;   /* sharp s   */
+    /* NOT $69D: that is the German slot number, and on the US side $69D is
+     * up+13 -- the letter N, which is what it drew. The donor's hyphen is
+     * copied into this free slot instead. */
+    else if (c == '-')            t = 0x6F5u;
     /* space, and anything with no glyph, stays blank */
     const size_t i = (size_t)(row * SC_BRIEF_COLS + col) * 2u;
     dst[i]     = (uint8_t)(t & 0xffu);
@@ -6395,6 +6450,25 @@ static void sylt_write_brief_tilemap(void) {
     brief_put(dst, 4 + i, 4, kSyltBody[i], 0x690u, 0x6C0u);
   fprintf(stderr, "[sylt] briefing tilemap written to $7E8000");
   fputc('\n', stderr);
+}
+
+/* Compose a translated briefing page from strings -- the same two-bank
+ * layout sylt_write_brief_tilemap() uses just above, so the title keeps
+ * its own colour. Returns false when this page is not one we carry. */
+static bool brief_compose_page(uint32_t src, uint8_t *dst) {
+  for (int i = 0; i < s_bp_count; i++) {
+    if (s_bp_src[i] != src) continue;
+    for (int k = 0; k < SC_BRIEF_COLS * SC_BRIEF_ROWS; k++) {
+      dst[k * 2]     = (uint8_t)(SC_BRIEF_BLANK & 0xffu);
+      dst[k * 2 + 1] = (uint8_t)(SC_BRIEF_BLANK >> 8);
+    }
+    if (s_bp_title[i][0])
+      brief_put(dst, 2, 5, s_bp_title[i], 0x000u, 0x030u);
+    for (int k = 0; k < s_bp_nlines[i]; k++)
+      brief_put(dst, 4 + k, 4, s_bp_line[i][k], 0x690u, 0x6C0u);
+    return true;
+  }
+  return false;
 }
 
 /* The STANDARD / FREE box. Deliberately small and centred rather than styled
@@ -7233,12 +7307,64 @@ int main(int argc, char **argv) {
                     q += 2 + kFontTile;
                   }
                 }
+                if (blob[4] >= 5 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t sl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *e = q + sl;
+                  if (sl >= 2 && e <= blob + got) {
+                    int np = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < np && s_bp_count < kBpPages; i++) {
+                      if (q + 5 > e) break;
+                      s_bp_src[s_bp_count] = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                        | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                      q += 4;
+                      unsigned tl = *q++;
+                      if (q + tl > e) break;
+                      if (tl > kBpChars - 1) tl = kBpChars - 1;
+                      memcpy(s_bp_title[s_bp_count], q, tl);
+                      s_bp_title[s_bp_count][tl] = 0;
+                      q += tl;
+                      if (q >= e) break;
+                      unsigned nl = *q++;
+                      unsigned kept = 0;
+                      for (unsigned k = 0; k < nl && q < e; k++) {
+                        unsigned ll = *q++;
+                        if (q + ll > e) { q = e; break; }
+                        if (kept < kBpLines) {
+                          unsigned c = ll > kBpChars - 1 ? kBpChars - 1 : ll;
+                          memcpy(s_bp_line[s_bp_count][kept], q, c);
+                          s_bp_line[s_bp_count][kept][c] = 0;
+                          kept++;
+                        }
+                        q += ll;
+                      }
+                      s_bp_nlines[s_bp_count] = (uint8_t)kept;
+                      s_bp_count++;
+                    }
+                  }
+                }
+                if (blob[4] >= 6 && (size_t)(q - blob) + 2u <= got) {
+                  int nsg = q[0] | (q[1] << 8); q += 2;
+                  for (int i = 0; i < nsg && s_sg_count < kMaxGlyphs; i++) {
+                    if ((size_t)(q - blob) + 18u > got) break;
+                    s_sg_idx[s_sg_count] = (uint16_t)(q[0] | (q[1] << 8));
+                    memcpy(s_sg_px[s_sg_count], q + 2, 16);
+                    s_sg_count++; q += 18;
+                  }
+                }
               }
             }
             fprintf(stderr, "translation: %s applied (%u messages, %u bytes "
                             "at $%06X, %u spare)\n",
                     tr, (unsigned)recs, (unsigned)len, (unsigned)kTrOff,
                     (unsigned)(kTrBudget - len));
+            if (s_sg_count)
+              fprintf(stderr, "translation: %d briefing glyphs loaded\n",
+                      s_sg_count);
+            if (s_bp_count)
+              fprintf(stderr, "translation: %d briefing pages loaded as strings\n",
+                      s_bp_count);
             if (s_glyph_count)
               fprintf(stderr, "translation: %d accent glyphs loaded\n",
                       s_glyph_count);

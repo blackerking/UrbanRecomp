@@ -205,6 +205,17 @@ ACCENT_CODES = [0x81, 0x82, 0x83, 0x84, 0x85, 0x87, 0x88, 0x8A,
                 0x8C, 0x8E, 0x93, 0x94, 0x96, 0x97, 0x9A, 0x9B]
 
 
+def scen_glyphs(donor_rom, donor):
+    """(tile index, 16 raw bytes) for the accented briefing glyphs."""
+    raw, _, _ = scen_tiles(donor_rom, donor)
+    out = []
+    for src_t, dst_t in BRIEF_EXTRA_COPY.items():
+        g = raw[(src_t & 0x3ff) * 16:((src_t & 0x3ff) + 1) * 16]
+        if g and g != bytes(16):
+            out.append((dst_t & 0x3ff, g))
+    return out
+
+
 def font_raw(rom_path, version):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -234,6 +245,111 @@ def accent_glyphs(donor_rom, donor, us_rom):
     return out
 
 
+# ── briefings as STRINGS (the Sylt model) ────────────────────────────────
+# sylt_write_brief_tilemap() does not transplant a tilemap: it clears the page
+# and composes the text with brief_put(), title on row 2 col 5 and body from
+# row 4 col 4. Carrying strings and composing them the same way is what makes
+# a briefing translatable, and it sidesteps every donor-tilemap problem --
+# bases, space aliases, punctuation layout, packet pairing -- because the US
+# side does the drawing.
+#
+# The two base pairs are the colour: the title is drawn from a different glyph
+# bank than the body, which is why it is a different colour on screen.
+BRIEF_TITLE_BASE = 0x000        # title bank: up=$000, lo=$030
+BRIEF_BODY_BASE = 0x690         # body bank:  up=$690, lo=$6c0
+BRIEF_TITLE_ROW, BRIEF_TITLE_COL = 2, 5
+BRIEF_BODY_ROW, BRIEF_BODY_COL = 4, 4
+BRIEF_ROWS = 64
+# The paper is 32 columns wide. Text past it is simply not drawn by brief_put,
+# so a long line is silently truncated rather than corrupting anything -- but
+# it still loses words, so the tool refuses instead.
+BRIEF_TITLE_MAX = BRIEF_COLS - BRIEF_TITLE_COL      # 27
+BRIEF_BODY_MAX = BRIEF_COLS - BRIEF_BODY_COL        # 28
+
+
+# (uppercase base, lowercase base) per region. NOT "lo = up + 0x30": that is
+# the US layout, and assuming it everywhere put German capitals 16 slots out.
+# Reported from play as "2imSity" for SimCity and "Uin starkes Urdbeben" --
+# every wrong character a capital, every one off by exactly +16, lower case
+# untouched. Working back: German S rendered as the digit 2, i.e. up+0x20+2,
+# so German S sits at $6c3 and its upper-case bank starts at $6b1.
+#
+# The gap differs because the glyphs between the two banks differ per region.
+# It also means the US digit offset (up+0x20) lands ON German's lower case, so
+# digits are only decoded where that does not collide.
+BRIEF_BANKS = {"us": (0x690, 0x6c0), "eu": (0x690, 0x6c0),
+               "de": (0x6b1, 0x6d1), "fr": (0x6b1, 0x6d1)}
+
+# Glyphs outside the two letter banks, identified from the German words they
+# sit inside -- reported from play as B*rgermeister, H*re/l*se, Sch*den, mu*t,
+# Krimi*nalit*t. Two independent words agree on the o-umlaut slot, which is
+# the cross-check. Frequency alone could not tell these apart and bitmap
+# comparison against the dialog font fails: the briefing bank is different
+# artwork.
+#
+# The four umlaut slots are unused by the US briefings AND blank in the US
+# tileset, so the donor's glyphs drop in at the same tile numbers. The hyphen
+# is already drawn on the US side and only needed mapping.
+# German keeps its punctuation and digits in their own region BELOW the
+# uppercase bank, not at the US up+$1C..$2A offsets. Digits were read off two
+# lines that say "10" and "5" before the word for years -- $6a1,$6a0 and $6a5
+# -- which fixes the digit base at $6a0 and checks itself.
+BRIEF_EXTRA = {0x69c: ",", 0x69d: "-", 0x69e: ".",
+               0x6f1: "ü", 0x6f4: "ä", 0x704: "ö", 0x70b: "ß"}
+BRIEF_DIGITS = {"de": 0x6a0, "fr": 0x6a0}
+
+# donor tile -> the US tile it is copied to. The umlauts keep their numbers
+# because those are blank on the US side. The HYPHEN cannot: $69d on the US
+# side is up+13, the letter N -- which is exactly what it drew. It gets a free
+# slot instead.
+BRIEF_EXTRA_COPY = {0x6f1: 0x6f1, 0x6f4: 0x6f4, 0x704: 0x704, 0x70b: 0x70b,
+                    0x69d: 0x6f5}
+BRIEF_HYPHEN_US = 0x6f5
+
+
+def _dec_bank(t, up, lo=None, digits=None):
+    if t in BRIEF_EXTRA:
+        return BRIEF_EXTRA[t]
+    if digits is not None and digits <= t < digits + 10:
+        return chr(ord("0") + t - digits)
+    if lo is None:
+        lo = up + 0x30
+    # Lower case first: its base is the one derived from letter frequencies
+    # and confirmed on screen, so it wins any overlap with the digit range.
+    if lo <= t < lo + 26:          return chr(ord("a") + t - lo)
+    if up <= t < up + 26:          return chr(ord("A") + t - up)
+    if up + 0x20 + 10 <= lo or up + 0x2a <= lo:
+        if up + 0x20 <= t < up + 0x2a: return chr(ord("0") + t - up - 0x20)
+    if t == up + 0x1c:             return ","
+    if t == up + 0x1d:             return "."
+    if t == up + 0x1e:             return "'"
+    return None
+
+
+def brief_rows_text(data, title_base, body_base, space_alias=None,
+                    body_lo=None, title_lo=None, digits=None):
+    """(title, [body lines]) read out of one decompressed briefing page."""
+    import struct
+    w = struct.unpack("<%dH" % (len(data) // 2), data[:len(data) // 2 * 2])
+    rows = []
+    for r in range(0, min(len(w) // BRIEF_COLS, BRIEF_ROWS)):
+        cells = w[r * BRIEF_COLS:(r + 1) * BRIEF_COLS]
+        line = ""
+        for t in cells:
+            c = _dec_bank(t, body_base, body_lo, digits)
+            if c is None:
+                c = _dec_bank(t, title_base, title_lo)
+            if c is None:
+                c = " " if (t == BRIEF_BLANK or t == space_alias) else " "
+            line += c
+        rows.append(line.rstrip())
+    title = rows[BRIEF_TITLE_ROW].strip() if len(rows) > BRIEF_TITLE_ROW else ""
+    body = [r[BRIEF_BODY_COL:].rstrip() for r in rows[BRIEF_BODY_ROW:]]
+    while body and not body[-1]:
+        body.pop()
+    return title, body
+
+
 def detect_region(rom_path):
     rom = open(rom_path, "rb").read()
     if len(rom) < 0x8000:
@@ -245,7 +361,8 @@ def detect_region(rom_path):
     return REGION_BYTE[b]
 
 
-def make_blob(records, briefs=(), tiles=None, glyphs=()):
+def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
+              sglyphs=()):
     """Header + the packed message block + any briefing packets.
 
     v2 layout: "SCTR", ver, region, record count, text length, then the text,
@@ -258,7 +375,7 @@ def make_blob(records, briefs=(), tiles=None, glyphs=()):
     if len(body) > TARGET_BUDGET:
         sys.exit("translation needs %d bytes; the US image has room for %d. "
                  "Shorten the longest messages." % (len(body), TARGET_BUDGET))
-    out = (MAGIC + bytes([4, 0x01])
+    out = (MAGIC + bytes([6, 0x01])
            + len(records).to_bytes(2, "little")
            + len(body).to_bytes(4, "little") + body)
     out += len(briefs).to_bytes(2, "little")
@@ -269,6 +386,12 @@ def make_blob(records, briefs=(), tiles=None, glyphs=()):
         out += tiles
     out += len(glyphs).to_bytes(2, "little")
     for idx, g in glyphs:
+        out += idx.to_bytes(2, "little") + g
+    out += (len(strings) if strings else 0).to_bytes(4, "little")
+    if strings:
+        out += strings
+    out += len(sglyphs).to_bytes(2, "little")
+    for idx, g in sglyphs:
         out += idx.to_bytes(2, "little") + g
     return out
 
@@ -424,7 +547,44 @@ def cmd_import(a):
               % (len(keep), min(keep), max(keep)))
 
     glyphs = accent_glyphs(a.donor, donor, a.us_rom) if not a.no_glyphs else []
-    out = make_blob(recs, briefs, tiles, glyphs)
+
+    # Briefings as STRINGS, composed by the US build. Words come from the
+    # donor, addresses from the US image, because the blob is recognised by
+    # the address the US build decompresses.
+    strings = None
+    if a.briefs:
+        import io, contextlib
+        us_doc = _briefs_doc(a.us_rom)
+        dn_doc = _briefs_doc(a.donor)
+        by_page = {q["page"]: q for q in dn_doc["pages"]}
+        pages, bad = [], []
+        for q in us_doc["pages"]:
+            o = by_page.get(q["page"])
+            title = (o or q)["title"]
+            body = (o or q)["body"]
+            if len(title) > BRIEF_TITLE_MAX:
+                bad.append("page %d title %d > %d" % (q["page"], len(title), BRIEF_TITLE_MAX))
+            for line in body:
+                if len(line) > BRIEF_BODY_MAX:
+                    bad.append("page %d line %d > %d" % (q["page"], len(line), BRIEF_BODY_MAX))
+            pages.append((q["src"], title, body))
+        if bad:
+            for m in bad[:10]:
+                print("  " + m, file=sys.stderr)
+            sys.exit("%d briefing line(s) run off the paper" % len(bad))
+        buf = bytearray(len(pages).to_bytes(2, "little"))
+        for src, title, body in pages:
+            buf += src.to_bytes(4, "little")
+            tb = title.encode("latin-1", "replace")[:BRIEF_TITLE_MAX]
+            buf += bytes([len(tb)]) + tb
+            buf += bytes([min(len(body), 255)])
+            for line in body[:255]:
+                lb = line.encode("latin-1", "replace")[:BRIEF_BODY_MAX]
+                buf += bytes([len(lb)]) + lb
+        strings = bytes(buf)
+
+    sglyphs = scen_glyphs(a.donor, donor) if a.briefs else []
+    out = make_blob(recs, briefs, tiles, glyphs, strings, sglyphs)
     open(a.out, "wb").write(out)
     body = len(recs and pack_records(recs))
     print("imported %s text from %s" % (donor, os.path.basename(a.donor)))
@@ -433,6 +593,10 @@ def cmd_import(a):
         print("  %d scenario briefings re-encoded to the US tile bases" % len(briefs))
     if glyphs:
         print("  %d accent glyphs into free US font slots" % len(glyphs))
+    if strings:
+        print("  %d briefing pages as strings, composed US-side" % len(pages))
+    if sglyphs:
+        print("  %d accented briefing glyphs into free US tileset slots" % len(sglyphs))
     if tiles:
         print("  scenario picture tiles: %d tiles (%d bytes)"
               % (len(tiles) // 16, len(tiles)))
@@ -440,6 +604,114 @@ def cmd_import(a):
     print("  US image has room for %d, so %d spare" % (TARGET_BUDGET, TARGET_BUDGET - body))
     print("")
     print("Run it with:  SC_TRANSLATION=%s" % a.out)
+
+
+def _briefs_doc(rom_path):
+    ver = detect_region(rom_path)
+    tb = BRIEF_TITLE_BASE
+    bb, blo = BRIEF_BANKS[ver]
+    pages = []
+    for i, (src, d) in enumerate(brief_packets(rom_path, ver)):
+        title, body = brief_rows_text(d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
+                                      digits=BRIEF_DIGITS.get(ver))
+        pages.append({"page": i, "src": src, "title": title, "body": body})
+    return {"version": ver, "pages": pages}
+
+
+def cmd_briefs(a):
+    """Export every briefing page as editable strings."""
+    ver = detect_region(a.rom)
+    tb = BRIEF_TITLE_BASE
+    bb, blo = BRIEF_BANKS[ver]
+    pages = []
+    for i, (src, d) in enumerate(brief_packets(a.rom, ver)):
+        title, body = brief_rows_text(d, tb, bb, BRIEF_SPACE_ALIAS.get(ver), blo,
+                                      digits=BRIEF_DIGITS.get(ver))
+        pages.append({"page": i, "src": src, "title": title, "body": body})
+    doc = {
+        "_readme": [
+            "One entry per briefing page: the tutorial, the scenarios and the",
+            "ninth. Translate \"title\" and the \"body\" lines; leave \"page\" and",
+            "\"src\" alone -- src is the ROM address the page is recognised by.",
+            "The paper is %d columns wide: a title may be %d characters and a"
+            % (BRIEF_COLS, BRIEF_TITLE_MAX),
+            "body line %d. Longer lines are refused rather than cut off."
+            % BRIEF_BODY_MAX,
+            "The title is drawn from a different glyph bank than the body, which",
+            "is what makes it a different colour. That is handled for you.",
+            "Only A-Z a-z 0-9 , . ' and space have glyphs here.",
+        ],
+        "version": ver,
+        "pages": pages,
+    }
+    with open(a.out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    nb = sum(len(p["body"]) for p in pages)
+    print("exported %d briefing pages (%d body lines) -> %s"
+          % (len(pages), nb, a.out))
+    over = [(p["page"], len(p["title"]), max([len(x) for x in p["body"]] or [0]))
+            for p in pages
+            if len(p["title"]) > BRIEF_TITLE_MAX
+            or any(len(x) > BRIEF_BODY_MAX for x in p["body"])]
+    if over:
+        print("  NOTE: %d page(s) already exceed the paper: %s" % (len(over), over))
+
+
+def cmd_briefs_pack(a):
+    """Edited briefing strings -> a blob the US build composes itself."""
+    doc = json.load(open(getattr(a, "in"), encoding="utf-8"))
+    # --text-from takes the WORDS from another region's export while keeping
+    # THIS one's src addresses. The blob is recognised by the address the US
+    # build decompresses, and a donor export carries the donor's addresses,
+    # which the US build never asks for. Paired by page index: the furniture
+    # tiles agree on the diagonal for 10 of 12 pages, with clear margins.
+    if a.text_from:
+        other = json.load(open(a.text_from, encoding="utf-8"))
+        src_pages = {q["page"]: q for q in other["pages"]}
+        for q in doc["pages"]:
+            o = src_pages.get(q["page"])
+            if o:
+                q["title"] = o["title"]
+                q["body"] = o["body"]
+        print("  words from %s (%s), addresses from %s"
+              % (os.path.basename(a.text_from), other.get("version", "?"),
+                 doc.get("version", "?")))
+    pages, bad = [], []
+    for p in doc["pages"]:
+        title = p.get("title", "")
+        body = [x for x in p.get("body", [])]
+        if len(title) > BRIEF_TITLE_MAX:
+            bad.append("page %d title is %d chars, the paper allows %d"
+                       % (p["page"], len(title), BRIEF_TITLE_MAX))
+        for k, line in enumerate(body):
+            if len(line) > BRIEF_BODY_MAX:
+                bad.append("page %d line %d is %d chars, the paper allows %d"
+                           % (p["page"], k, len(line), BRIEF_BODY_MAX))
+        if BRIEF_BODY_ROW + len(body) > BRIEF_ROWS:
+            bad.append("page %d has %d body lines, the page holds %d"
+                       % (p["page"], len(body), BRIEF_ROWS - BRIEF_BODY_ROW))
+        pages.append((p["src"], title, body))
+    if bad:
+        for m in bad[:12]:
+            print("  " + m, file=sys.stderr)
+        sys.exit("%d line(s) would run off the paper; shorten them" % len(bad))
+
+    out = bytearray()
+    out += len(pages).to_bytes(2, "little")
+    for src, title, body in pages:
+        out += src.to_bytes(4, "little")
+        tb = title.encode("latin-1", "replace")[:BRIEF_TITLE_MAX]
+        out += bytes([len(tb)]) + tb
+        out += bytes([min(len(body), 255)])
+        for line in body[:255]:
+            lb = line.encode("latin-1", "replace")[:BRIEF_BODY_MAX]
+            out += bytes([len(lb)]) + lb
+    blob = make_blob([b""], (), None, (), bytes(out))
+    open(a.out, "wb").write(blob)
+    nl = sum(len(b) for _, _, b in pages)
+    print("packed %d briefing pages (%d body lines) -> %s"
+          % (len(pages), nl, a.out))
+    print("  the US build composes these itself, the way Sylt's briefing is drawn")
 
 
 def cmd_glyphs(a):
@@ -478,6 +750,8 @@ def main():
     # Pairing by index therefore lays one screen's text over another's layout,
     # which is the gibberish this produced in play. Pair them by identity
     # first; until then messages only.
+    i.add_argument("--briefs", action="store_true",
+                   help="also take the donor's briefings, as strings")
     i.add_argument("--no-glyphs", action="store_true",
                    help="skip the accent glyphs (umlauts and accents)")
     i.add_argument("--tiles", action="store_true",
@@ -491,6 +765,15 @@ def main():
     tl = sub.add_parser("tiles", help="export the scenario picture tiles")
     tl.set_defaults(fn=cmd_tiles)
     tl.add_argument("--rom", required=True); tl.add_argument("--out", required=True)
+    bp = sub.add_parser("briefs-pack", help="edited briefing strings -> blob")
+    bp.set_defaults(fn=cmd_briefs_pack)
+    bp.add_argument("--in", required=True); bp.add_argument("--out", required=True)
+    bp.add_argument("--text-from", metavar="JSON",
+                    help="take the words from another region's export, "
+                         "keeping this one's addresses")
+    b = sub.add_parser("briefs", help="export briefing pages as strings")
+    b.set_defaults(fn=cmd_briefs)
+    b.add_argument("--rom", required=True); b.add_argument("--out", required=True)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()
