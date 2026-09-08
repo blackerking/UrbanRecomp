@@ -1556,6 +1556,21 @@ static void handle_pos_stuff(void) {
       { static int done; const char *vd = getenv("SC_VRAM_DUMP");
         const char *von = getenv("SC_VRAM_DUMP_ON");
         const int want = von && *von ? (int)strtol(von, NULL, 16) : -1;
+        /* SC_VRAM_DUMP_WAIT=<n> holds the capture n frames past the first
+         * frame the screen matches. Screens that draw their own text after
+         * the transition -- the main menu writes its word strips a few
+         * frames in -- otherwise get captured empty, which is how the first
+         * menu capture came back as an untextured panel. */
+        { const char *vw = getenv("SC_VRAM_DUMP_WAIT");
+          const int wait = vw && *vw ? atoi(vw) : 0;
+          static int seen = -1;
+          if (vd && *vd && !done && g_ppu &&
+              (want < 0 || g_ram[0x14] == (uint8_t)want)) {
+            if (seen < 0) seen = 0; else seen++;
+          }
+          if (vd && *vd && !done && g_ppu && seen >= 0 && seen < wait)
+            goto vram_dump_done;
+        }
         if (vd && *vd && !done && g_ppu &&
             (want < 0 || g_ram[0x14] == (uint8_t)want)) {
           done = 1;
@@ -1594,6 +1609,7 @@ static void handle_pos_stuff(void) {
                     (unsigned)PPU_bgTileAdr(g_ppu, 2));
           }
         } }
+      vram_dump_done:
       apply_surfaces();
       /* Every frame the selector is up, not once on entry: the game draws
        * its own cards as the screen fades in, so a single placement at

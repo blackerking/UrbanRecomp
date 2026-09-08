@@ -1201,11 +1201,30 @@ def cmd_packets(a):
     print("  Sylt's disaster line: %d tiles from the donor's own strip"
           % len(sylt))
 
+    # --swap takes a whole packet from the donor rather than reasoning about
+    # its cells. The menus need this: their tilemaps are byte-identical
+    # across regions while the artwork differs, so the words are placed by
+    # code from fixed slots and only the pictures change. Whether the German
+    # strips really occupy the same slots is a question for the screen, not
+    # for analysis -- this is how it gets asked.
+    extra = []
+    for spec in (a.swap or []):
+        off = int(spec, 0)
+        d, _ = eg.nintendo_decompress(us, off)
+        tw = find_twin(scan_packets(dn, eg, len(d)), d)
+        if not tw:
+            sys.exit("no donor counterpart for $%06X (length %d)" % (off, len(d)))
+        toff, agree, td = tw
+        extra.append((off, len(d), [(0, bytes(td))]))
+        print("swap $%06X  <-  donor $%06X  (%d/%d bytes agree, %d differ)"
+              % (off, toff, agree, len(d), len(d) - agree))
+
     blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
-    blob += (3).to_bytes(2, "little")
-    for src, outlen, sp in ((SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
-                            (SELECTOR_CHR, len(uchr), spans),
-                            (SYLT_CARD_PSEUDO, 0, sylt)):
+    entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
+               (SELECTOR_CHR, len(uchr), spans),
+               (SYLT_CARD_PSEUDO, 0, sylt)] + extra
+    blob += len(entries).to_bytes(2, "little")
+    for src, outlen, sp in entries:
         if src == SYLT_CARD_PSEUDO:
             bank, addr = 0xff, 0xffff
         else:
@@ -1291,6 +1310,9 @@ def main():
                     help="the US image the patch targets")
     pc.add_argument("--donor", required=True, help="a translated ROM")
     pc.add_argument("--out", required=True)
+    pc.add_argument("--swap", action="append", metavar="ADDR",
+                    help="take this whole US packet from the donor "
+                         "(a file offset, e.g. 0x04A571); repeatable")
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()
