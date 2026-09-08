@@ -3688,3 +3688,50 @@ Which class in `$14`-`$25` is the train and which is the plane. The band is 18
 entries and nothing here names them; the map is `tile id -> graphic`, and that
 table has not been read. A capture with a train on screen, or the tile set in
 `extracted_assets/`, would settle it in one step.
+
+## The main menu, and a retracted claim about `00:98BB`
+
+**Retraction.** An earlier commit described the table at `00:98BB` / `00:98F7`
+as the main menu's strip table. It is not, or at least nothing here shows that
+it is. It sits immediately after the `RTL` of `00:98A0`, which is what made it
+look like that routine's data. Three tests say otherwise: its values run past
+511, beyond the 512 tiles of the menu's artwork packet; decoded as indices into
+that sheet they spell nothing; and its thirty nine-value runs appear as
+consecutive tilemap cells in 2 of 30 cases -- the same 2 in the menu capture,
+the in-game capture and the selector capture alike, which is the rate at which
+consecutive runs occur by chance, not a match. Its role is unknown.
+
+What is established about the menu:
+
+| | |
+|---|---|
+| `00:98A0` | Confirmed by disassembly, but it is a state setter, not a drawing routine. Called as `PHP ; JSL $0098A0 ; <a> <b> ; PLP`, it reads the two inline bytes, steps the return address past them, and writes `dp[$03 + a] = b`. The same inline-operand convention as `03:a3cf`. The German build has it at `$009896`. |
+| `$05ABF1` | The menu's BG3 tilemap -- 1024/1024 words against a live capture at VRAM `$3000`. **Byte-identical to the German ROM's copy** (`$05BB24`). Not a linear layout: it draws sheet rows in a permuted order, `[32, 96, 48, 112, 64, 128, 80, 144]`, pairing each text row with its shadow row. |
+| `$04A571` | The menu's artwork, 4bpp, 16 tiles wide, tile index = row*16 + col. Rendering `$05ABF1` against it reproduces `RESUMESAVED` / `CITYPRACTICEAR` / `SCENARIO`. |
+| `$04A65B` | The German counterpart. Rendering the **US** map against it gives clean German words -- `UEBUNGSSPIEL`, `GESPEICHERTE`. |
+
+That last row is the interesting one. Both regions share the map, the German
+artwork is correct against it, and yet swapping only the artwork produces
+`GSSPIEL`, `STNESCHAUPUBUN`, `LATZE STADTUE` in play -- German words sliced at
+English boundaries. So what differs between the regions is not the layout and
+not the pixels but **where each line's window onto them starts**, and that is
+neither in a packet nor in any text table.
+
+`SC_VRAM_WATCH=<hex word addr>[+<count>]` exists to catch it: a per-frame diff
+of a VRAM range with the frame and screen that changed it, plus every layer's
+scroll as it moves. `SNESRECOMP_DMA_LOG` would have been the obvious tool and
+is inert in this target -- `ppudma_record_dma` is stubbed off the AOT tier.
+
+## A second message table: `00:859E`
+
+Separate from the 53-record dialog block, and not previously mapped. A pointer
+table at `00:859E` into a text block in bank `$01` around `$009980`. Bytes are
+ASCII biased by `$80`, with a separate large-capital bank: a capital opening a
+word is stored as ASCII-`$20`, so `SAVE` reads as `3AVE` under a naive decode.
+`$00` is a space. German accents take the lowercase slots -- `d` is a-umlaut,
+`t` o-umlaut, `a` u-umlaut, `{` eszett.
+
+It holds the Save/Load and "please wait" text (`ONE MOMENT PLEASE...` /
+`BITTE WARTEN...`, `UNABLE TO SAVE.` / `SPEICHERN NICHT MOEGLICH.`,
+`SAVE COMPLETED.`, `GOOD BYE.`) and the HUD advisor lines -- traffic jams,
+blackouts, fire and police department demands, the scenario countdown.

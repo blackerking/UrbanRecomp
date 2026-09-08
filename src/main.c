@@ -1610,6 +1610,59 @@ static void handle_pos_stuff(void) {
           }
         } }
       vram_dump_done:
+      /* SC_VRAM_WATCH=<hex word addr>[+<count>] -- per-frame diff of a VRAM
+       * range, plus every layer's scroll when it moves.
+       *
+       * Written for the main menu, where the usual routes all came up dry:
+       * its tilemap ($05ABF1) and its artwork are both packets, both already
+       * identified, and the German artwork renders correct German words
+       * against the very same map. What differs between the regions is
+       * therefore WHERE each line is taken from, and that is neither in a
+       * packet nor in any text table -- so the thing to watch is the writes
+       * and the scroll, not the data. SNESRECOMP_DMA_LOG is inert in this
+       * target (ppudma_record_dma is stubbed off the AOT tier), which is why
+       * this exists rather than reusing it. */
+      { static uint16_t *shadow; static int wcount = -1; static unsigned wbase;
+        static uint16_t last_h[4], last_v[4]; static int scroll_seen;
+        if (wcount < 0) {
+          const char *e = getenv("SC_VRAM_WATCH");
+          wcount = 0;
+          if (e && *e) {
+            char *end = NULL;
+            wbase = (unsigned)strtoul(e, &end, 16);
+            wcount = (end && *end == '+') ? atoi(end + 1) : 64;
+            if (wbase + (unsigned)wcount > 0x8000u) wcount = (int)(0x8000u - wbase);
+            shadow = (uint16_t *)calloc((size_t)(wcount > 0 ? wcount : 1),
+                                        sizeof(uint16_t));
+            if (!shadow) wcount = 0;
+            else fprintf(stderr, "[watch] VRAM $%04x..$%04x\n",
+                         wbase, wbase + (unsigned)wcount - 1);
+          }
+        }
+        if (wcount > 0 && g_ppu && shadow) {
+          int shown = 0;
+          for (int i = 0; i < wcount; i++) {
+            const uint16_t now = g_ppu->vram[wbase + (unsigned)i];
+            if (now == shadow[i]) continue;
+            if (shown < 12)
+              fprintf(stderr, "[watch] f%llu $%02x  $%04x: $%04x -> $%04x\n",
+                      (unsigned long long)s_frames, g_ram[0x14],
+                      wbase + (unsigned)i, shadow[i], now);
+            shadow[i] = now; shown++;
+          }
+          if (shown > 12)
+            fprintf(stderr, "[watch] f%llu  ... and %d more cells\n",
+                    (unsigned long long)s_frames, shown - 12);
+          for (int L = 0; L < 4; L++) {
+            const uint16_t h = g_ppu->hScroll[L], v = g_ppu->vScroll[L];
+            if (scroll_seen && h == last_h[L] && v == last_v[L]) continue;
+            fprintf(stderr, "[watch] f%llu $%02x  BG%d scroll h=%u v=%u\n",
+                    (unsigned long long)s_frames, g_ram[0x14], L + 1, h, v);
+            last_h[L] = h; last_v[L] = v;
+          }
+          scroll_seen = 1;
+        }
+      }
       apply_surfaces();
       /* Every frame the selector is up, not once on entry: the game draws
        * its own cards as the screen fades in, so a single placement at
