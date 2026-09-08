@@ -813,6 +813,7 @@ static void sylt_write_brief_tilemap(void);
 #define SC_BRIEF_BLANK 0x3FFu
 static bool brief_compose_page(uint32_t src, uint8_t *dst);
 static void place_translated_cards(void);
+static void apply_surfaces(void);
 /* OFF by default, still. The compositor it depends on works now, but the gate
  * that decides WHICH screen it may draw on does not separate cleanly: the
  * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
@@ -1562,6 +1563,25 @@ static void handle_pos_stuff(void) {
           if (f) {
             fwrite(g_ppu->vram, 2, 0x8000, f);
             fclose(f);
+            /* A sidecar, so a capture describes itself. The surface tool
+             * needs each layer's map and CHR base, and hand-passing those
+             * is exactly how a donor and a target get mismatched. */
+            { char meta[520];
+              snprintf(meta, sizeof meta, "%s.info", vd);
+              FILE *mf = fopen(meta, "w");
+              if (mf) {
+                fprintf(mf, "screen=%02x\nscroll=%04x\nscenario=%u\n"
+                            "bgmode=%d\n",
+                        g_ram[0x14],
+                        (unsigned)(g_ram[0x16] | (g_ram[0x17] << 8)),
+                        (unsigned)(g_ram[0x40] | (g_ram[0x41] << 8)),
+                        (int)PPU_mode(g_ppu));
+                for (int L = 0; L < 4; L++)
+                  fprintf(mf, "bg%dmap=%04x\nbg%dchr=%04x\n",
+                          L + 1, (unsigned)PPU_bgTilemapAdr(g_ppu, L),
+                          L + 1, (unsigned)PPU_bgTileAdr(g_ppu, L));
+                fclose(mf);
+              } }
             fprintf(stderr, "[vram] dumped 64KB to %s  screen=$%02x scroll=$%04x "
                             "$40=%u bg1map=$%04x "
                             "bg1chr=$%04x bg3map=$%04x bg3chr=$%04x\n",
@@ -1574,6 +1594,11 @@ static void handle_pos_stuff(void) {
                     (unsigned)PPU_bgTileAdr(g_ppu, 2));
           }
         } }
+      apply_surfaces();
+      /* Every frame the selector is up, not once on entry: the game draws
+       * its own cards as the screen fades in, so a single placement at
+       * entry is painted over. Reported from play as the cards being right
+       * for a moment and then gone. */
       ws_hide_backdrop_furniture();
       ws_fill_flat_margins();
       ws_fill_margins();
@@ -2275,6 +2300,12 @@ static uint16_t s_card_tid[kMaxCards][kCardTiles];
 static uint8_t  s_card_px[kMaxCards][kCardTiles][32];
 static uint8_t  s_card_nt[kMaxCards];
 static int      s_card_count;
+/* Surfaces: the general form of the card placement -- a tilemap region plus
+ * the art of every tile it uses, written when a given screen appears. Kept
+ * as the raw file and walked at apply time. */
+enum { kMaxSurf = 4 };
+static uint8_t *s_surf[kMaxSurf]; static uint32_t s_surf_len[kMaxSurf];
+static int      s_surf_count;
 static bool s_ninth_scenario;
 /* Declared here rather than beside load_sylt_map(): the arm is set from the
  * selector hook and the swap runs in the opcode loop, both of which come
@@ -2316,8 +2347,11 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       s_sylt_map_armed = false;
       s_sylt_city = false;
       selector_extend_tilemap();
-      sylt_place_card();
+      /* Cards first, Sylt second. The donor cards reference tiles that fall
+       * in Sylt's CHR run at $2e0, so placing them after sylt_place_card()
+       * overwrote its art -- reported from play as Sylt going black. */
       place_translated_cards();
+      sylt_place_card();
       break;
     case 0xde4d:   /* B accepted on the selector (03:de4d is the JSR $e574 /
                     * INC $14 path). Arm the map swap only for the ninth
@@ -6490,6 +6524,58 @@ static void sylt_write_brief_tilemap(void) {
   fputc('\n', stderr);
 }
 
+/* Apply any surface whose screen is the one now showing. A surface carries
+ * its tiles already REMAPPED to indices the target screen left free, so
+ * writing them cannot land on artwork that is already correct -- which is
+ * what the naive same-index card copy did to the card names.
+ *
+ * Applied once per visit to the screen, not once ever: the game rebuilds
+ * these tilemaps each time it enters. */
+static void apply_surfaces(void) {
+  static int last_screen = -1;
+  if (!s_surf_count || !g_ppu) return;
+  const int scr = g_ram[0x14];
+  if (scr == last_screen) return;
+  last_screen = scr;
+  for (int i = 0; i < s_surf_count; i++) {
+    const uint8_t *s = s_surf[i];
+    if (s[6] != (uint8_t)scr) continue;
+    const unsigned tmap = (unsigned)(s[7] | (s[8] << 8));
+    const unsigned nw = s[9];
+    const unsigned nrows = s[10];
+    const uint8_t *rows = s + 11;
+    const unsigned ncols = rows[nrows];
+    const uint8_t *cols = rows + nrows + 1;
+    const uint8_t *p = cols + ncols;
+    const unsigned ntiles = (unsigned)(p[0] | (p[1] << 8)); p += 2;
+    const uint8_t *ents = p;
+    const uint8_t *art = ents + (size_t)nrows * ncols * 2u;
+    if ((size_t)(art - s) + (size_t)ntiles * (2u + nw * 2u) > s_surf_len[i])
+      continue;                       /* truncated: leave the screen alone */
+    for (unsigned t = 0; t < ntiles; t++) {
+      const uint8_t *e = art + (size_t)t * (2u + nw * 2u);
+      const unsigned idx = (unsigned)(e[0] | (e[1] << 8));
+      if ((size_t)idx * nw + nw > 0x8000u) continue;
+      for (unsigned k = 0; k < nw; k++)
+        g_ppu->vram[idx * nw + k] =
+            (uint16_t)(e[2 + k * 2] | (e[3 + k * 2] << 8));
+    }
+    /* Only the listed columns. Writing a whole row would replace the
+     * background, which is the target's and not the donor's. */
+    for (unsigned r = 0; r < nrows; r++)
+      for (unsigned ci = 0; ci < ncols; ci++) {
+        const unsigned c = cols[ci];
+        const size_t k = ((size_t)r * ncols + ci) * 2u;
+        const unsigned v = (unsigned)(ents[k] | (ents[k + 1] << 8));
+        const unsigned at = tmap + (c < 32 ? 0u : 0x400u)
+                          + (unsigned)rows[r] * 32u + (c & 31u);
+        if (at < 0x8000u) g_ppu->vram[at] = (uint16_t)v;
+      }
+    { static int said; if (!said++)
+        fprintf(stderr, "translation: surface applied on screen $%02x\n", scr); }
+  }
+}
+
 /* Write the translated scenario cards into VRAM: the art of each tile the
  * card references, then its 8x9 tilemap. Same operation and same moment as
  * sylt_place_card(), which places the ninth card -- these are the other
@@ -6505,6 +6591,7 @@ static void place_translated_cards(void) {
         g_ppu->vram[base + k] = (uint16_t)(s_card_px[i][t][k * 2] |
                                           (s_card_px[i][t][k * 2 + 1] << 8));
     }
+    if (s_card_h[i] == 0) continue;   /* tiles only: no tilemap write */
     for (int y = 0; y < s_card_h[i]; y++)
       for (int x = 0; x < s_card_w[i]; x++) {
         const int col = s_card_col[i] + x, row = s_card_row[i] + y;
@@ -7485,12 +7572,36 @@ int main(int argc, char **argv) {
                     }
                   }
                 }
+                if (blob[4] >= 9 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t sl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *se = q + sl;
+                  if (sl >= 2 && se <= blob + got) {
+                    int ns = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < ns && s_surf_count < kMaxSurf; i++) {
+                      if (q + 4 > se) break;
+                      uint32_t fl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                                   | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                      q += 4;
+                      if (q + fl > se || fl < 11 || memcmp(q, "SCSF", 4) != 0) break;
+                      s_surf[s_surf_count] = (uint8_t *)malloc(fl);
+                      if (!s_surf[s_surf_count]) break;
+                      memcpy(s_surf[s_surf_count], q, fl);
+                      s_surf_len[s_surf_count] = fl;
+                      s_surf_count++;
+                      q += fl;
+                    }
+                  }
+                }
               }
             }
             fprintf(stderr, "translation: %s applied (%u messages, %u bytes "
                             "at $%06X, %u spare)\n",
                     tr, (unsigned)recs, (unsigned)len, (unsigned)kTrOff,
                     (unsigned)(kTrBudget - len));
+            if (s_surf_count)
+              fprintf(stderr, "translation: %d surface(s) loaded\n", s_surf_count);
             if (s_card_count)
               fprintf(stderr, "translation: %d scenario cards loaded\n",
                       s_card_count);

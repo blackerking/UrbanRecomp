@@ -392,7 +392,7 @@ def detect_region(rom_path):
 
 
 def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
-              sglyphs=(), cards=None):
+              sglyphs=(), cards=None, surfaces=None):
     """Header + the packed message block + any briefing packets.
 
     v2 layout: "SCTR", ver, region, record count, text length, then the text,
@@ -405,7 +405,7 @@ def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
     if len(body) > TARGET_BUDGET:
         sys.exit("translation needs %d bytes; the US image has room for %d. "
                  "Shorten the longest messages." % (len(body), TARGET_BUDGET))
-    out = (MAGIC + bytes([8, 0x01])
+    out = (MAGIC + bytes([9, 0x01])
            + len(records).to_bytes(2, "little")
            + len(body).to_bytes(4, "little") + body)
     out += len(briefs).to_bytes(2, "little")
@@ -426,6 +426,9 @@ def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
     out += (len(cards) if cards else 0).to_bytes(4, "little")
     if cards:
         out += cards
+    out += (len(surfaces) if surfaces else 0).to_bytes(4, "little")
+    if surfaces:
+        out += surfaces
     return out
 
 # The font is a codepage, not Latin-1: the accented glyphs sit where CP437
@@ -635,12 +638,33 @@ def cmd_import(a):
             if len(d) < 11 or d[:4] != CARD_MAGIC:
                 sys.exit("%s is not a card file" % f)
             if d[7] == 42:
-                continue
+                # Sylt's slot: take its TILES but not its layout. Card names
+                # are letters, and letters are shared -- part of the donor's
+                # alphabet is referenced only from this column, so skipping it
+                # entirely left some glyphs English and the names mixed. h=0
+                # marks the entry "art only", and sylt_place_card() redraws
+                # its own card afterwards regardless.
+                # Art only: zero the height AND drop the tilemap bytes it
+                # describes, or the parser reads the tile data 144 bytes early
+                # and abandons every record after this one.
+                w0, h0 = d[5], d[6]
+                head = d[:6] + bytes([0]) + d[7:11]
+                d = head + d[11 + w0 * h0 * 2:]
             buf += d
             n += 1
         if n:
             cards = n.to_bytes(2, "little") + bytes(buf)
-    out = make_blob(recs, briefs, tiles, glyphs, strings, sglyphs, cards)
+    surfs = b""
+    for f in (a.surface or []):
+        d = open(f, "rb").read()
+        if d[:4] != SURF_MAGIC:
+            sys.exit("%s is not a surface file" % f)
+        surfs += len(d).to_bytes(4, "little") + d
+    if surfs:
+        surfs = len(a.surface).to_bytes(2, "little") + surfs
+
+    out = make_blob(recs, briefs, tiles, glyphs, strings, sglyphs, cards,
+                    surfs or None)
     open(a.out, "wb").write(out)
     body = len(recs and pack_records(recs))
     print("imported %s text from %s" % (donor, os.path.basename(a.donor)))
@@ -653,6 +677,8 @@ def cmd_import(a):
         print("  %d briefing pages as strings, composed US-side" % len(pages))
     if sglyphs:
         print("  %d accented briefing glyphs into free US tileset slots" % len(sglyphs))
+    if surfs:
+        print("  %d surface(s)" % len(a.surface))
     if cards:
         print("  %d scenario cards (Sylt's slot left alone)"
               % int.from_bytes(cards[:2], "little"))
@@ -844,6 +870,150 @@ def cmd_cards(a):
     print("exported %d cards from %s" % (n, os.path.basename(a.vram)))
 
 
+# ── surfaces ─────────────────────────────────────────────────────────────
+# A surface is the general form of what sylt_place_card() does for one card:
+# a rectangle of tilemap plus the artwork of every tile it references, written
+# into VRAM when a given screen appears. Cards were the first instance; the
+# menus, the title's prompt and the HUD labels are the same shape.
+#
+# Tiles are NOT written at the donor's own indices. On the selector BG3 shares
+# CHR space with BG1 at $0000, so a donor tile placed at its own index would
+# land on the card pictures. Indices are allocated from what the TARGET screen
+# leaves free, and the tilemap is repointed to match.
+SURF_MAGIC = b"SCSF"
+
+
+def _info(dump):
+    d = {}
+    try:
+        for line in open(dump + ".info", encoding="utf-8"):
+            k, _, v = line.strip().partition("=")
+            if k:
+                d[k] = v
+    except OSError:
+        sys.exit("%s.info is missing -- retake the capture with a build that "
+                 "writes the sidecar" % dump)
+    return d
+
+
+def _depth_words(mode, layer):
+    """VRAM words per tile: 4bpp is 16, 2bpp is 8.
+
+    Keyed on the LAYER, not the reported mode. The selector's sidecar says
+    bgmode=0, in which every background is nominally 2bpp -- but the card
+    pictures on BG1 only read correctly at 16 words a tile, so the reported
+    mode is not what the layer is actually fetched at here. BG3 carries the
+    text and is 2bpp in every mode this game uses.
+    """
+    return 8 if layer in (3, 4) else 16
+
+
+def _parse_rows(spec):
+    out = []
+    for part in spec.split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def _used_tiles(w, info, rows_all=range(32)):
+    """every tile index any layer of this screen references"""
+    used = set()
+    for L in (1, 2, 3, 4):
+        key = "bg%dmap" % L
+        if key not in info:
+            continue
+        m = int(info[key], 16)
+        for r in rows_all:
+            for c in range(64):
+                page = 0x400 if c >= 32 else 0
+                used.add(w[m + page + r * 32 + (c & 31)] & 0x3ff)
+    return used
+
+
+def cmd_surface(a):
+    import struct
+    din, tin = _info(a.donor), _info(a.target)
+    if din.get("screen") != tin.get("screen"):
+        sys.exit("captures are of different screens: donor $%s, target $%s"
+                 % (din.get("screen"), tin.get("screen")))
+    dw, tw = _vram_words(a.donor), _vram_words(a.target)
+    dmap = int(din["bg%dmap" % a.layer], 16)
+    dchr = int(din["bg%dchr" % a.layer], 16)
+    tmap = int(tin["bg%dmap" % a.layer], 16)
+    nw = _depth_words(din.get("bgmode", 1), a.layer)
+    rows = _parse_rows(a.rows)
+    # Columns matter as much as rows. Writing the full 64-column width of a
+    # row replaces the BACKGROUND too, and the donor's background is not the
+    # target's -- the German build runs none of the host margin work, so
+    # copying its full rows wiped the wood. Reported from play as cards and
+    # background completely broken.
+    cols = _parse_rows(a.cols) if a.cols else list(range(64))
+
+    ents = []
+    for r in rows:
+        for c in cols:
+            page = 0x400 if c >= 32 else 0
+            ents.append(dw[dmap + page + r * 32 + (c & 31)])
+
+    # A slot is free only if its CHR is EMPTY in the target -- not merely
+    # unreferenced by the captured tilemap.
+    #
+    # The capture is one frame at one scroll position. Cards that were off
+    # screen then reference tiles that look unused, so allocating over them
+    # destroyed every card the capture had not been showing. Reported from
+    # play as all cards broken except Sylt, which is the one this never
+    # writes to. Emptiness in CHR is a property of the image, not of what a
+    # single frame happened to draw.
+    tchr = int(tin["bg%dchr" % a.layer], 16)
+    taken = _used_tiles(tw, tin)
+    free = []
+    for t in range(1, 1024):
+        if t in taken:
+            continue
+        base = tchr + t * nw
+        if base + nw > 0x8000:
+            break
+        if any(tw[base:base + nw]):
+            continue                     # something is drawn here already
+        free.append(t)
+    remap, art = {}, []
+    for e in ents:
+        t = e & 0x3ff
+        if t in remap:
+            continue
+        base = dchr + t * nw
+        px = struct.pack("<%dH" % nw, *dw[base:base + nw])
+        if px == bytes(nw * 2):
+            remap[t] = t            # blank: leave it alone
+            continue
+        if not free:
+            sys.exit("no free tile slots left on the target screen")
+        remap[t] = free.pop(0)
+        art.append((remap[t], px))
+
+    blob = bytearray(SURF_MAGIC + bytes([1, a.layer, int(din["screen"], 16)]))
+    blob += tmap.to_bytes(2, "little") + nw.to_bytes(1, "little")
+    blob += len(rows).to_bytes(1, "little")
+    for r in rows:
+        blob += bytes([r])
+    blob += len(cols).to_bytes(1, "little")
+    for c in cols:
+        blob += bytes([c])
+    blob += len(art).to_bytes(2, "little")
+    for e in ents:
+        blob += (((e & ~0x3ff) | remap[e & 0x3ff]) & 0xffff).to_bytes(2, "little")
+    for idx, px in art:
+        blob += idx.to_bytes(2, "little") + px
+    open(a.out, "wb").write(blob)
+    print("surface: screen $%s layer BG%d, %d rows x %d cols, %d tiles remapped"
+          % (din["screen"], a.layer, len(rows), len(cols), len(art)))
+    print("  %d bytes -> %s" % (len(blob), a.out))
+
+
 def cmd_glyphs(a):
     blob = load_block(a.rom, a.version)
     seen = sorted(set(blob) - {SEP})
@@ -884,6 +1054,8 @@ def main():
                    help="also take the donor's briefings, as strings")
     i.add_argument("--no-glyphs", action="store_true",
                    help="skip the accent glyphs (umlauts and accents)")
+    i.add_argument("--surface", action="append", metavar="FILE",
+                   help="a surface file to apply (repeatable)")
     i.add_argument("--cards-from", metavar="DIR",
                    help="scenario cards exported from a donor selector capture")
     i.add_argument("--tiles", action="store_true",
@@ -912,6 +1084,15 @@ def main():
     cd.add_argument("--out", required=True)
     cd.add_argument("--map", type=lambda x: int(x, 0), default=0x3000)
     cd.add_argument("--chr", type=lambda x: int(x, 0), default=0x0000)
+    sf = sub.add_parser("surface", help="capture a translated screen region")
+    sf.set_defaults(fn=cmd_surface)
+    sf.add_argument("--donor", required=True, help="VRAM dump from the donor ROM")
+    sf.add_argument("--target", required=True, help="VRAM dump from the US build")
+    sf.add_argument("--layer", type=int, default=3, choices=[1, 2, 3, 4])
+    sf.add_argument("--rows", required=True, help="e.g. 12-15,23-26")
+    sf.add_argument("--cols", help="e.g. 2-9,12-19 -- REQUIRED in practice: a "
+                                   "full-width row overwrites the background")
+    sf.add_argument("--out", required=True)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()
