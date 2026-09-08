@@ -2694,6 +2694,7 @@ static uint8_t *s_dec_ref;             /* scratch WRAM image for verify */
 static ScDecompResult s_dec_exp;       /* what the C predicted */
 static int      s_dec_pending;         /* a call is in flight */
 static int      s_dec_armed;           /* 00:90dd seen, 00:90ee not yet */
+static int      s_dec_trace = -1;      /* SC_DECOMP_TRACE, resolved once */
 static uint16_t s_dec_start_x;
 static unsigned long s_dec_ok, s_dec_mismatch, s_dec_declined, s_dec_fast;
 
@@ -2711,6 +2712,106 @@ static int sc_decomp_mode(void) {
     else                        mode = 2;
   }
   return mode;
+}
+
+/* -- screen-packet patches (SC_PACKET_PATCH) ------------------------------
+ *
+ * The scenario selector keeps its whole 64x32 tilemap and its card artwork
+ * as two compressed packets in ROM ($05A5A1 and $0444DB), unpacked through
+ * 00:90DD like everything else. A patch file (tools/text_tool.py packets)
+ * carries spans to lay over the DECOMPRESSED bytes, so the translated screen
+ * is uploaded by the game's own DMA at the game's own moment.
+ *
+ * That is the whole point of doing it here. Five earlier attempts wrote the
+ * cards into VRAM from the host -- at the selector hook, at the frame top,
+ * before and after Sylt -- and every one lost a race with the NMI DMA that
+ * follows: names came out fragmented, one card's text continuing onto the
+ * next. An offline replay of those same writes reproduced the German screen
+ * exactly (384 name cells, zero differing), which ruled the DATA correct and
+ * left only the timing. Patching the source removes the timing question
+ * instead of trying to win it. */
+typedef struct ScpkSpan { uint32_t off; uint16_t len; uint8_t *data; } ScpkSpan;
+typedef struct ScpkEntry { uint32_t src, outlen; uint16_t nspans;
+                           int reported; ScpkSpan *spans; } ScpkEntry;
+static ScpkEntry *s_scpk;
+static int s_scpk_count = -1;          /* -1 = not looked for yet */
+static uint32_t s_scpk_src, s_scpk_out;
+
+static uint8_t *read_file(const char *path, uint32_t *size_out);
+
+static void scpk_load(void) {
+  s_scpk_count = 0;
+  const char *path = getenv("SC_PACKET_PATCH");
+  if (!path || !*path) return;
+  uint32_t n = 0;
+  uint8_t *b = read_file(path, &n);
+  if (!b) { fprintf(stderr, "packet patch: cannot read %s\n", path); return; }
+  if (n < 8 || memcmp(b, "SCPK", 4) != 0 || b[4] != 1) {
+    fprintf(stderr, "packet patch: %s is not an SCPK v1 file\n", path);
+    free(b); return;
+  }
+  const int cnt = b[6] | (b[7] << 8);
+  s_scpk = (ScpkEntry *)calloc((size_t)(cnt ? cnt : 1), sizeof(ScpkEntry));
+  if (!s_scpk) { free(b); return; }
+  uint32_t p = 8;
+  for (int i = 0; i < cnt; i++) {
+    if (p + 9 > n) break;
+    ScpkEntry *e = &s_scpk[s_scpk_count];
+    e->src = ((uint32_t)b[p] << 16) | b[p + 1] | ((uint32_t)b[p + 2] << 8);
+    e->outlen = (uint32_t)b[p + 3] | ((uint32_t)b[p + 4] << 8) |
+                ((uint32_t)b[p + 5] << 16) | ((uint32_t)b[p + 6] << 24);
+    e->nspans = (uint16_t)(b[p + 7] | (b[p + 8] << 8));
+    p += 9;
+    e->spans = (ScpkSpan *)calloc((size_t)(e->nspans ? e->nspans : 1),
+                                  sizeof(ScpkSpan));
+    if (!e->spans) break;
+    int ok = 1;
+    for (int k = 0; k < e->nspans; k++) {
+      if (p + 6 > n) { ok = 0; break; }
+      const uint32_t off = (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8) |
+                           ((uint32_t)b[p + 2] << 16) | ((uint32_t)b[p + 3] << 24);
+      const uint16_t len = (uint16_t)(b[p + 4] | (b[p + 5] << 8));
+      p += 6;
+      if (p + len > n) { ok = 0; break; }
+      uint8_t *d = (uint8_t *)malloc(len ? len : 1);
+      if (!d) { ok = 0; break; }
+      memcpy(d, b + p, len); p += len;
+      e->spans[k].off = off; e->spans[k].len = len; e->spans[k].data = d;
+    }
+    if (!ok) break;
+    s_scpk_count++;
+  }
+  free(b);
+  for (int i = 0; i < s_scpk_count; i++)
+    fprintf(stderr, "packet patch: $%02x:%04x  %u bytes out, %u spans\n",
+            (unsigned)(s_scpk[i].src >> 16), (unsigned)(s_scpk[i].src & 0xffff),
+            s_scpk[i].outlen, (unsigned)s_scpk[i].nspans);
+}
+
+/* `out` is where the ROM put the packet: $8000 + X, in bank $7E. */
+static void scpk_apply(uint32_t src, uint32_t out) {
+  if (s_scpk_count < 0) scpk_load();
+  for (int i = 0; i < s_scpk_count; i++) {
+    ScpkEntry *e = &s_scpk[i];
+    if (e->src != src) continue;
+    for (int k = 0; k < e->nspans; k++) {
+      const uint32_t at = out + e->spans[k].off;
+      if (at + e->spans[k].len > 0x20000u) continue;
+      memcpy(&g_ram[at], e->spans[k].data, e->spans[k].len);
+    }
+    /* Once per ENTRY, not once overall: a single shared flag reported only
+     * the first packet to be patched and left the others looking silent. */
+    if (!e->reported) {
+      e->reported = 1;
+      fprintf(stderr, "packet patch: applied at $%02x:%04x\n",
+              (unsigned)(src >> 16), (unsigned)(src & 0xffff));
+    }
+  }
+}
+
+static int scpk_active(void) {
+  if (s_scpk_count < 0) scpk_load();
+  return s_scpk_count > 0;
 }
 
 static void sc_decomp_hook(Interp816 *cpu) {
@@ -2733,6 +2834,10 @@ static void sc_decomp_hook(Interp816 *cpu) {
    *
    * 90ee is also the loop-back target, so the arm flag keeps a declined
    * call from re-entering this on every command the ROM then decodes. */
+  if (s_dec_trace < 0) {
+    const char *t = getenv("SC_DECOMP_TRACE");
+    s_dec_trace = (t && *t && *t != '0');
+  }
   if (cpu->pc == 0x90dd) { s_dec_armed = 1; return; }
 
   if (cpu->pc == 0x90ee) {
@@ -2755,6 +2860,16 @@ static void sc_decomp_hook(Interp816 *cpu) {
       const unsigned long e0_before = g_sc_decomp_cmd_hits[7];
       ScDecompResult r;
       sc_decomp_run(s_dec_ref, sc_decomp_bus_read, NULL, sb, sy, dx, &r);
+      /* SC_DECOMP_TRACE=1 prints one line per unpacked packet: the screen
+       * that asked for it, where in ROM it came from, and how big it is.
+       * This is how a screen's ROM assets get identified. The address it
+       * prints converts to a file offset as bank*$8000 + (addr-$8000), which
+       * is what tools/extract_graphics.py decompresses -- so a screen can be
+       * patched at its source instead of by poking VRAM behind the game. */
+      if (s_dec_trace)
+        fprintf(stderr, "[decomp] screen $%02x  src $%02x:%04x  -> wram $%04x  %5u bytes%s\n",
+                g_ram[0x14], sb, sy, dx, r.bytes_out,
+                r.bad ? "  (declined)" : "");
       if (r.bad || g_sc_decomp_cmd_hits[7] != e0_before) {
         g_sc_decomp_cmd_hits[7] = e0_before;   /* keep the tally honest */
         s_dec_declined++;
@@ -3083,6 +3198,18 @@ static bool run_one_frame(void) {
       fprintf(stderr, "[sylt] map swapped in at $7E8000 (%ld bytes)",
               s_sylt_map_len);
       fputc('\n', stderr);
+    }
+    /* Packet patches run on every unpack, independent of the briefing and
+     * Sylt paths below: the selector's packets are not briefings, and they
+     * must still be patched when no briefing blob is loaded. */
+    if (cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb) {
+        s_scpk_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
+                     ((uint32_t)g_ram[0x0a] << 8);
+        s_scpk_out = 0x8000u + (g_ram[0x0e] | ((uint32_t)g_ram[0x0f] << 8));
+      } else if (cpu->pc == 0x9106) {
+        scpk_apply(s_scpk_src, s_scpk_out);
+      }
     }
     if (s_ninth_scenario && s_rom_is_us && cpu->k == 0x00) {
       if (cpu->pc == 0x90eb)
@@ -6355,6 +6482,42 @@ static void load_sylt_map(void) {
 static uint16_t *s_sylt_tiles;      /* tiles_w * tiles_h * 8 words */
 static int s_sylt_tw, s_sylt_th;
 
+/* Sylt's card is this project's own artwork and draws its disaster line as
+ * pixels -- "Coastal" on row 6, "Flooding" on row 7 -- so the selector packet
+ * patch, which only repoints tilemap cells at shipped strips, cannot reach
+ * it. When a patch is loaded it carries the donor's word for the same
+ * disaster (the strip Rio's card uses) as six tiles of artwork. Row 7 is
+ * blanked from this card's own background rather than the donor's, so the
+ * one-line German word does not leave "Flooding" underneath it. */
+static void sylt_apply_translated_line(void) {
+  if (!s_sylt_tiles || s_sylt_tw != 8 || s_sylt_th < 8) return;
+  if (s_scpk_count < 0) scpk_load();
+  const ScpkEntry *e = NULL;
+  for (int i = 0; i < s_scpk_count; i++)
+    if (s_scpk[i].src == 0xffffffu) { e = &s_scpk[i]; break; }
+  if (!e) return;
+  /* Both drawn lines go first, from each row's own leftmost tile, which is
+   * card background. Blanking both and letting the patch choose where to
+   * land keeps that choice in the tool rather than split across the two. */
+  for (int row = 6; row <= 7; row++) {
+    const int base = row * s_sylt_tw;
+    for (int tx = 1; tx < s_sylt_tw; tx++)
+      memcpy(&s_sylt_tiles[(size_t)(base + tx) * 8],
+             &s_sylt_tiles[(size_t)base * 8], 8 * sizeof(uint16_t));
+  }
+  int n = 0;
+  for (int k = 0; k < e->nspans; k++) {
+    const uint32_t slot = e->spans[k].off / 16u;
+    if (e->spans[k].len != 16 ||
+        slot >= (uint32_t)(s_sylt_tw * s_sylt_th)) continue;
+    for (int j = 0; j < 8; j++)
+      s_sylt_tiles[slot * 8 + j] =
+          (uint16_t)(e->spans[k].data[j * 2] | (e->spans[k].data[j * 2 + 1] << 8));
+    n++;
+  }
+  fprintf(stderr, "[sylt] disaster line replaced from the packet patch (%d tiles)\n", n);
+}
+
 static void load_sylt_card(void) {
   const char *path = getenv("SC_SYLT_CARD");
   if (!path) path = "sylt_graphics/sylt_card.bin";
@@ -6379,6 +6542,7 @@ static void load_sylt_card(void) {
   }
   fclose(f);
   s_sylt_tw = tw; s_sylt_th = th;
+  sylt_apply_translated_line();
   fprintf(stderr, "[sylt] loaded %s (%dx%d tiles -> CHR $%03x..$%03x)", path,
           tw, th, SC_SYLT_TILE_BASE, SC_SYLT_TILE_BASE + tw * th - 1);
   fputc('\n', stderr);
@@ -6582,6 +6746,9 @@ static void apply_surfaces(void) {
  * eight. Column 42 is never carried in the blob, so Sylt is untouched. */
 static void place_translated_cards(void) {
   if (!s_card_count || !g_ppu) return;
+  /* A packet patch puts the same cards in through the game's own DMA, and
+   * doing both means this one races the other and loses. */
+  if (scpk_active()) return;
   const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
   for (int i = 0; i < s_card_count; i++) {
     for (int t = 0; t < s_card_nt[i]; t++) {

@@ -1029,6 +1029,198 @@ def cmd_glyphs(a):
             print("  $%02X  %s" % (b, bytes([b]).decode(CODEC)))
 
 
+
+# ── screen packets: patching a screen at its own ROM source ──────────────
+# The scenario selector is not assembled at runtime. The ROM keeps its whole
+# 64x32 tilemap as one compressed packet and the card artwork as another, and
+# unpacks both through the routine at 00:90DD. Every earlier attempt wrote the
+# translated cards straight into VRAM from the host and lost a race with the
+# game's own NMI DMA -- names came out fragmented, one card's text running
+# into the next. Patching the DECOMPRESSED PACKET instead means the game
+# uploads the translated screen itself, on its own schedule, so there is no
+# race left to lose.
+#
+# The two packets were found by decompressing every LZ5 stream in the US and
+# German ROMs and matching them: 05A5A1 is the only 4096-byte packet outside
+# the briefing group whose content differs between the regions, and it agrees
+# 82.7% with the live selector tilemap at VRAM $3000 (the rest is this
+# project's own Sylt card and margin work). 0444DB lands at VRAM $0000, the
+# selector's BG1 CHR base.
+PACKET_MAGIC = b"SCPK"
+PACKET_HDR = 8
+
+# Anchors are US file offsets. The donor's copy of each is found by content,
+# not by a hardcoded table, so a French or European ROM needs no new numbers.
+SELECTOR_MAP = 0x05A5A1
+SELECTOR_CHR = 0x0444DB
+# The card name strips are 2bpp, 16 bytes a tile, and they start at VRAM byte
+# $0B80 -- tile 184. Confirmed against a live capture: read at that stride the
+# block spells "San Francisco Earthquake Bern Traffic Detroit Crime Tokyo
+# Monster Attack ... MAP SELECT", and the German ROM's copy of the same block
+# spells the German equivalents at the same address.
+#
+# This is where the first version of this tool was wrong. It read the artwork
+# at 32 bytes a tile because the card PICTURES on this screen are 4bpp, so it
+# copied two tiles' worth of bytes for every glyph and landed them at double
+# the offset. The tile indices it derived were right; the stride was not.
+# The names are whole pre-rendered WORDS, not letters -- a strip only reads
+# correctly as an unbroken run, which is why a half-right copy came out as
+# fragments running between cards rather than as wrong letters.
+CHR_BYTES_PER_TILE = 16          # 2bpp
+CHR_TILES = 16384 // CHR_BYTES_PER_TILE          # the packet holds 1024
+
+# Where the shipped layout keeps the flooding strip (Rio's card), and where
+# it goes on Sylt's 8x9 card. Rows 6 and 7 are the two drawn lines
+# ("Coastal" / "Flooding"); the host blanks both and this lands on row 7,
+# directly above the year, the way every shipped card sits.
+SYLT_SRC_ROW, SYLT_SRC_COL, SYLT_STRIP_LEN = 11, 23, 6
+SYLT_CARD_ROW, SYLT_CARD_COL, SYLT_CARD_W = 7, 1, 8
+SYLT_CARD_PSEUDO = -1            # not a ROM packet; encoded as $ff:ffff
+
+
+def _lz5():
+    """the decompressor from extract_graphics.py, loaded as a module"""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "extract_graphics", os.path.join(here, "extract_graphics.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def scan_packets(rom, eg, minlen=1024):
+    """every LZ5 stream in `rom` that unpacks to at least `minlen` bytes"""
+    out, off, n = [], 0, len(rom)
+    while off < n:
+        try:
+            d, end = eg.nintendo_decompress(rom, off)
+        except Exception:
+            off += 1
+            continue
+        if len(d) >= minlen and (end - off) >= 64 and len(d) > (end - off):
+            out.append((off, bytes(d)))
+            off = end
+        else:
+            off += 1
+    return out
+
+
+def find_twin(packets, want):
+    """the donor packet that is this US packet's counterpart
+
+    Same decompressed length, then best byte agreement. Length alone is not
+    enough -- the twelve briefing pages are all 4096 bytes -- and agreement
+    alone is not enough either, so both are required.
+    """
+    best = None
+    for off, d in packets:
+        if len(d) != len(want):
+            continue
+        same = sum(1 for i in range(len(d)) if d[i] == want[i])
+        if best is None or same > best[1]:
+            best = (off, same, d)
+    return best
+
+
+def cmd_packets(a):
+    eg = _lz5()
+    us = open(a.rom, "rb").read()
+    dn = open(a.donor, "rb").read()
+    umap, _ = eg.nintendo_decompress(us, SELECTOR_MAP)
+    uchr, _ = eg.nintendo_decompress(us, SELECTOR_CHR)
+    pk = scan_packets(dn, eg, 4096)
+    tmap = find_twin(pk, umap)
+    tchr = find_twin(pk, uchr)
+    if not tmap or not tchr:
+        sys.exit("no counterpart for the selector packets in %s -- is this a "
+                 "SimCity ROM of another region?" % os.path.basename(a.donor))
+    dmapoff, magree, dmap = tmap
+    dchroff, cagree, dchr = tchr
+    print("selector tilemap  us $%06X  <-  donor $%06X  (%d/%d bytes agree)"
+          % (SELECTOR_MAP, dmapoff, magree, len(umap)))
+    print("selector artwork  us $%06X  <-  donor $%06X  (%d/%d bytes agree)"
+          % (SELECTOR_CHR, dchroff, cagree, len(uchr)))
+
+    uw = [umap[i] | (umap[i + 1] << 8) for i in range(0, len(umap), 2)]
+    dw = [dmap[i] | (dmap[i + 1] << 8) for i in range(0, len(dmap), 2)]
+    art = lambda c, t: bytes(c[t * CHR_BYTES_PER_TILE:
+                              (t + 1) * CHR_BYTES_PER_TILE])
+
+    # A cell can only be taken if its artwork can be: tiles at or past 511 are
+    # served by a CHR block this patch does not carry, so those cells keep the
+    # US entry rather than pointing at whatever happens to sit there. Four
+    # cells on one card do this; the rest of the screen is unaffected.
+    out_map = bytearray(umap)
+    kept, taken, skipped = 0, 0, 0
+    need = set()
+    for i, (u, d) in enumerate(zip(uw, dw)):
+        if u == d:
+            kept += 1
+            continue
+        if (d & 0x3ff) >= CHR_TILES:
+            skipped += 1
+            continue
+        out_map[i * 2] = d & 0xff
+        out_map[i * 2 + 1] = (d >> 8) & 0xff
+        need.add(d & 0x3ff)
+        taken += 1
+
+    # Overwriting a tile is only safe if nothing left on the screen still
+    # wants the US art at that index. Checked, not assumed.
+    still = set(uw[i] & 0x3ff for i in range(len(uw))
+                if out_map[i * 2] | (out_map[i * 2 + 1] << 8) == uw[i])
+    spans, clashes = [], []
+    for t in sorted(need):
+        if art(uchr, t) == art(dchr, t):
+            continue
+        if t in still:
+            clashes.append(t)
+            continue
+        spans.append((t * CHR_BYTES_PER_TILE, art(dchr, t)))
+    if clashes:
+        sys.exit("tiles %s carry different art in the donor but are still used "
+                 "elsewhere on the US selector -- this patch would corrupt it"
+                 % clashes)
+    print("  %d cells translated, %d unchanged, %d left as US (art not in this "
+          "packet)" % (taken, kept, skipped))
+    print("  %d tiles of artwork copied from the donor" % len(spans))
+
+    # Sylt's card is this project's own artwork and carries its disaster line
+    # as DRAWN pixels ("Coastal" / "Flooding"), not as strip references -- so
+    # the packet patch above cannot reach it. Give it the donor's word by
+    # copying the strip the shipped layout uses for the same disaster: Rio's,
+    # at row 11 columns 23-28 of the tilemap. In the German ROM that reads
+    # "Hochwasser". This rides along as a pseudo-entry the host applies to the
+    # card's tile data instead of to a ROM packet.
+    sylt = []
+    for k in range(SYLT_STRIP_LEN):
+        t = dw[SYLT_SRC_ROW * 64 + SYLT_SRC_COL + k] & 0x3ff
+        slot = SYLT_CARD_ROW * SYLT_CARD_W + SYLT_CARD_COL + k
+        sylt.append((slot * CHR_BYTES_PER_TILE, art(dchr, t)))
+    print("  Sylt's disaster line: %d tiles from the donor's own strip"
+          % len(sylt))
+
+    blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
+    blob += (3).to_bytes(2, "little")
+    for src, outlen, sp in ((SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
+                            (SELECTOR_CHR, len(uchr), spans),
+                            (SYLT_CARD_PSEUDO, 0, sylt)):
+        if src == SYLT_CARD_PSEUDO:
+            bank, addr = 0xff, 0xffff
+        else:
+            bank = src // 0x8000
+            addr = 0x8000 + (src % 0x8000)
+        blob += bytes([bank]) + addr.to_bytes(2, "little")
+        blob += outlen.to_bytes(4, "little")
+        blob += len(sp).to_bytes(2, "little")
+        for off, data in sp:
+            blob += off.to_bytes(4, "little") + len(data).to_bytes(2, "little")
+            blob += data
+    open(a.out, "wb").write(blob)
+    print("  %d bytes -> %s" % (len(blob), a.out))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1093,6 +1285,12 @@ def main():
     sf.add_argument("--cols", help="e.g. 2-9,12-19 -- REQUIRED in practice: a "
                                    "full-width row overwrites the background")
     sf.add_argument("--out", required=True)
+    pc = sub.add_parser("packets", help="patch the selector at its ROM source")
+    pc.set_defaults(fn=cmd_packets)
+    pc.add_argument("--rom", default="Sim City (U) [!].sfc",
+                    help="the US image the patch targets")
+    pc.add_argument("--donor", required=True, help="a translated ROM")
+    pc.add_argument("--out", required=True)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()
