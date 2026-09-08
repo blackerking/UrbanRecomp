@@ -812,6 +812,7 @@ static void sylt_write_brief_tilemap(void);
 #define SC_BRIEF_ROWS 64
 #define SC_BRIEF_BLANK 0x3FFu
 static bool brief_compose_page(uint32_t src, uint8_t *dst);
+static void place_translated_cards(void);
 /* OFF by default, still. The compositor it depends on works now, but the gate
  * that decides WHICH screen it may draw on does not separate cleanly: the
  * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
@@ -1561,9 +1562,13 @@ static void handle_pos_stuff(void) {
           if (f) {
             fwrite(g_ppu->vram, 2, 0x8000, f);
             fclose(f);
-            fprintf(stderr, "[vram] dumped 64KB to %s  screen=$%02x bg1map=$%04x "
+            fprintf(stderr, "[vram] dumped 64KB to %s  screen=$%02x scroll=$%04x "
+                            "$40=%u bg1map=$%04x "
                             "bg1chr=$%04x bg3map=$%04x bg3chr=$%04x\n",
-                    vd, g_ram[0x14], (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
+                    vd, g_ram[0x14],
+                    (unsigned)(g_ram[0x16] | (g_ram[0x17] << 8)),
+                    (unsigned)(g_ram[0x40] | (g_ram[0x41] << 8)),
+                    (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
                     (unsigned)PPU_bgTileAdr(g_ppu, 0),
                     (unsigned)PPU_bgTilemapAdr(g_ppu, 2),
                     (unsigned)PPU_bgTileAdr(g_ppu, 2));
@@ -2258,6 +2263,18 @@ static int      s_bp_count;
 static uint16_t s_sg_idx[kMaxGlyphs];
 static uint8_t  s_sg_px[kMaxGlyphs][16];
 static int      s_sg_count;
+/* Translated scenario cards. Each is an 8x9 tilemap rectangle plus the art
+ * of every tile it references -- the shipped cards, unlike Sylt's, are not
+ * a consecutive run. Placed at the selector, the same moment and the same
+ * way sylt_place_card() places the ninth. */
+enum { kMaxCards = 12, kCardTiles = 64 };
+static uint8_t  s_card_col[kMaxCards], s_card_row[kMaxCards];
+static uint8_t  s_card_w[kMaxCards], s_card_h[kMaxCards];
+static uint16_t s_card_map[kMaxCards][72];
+static uint16_t s_card_tid[kMaxCards][kCardTiles];
+static uint8_t  s_card_px[kMaxCards][kCardTiles][32];
+static uint8_t  s_card_nt[kMaxCards];
+static int      s_card_count;
 static bool s_ninth_scenario;
 /* Declared here rather than beside load_sylt_map(): the arm is set from the
  * selector hook and the swap runs in the opcode loop, both of which come
@@ -2300,6 +2317,7 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       s_sylt_city = false;
       selector_extend_tilemap();
       sylt_place_card();
+      place_translated_cards();
       break;
     case 0xde4d:   /* B accepted on the selector (03:de4d is the JSR $e574 /
                     * INC $14 path). Arm the map swap only for the ninth
@@ -6472,6 +6490,35 @@ static void sylt_write_brief_tilemap(void) {
   fputc('\n', stderr);
 }
 
+/* Write the translated scenario cards into VRAM: the art of each tile the
+ * card references, then its 8x9 tilemap. Same operation and same moment as
+ * sylt_place_card(), which places the ninth card -- these are the other
+ * eight. Column 42 is never carried in the blob, so Sylt is untouched. */
+static void place_translated_cards(void) {
+  if (!s_card_count || !g_ppu) return;
+  const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+  for (int i = 0; i < s_card_count; i++) {
+    for (int t = 0; t < s_card_nt[i]; t++) {
+      const unsigned base = (unsigned)s_card_tid[i][t] * 16u;
+      if (base + 16u > 0x8000u) continue;
+      for (int k = 0; k < 16; k++)
+        g_ppu->vram[base + k] = (uint16_t)(s_card_px[i][t][k * 2] |
+                                          (s_card_px[i][t][k * 2 + 1] << 8));
+    }
+    for (int y = 0; y < s_card_h[i]; y++)
+      for (int x = 0; x < s_card_w[i]; x++) {
+        const int col = s_card_col[i] + x, row = s_card_row[i] + y;
+        if (col > 63 || row > 31) continue;
+        const unsigned idx = map + (col < 32 ? 0u : 0x400u)
+                           + (unsigned)row * 32u + (unsigned)(col & 31);
+        if (idx >= 0x8000u) continue;
+        g_ppu->vram[idx] = s_card_map[i][y * s_card_w[i] + x];
+      }
+  }
+  { static int said; if (!said++)
+      fprintf(stderr, "translation: %d scenario cards placed\n", s_card_count); }
+}
+
 /* Compose a translated briefing page from strings -- the same two-bank
  * layout sylt_write_brief_tilemap() uses just above, so the title keeps
  * its own colour. Returns false when this page is not one we carry. */
@@ -7406,12 +7453,47 @@ int main(int argc, char **argv) {
                     s_sg_count++; q += 18;
                   }
                 }
+                if (blob[4] >= 8 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t cl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *ce = q + cl;
+                  if (cl >= 2 && ce <= blob + got) {
+                    int nc = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < nc && s_card_count < kMaxCards; i++) {
+                      if (q + 11 > ce || memcmp(q, "SCCD", 4) != 0) break;
+                      int cw = q[5], ch = q[6];
+                      s_card_col[s_card_count] = q[7];
+                      s_card_row[s_card_count] = q[8];
+                      s_card_w[s_card_count] = (uint8_t)cw;
+                      s_card_h[s_card_count] = (uint8_t)ch;
+                      int nt = q[9] | (q[10] << 8);
+                      q += 11;
+                      if (cw * ch > 72 || nt > kCardTiles) break;
+                      if (q + cw * ch * 2 > ce) break;
+                      for (int k = 0; k < cw * ch; k++, q += 2)
+                        s_card_map[s_card_count][k] = (uint16_t)(q[0] | (q[1] << 8));
+                      int kept = 0;
+                      for (int k = 0; k < nt; k++) {
+                        if (q + 34 > ce) break;
+                        s_card_tid[s_card_count][kept] = (uint16_t)(q[0] | (q[1] << 8));
+                        memcpy(s_card_px[s_card_count][kept], q + 2, 32);
+                        kept++; q += 34;
+                      }
+                      s_card_nt[s_card_count] = (uint8_t)kept;
+                      s_card_count++;
+                    }
+                  }
+                }
               }
             }
             fprintf(stderr, "translation: %s applied (%u messages, %u bytes "
                             "at $%06X, %u spare)\n",
                     tr, (unsigned)recs, (unsigned)len, (unsigned)kTrOff,
                     (unsigned)(kTrBudget - len));
+            if (s_card_count)
+              fprintf(stderr, "translation: %d scenario cards loaded\n",
+                      s_card_count);
             if (s_sg_count)
               fprintf(stderr, "translation: %d briefing glyphs loaded\n",
                       s_sg_count);

@@ -392,7 +392,7 @@ def detect_region(rom_path):
 
 
 def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
-              sglyphs=()):
+              sglyphs=(), cards=None):
     """Header + the packed message block + any briefing packets.
 
     v2 layout: "SCTR", ver, region, record count, text length, then the text,
@@ -405,7 +405,7 @@ def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
     if len(body) > TARGET_BUDGET:
         sys.exit("translation needs %d bytes; the US image has room for %d. "
                  "Shorten the longest messages." % (len(body), TARGET_BUDGET))
-    out = (MAGIC + bytes([7, 0x01])
+    out = (MAGIC + bytes([8, 0x01])
            + len(records).to_bytes(2, "little")
            + len(body).to_bytes(4, "little") + body)
     out += len(briefs).to_bytes(2, "little")
@@ -423,6 +423,9 @@ def make_blob(records, briefs=(), tiles=None, glyphs=(), strings=None,
     out += len(sglyphs).to_bytes(2, "little")
     for idx, g in sglyphs:
         out += idx.to_bytes(2, "little") + g
+    out += (len(cards) if cards else 0).to_bytes(4, "little")
+    if cards:
+        out += cards
     return out
 
 # The font is a codepage, not Latin-1: the accented glyphs sit where CP437
@@ -617,7 +620,27 @@ def cmd_import(a):
         strings = bytes(buf)
 
     sglyphs = scen_glyphs(a.donor, donor) if a.briefs else []
-    out = make_blob(recs, briefs, tiles, glyphs, strings, sglyphs)
+
+    # Scenario cards, from a selector VRAM capture of the donor. Column 42 is
+    # skipped: that is the ninth slot, drawn host-side by sylt_place_card(),
+    # and importing the donor's empty slot over it would erase Sylt's card.
+    cards = None
+    if a.cards_from:
+        buf = bytearray()
+        n = 0
+        for f in sorted(os.listdir(a.cards_from)):
+            if not f.startswith("scenario_card_") or not f.endswith(".bin"):
+                continue
+            d = open(os.path.join(a.cards_from, f), "rb").read()
+            if len(d) < 11 or d[:4] != CARD_MAGIC:
+                sys.exit("%s is not a card file" % f)
+            if d[7] == 42:
+                continue
+            buf += d
+            n += 1
+        if n:
+            cards = n.to_bytes(2, "little") + bytes(buf)
+    out = make_blob(recs, briefs, tiles, glyphs, strings, sglyphs, cards)
     open(a.out, "wb").write(out)
     body = len(recs and pack_records(recs))
     print("imported %s text from %s" % (donor, os.path.basename(a.donor)))
@@ -630,6 +653,9 @@ def cmd_import(a):
         print("  %d briefing pages as strings, composed US-side" % len(pages))
     if sglyphs:
         print("  %d accented briefing glyphs into free US tileset slots" % len(sglyphs))
+    if cards:
+        print("  %d scenario cards (Sylt's slot left alone)"
+              % int.from_bytes(cards[:2], "little"))
     if tiles:
         print("  scenario picture tiles: %d tiles (%d bytes)"
               % (len(tiles) // 16, len(tiles)))
@@ -751,6 +777,73 @@ def cmd_briefs_pack(a):
     print("  the US build composes these itself, the way Sylt's briefing is drawn")
 
 
+# ── scenario cards ───────────────────────────────────────────────────────
+# The selector lays its cards out on a 5x2 grid, found from the drop-shadow
+# tile Sylt also uses ($010): vertical runs mark each card's right edge at
+# columns 10/20/30/40/50, horizontal runs its bottom at rows 14 and 25. So a
+# card is 8x9 tiles with its top-left at one of columns 2/12/22/32/42 and rows
+# 5/16 -- and Sylt's own card sits at (42, 5), exactly in that grid, which is
+# what confirms the geometry.
+#
+# Unlike Sylt's, the shipped cards are NOT a consecutive tile run: they are
+# ordinary tilemap rectangles over shared tiles. So a card file has to carry
+# both the 8x9 tilemap AND the artwork of every tile it references.
+CARD_COLS = [2, 12, 22, 32, 42]
+CARD_ROWS = [5, 16]
+CARD_W, CARD_H = 8, 9
+CARD_MAGIC = b"SCCD"
+BG1_CHR_WORDS = 16          # 4bpp: 32 bytes = 16 VRAM words a tile
+
+
+def _vram_words(path):
+    import struct
+    d = open(path, "rb").read()
+    return struct.unpack("<%dH" % (len(d) // 2), d[:len(d) // 2 * 2])
+
+
+def card_extract(w, mapbase, chrbase, col, row):
+    """(tilemap entries, {tile index: 32 raw bytes}) for one card slot."""
+    import struct
+    ents = []
+    for y in range(CARD_H):
+        for x in range(CARD_W):
+            c = col + x
+            page = 0x400 if c >= 32 else 0
+            ents.append(w[mapbase + page + (row + y) * 32 + (c & 31)])
+    art = {}
+    for e in ents:
+        t = e & 0x3ff
+        if t in art:
+            continue
+        base = chrbase + t * BG1_CHR_WORDS
+        art[t] = struct.pack("<%dH" % BG1_CHR_WORDS,
+                             *w[base:base + BG1_CHR_WORDS])
+    return ents, art
+
+
+def cmd_cards(a):
+    import struct
+    w = _vram_words(a.vram)
+    os.makedirs(a.out, exist_ok=True)
+    n = 0
+    for ri, row in enumerate(CARD_ROWS):
+        for ci, col in enumerate(CARD_COLS):
+            ents, art = card_extract(w, a.map, a.chr, col, row)
+            blob = bytearray(CARD_MAGIC + bytes([1, CARD_W, CARD_H]))
+            blob += bytes([col, row])
+            blob += len(art).to_bytes(2, "little")
+            for e in ents:
+                blob += e.to_bytes(2, "little")
+            for t in sorted(art):
+                blob += t.to_bytes(2, "little") + art[t]
+            name = os.path.join(a.out, "scenario_card_r%dc%02d.bin" % (ri, col))
+            open(name, "wb").write(blob)
+            n += 1
+            print("  %-34s %2d tiles, %d bytes"
+                  % (os.path.basename(name), len(art), len(blob)))
+    print("exported %d cards from %s" % (n, os.path.basename(a.vram)))
+
+
 def cmd_glyphs(a):
     blob = load_block(a.rom, a.version)
     seen = sorted(set(blob) - {SEP})
@@ -791,6 +884,8 @@ def main():
                    help="also take the donor's briefings, as strings")
     i.add_argument("--no-glyphs", action="store_true",
                    help="skip the accent glyphs (umlauts and accents)")
+    i.add_argument("--cards-from", metavar="DIR",
+                   help="scenario cards exported from a donor selector capture")
     i.add_argument("--tiles", action="store_true",
                    help="also take the donor's scenario picture tiles "
                         "(the cards and HUD word-strips)")
@@ -811,6 +906,12 @@ def main():
     b = sub.add_parser("briefs", help="export briefing pages as strings")
     b.set_defaults(fn=cmd_briefs)
     b.add_argument("--rom", required=True); b.add_argument("--out", required=True)
+    cd = sub.add_parser("cards", help="export the scenario cards from a VRAM dump")
+    cd.set_defaults(fn=cmd_cards)
+    cd.add_argument("--vram", required=True, help="SC_VRAM_DUMP taken on screen $0b")
+    cd.add_argument("--out", required=True)
+    cd.add_argument("--map", type=lambda x: int(x, 0), default=0x3000)
+    cd.add_argument("--chr", type=lambda x: int(x, 0), default=0x0000)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()
