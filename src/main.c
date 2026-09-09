@@ -6635,6 +6635,57 @@ static int s_sylt_tw, s_sylt_th;
  * disaster (the strip Rio's card uses) as six tiles of artwork. Row 7 is
  * blanked from this card's own background rather than the donor's, so the
  * one-line German word does not leave "Flooding" underneath it. */
+/* -- SC_WRAM_WATCH: name the instruction that writes a WRAM range ---------
+ *
+ * SC_WRAM_WATCH="LO:HI" (hex g_ram offsets, HI optional) prints every write
+ * in that range with the 65816 PC of the instruction that made it.
+ *
+ * This exists because none of the runtime's own watchpoints work in this
+ * target. cpu_trace's WRAM watch, SNESRECOMP_WRITE_WATCH and
+ * SNESRECOMP_WRAM_WATCH all sit on the AOT/CpuState write path
+ * (cpu_write8/16), and this host executes through the interp816 core, so
+ * those functions are never called -- a watch on $7E:2000, written every
+ * frame, stayed silent. See docs/ROM_MAP.md.
+ *
+ * What DOES reach the interpreter's stores is snes.c's own hook: all three
+ * direct-WRAM store sites call snes_note_direct_wram_write(), which forwards
+ * to a settable function pointer. So this needs no submodule change at all;
+ * it just installs a callback the runtime already offers.
+ *
+ * The PC is g_interp816_cur_pc, the interpreter's current instruction -- so
+ * a hit is not "something changed this", it is the address of the store. */
+extern uint32_t g_interp816_cur_pc;
+static uint32_t s_ww_lo, s_ww_hi; static long s_ww_hits, s_ww_cap = 400;
+/* SC_WRAM_WATCH_FROM=<frame>: the boot clear loop writes every byte of WRAM
+ * at frame 2 and would otherwise spend the whole budget saying so. */
+static unsigned long long s_ww_from;
+
+static void sc_wram_write_probe(uint32_t off, uint8_t val, const char *via) {
+  if (off < s_ww_lo || off > s_ww_hi || s_ww_hits >= s_ww_cap) return;
+  if (s_frames < s_ww_from) return;
+  fprintf(stderr, "[wramwrite] f%llu  $%05X = %02X  by %02X:%04X  via %s\n",
+          (unsigned long long)s_frames, off, val,
+          (unsigned)((g_interp816_cur_pc >> 16) & 0xff),
+          (unsigned)(g_interp816_cur_pc & 0xffff), via ? via : "-");
+  s_ww_hits++;
+}
+
+static void sc_wram_watch_install(void) {
+  const char *e = getenv("SC_WRAM_WATCH");
+  if (!e || !*e) return;
+  char *end = NULL;
+  s_ww_lo = (uint32_t)strtoul(e, &end, 16);
+  s_ww_hi = (end && *end == ':') ? (uint32_t)strtoul(end + 1, NULL, 16)
+                                 : s_ww_lo + 0x27;
+  { const char *m = getenv("SC_WRAM_WATCH_MAX");
+    if (m && *m) s_ww_cap = strtol(m, NULL, 0); }
+  { const char *f = getenv("SC_WRAM_WATCH_FROM");
+    if (f && *f) s_ww_from = strtoull(f, NULL, 0); }
+  snes_set_wram_write_log_hook(sc_wram_write_probe);
+  fprintf(stderr, "wram watch: $%05X..$%05X, from frame %llu, up to %ld hits\n",
+          s_ww_lo, s_ww_hi, (unsigned long long)s_ww_from, s_ww_cap);
+}
+
 static void sylt_apply_translated_line(void) {
   if (!s_sylt_tiles || s_sylt_tw != 8 || s_sylt_th < 8) return;
   if (s_scpk_count < 0) scpk_load();
@@ -8164,6 +8215,7 @@ int main(int argc, char **argv) {
   }
 
   g_snes = snes_init(g_ram);
+  sc_wram_watch_install();
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;
   if (!snes_loadRom(g_snes, rom_data, (int)rom_size)) {
