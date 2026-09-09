@@ -3801,3 +3801,55 @@ this block needs its reader found, the same way the building labels needed
 theirs. SC_WRAM_WATCH is the wrong tool here -- this text goes to a tilemap,
 not to a WRAM staging buffer -- so the equivalent probe would have to watch
 the VRAM the message box draws into.
+
+## `01:8F25` -- the building-label writer, and what limits a label
+
+Decompiled in full, because its record format is the ceiling on how long a
+translated building label can be.
+
+```
+01:8F25  REP #$30
+         LDA $020d ; ASL ; TAX          ; the tool index
+         LDA $018FC4,X ; PHA            ; that tool's record pointer
+         LDY #$0000 ; TYX               ; Y = record cursor, X = OAM cursor
+         PHK ; PLB                      ; DB = $01, the record's bank
+ loop1:  LDA ($01,S),Y ; INY ; INY      ; packed position
+         CLC ; ADC #$AF07               ; + base: y = $AF (175), x = $07
+         STA $7E2088,X                  ; -> OAM slot 34
+         LDA ($01,S),Y ; INY ; INY      ; tile + attributes
+         STA $7E208A,X
+         INX x4 ; CPY #$0014 ; BCC loop1   ; 20 bytes = 5 sprites
+         LDX #$0000
+ loop2:  ... same, STA $7E2160,X         ; -> OAM slot 88
+         INX x4 ; CPY #$003C ; BCC loop2   ; 60 bytes = 15 sprites in total
+```
+
+So a record is **60 bytes, fifteen (position, tile) word pairs**: the first
+five drive the price line at OAM slots 34-38, the remaining ten the label text
+at slots 88-97. Every sprite carries its own x and y, which is why the y IS
+the one-or-two-line decision, and why no table of tile runs exists to be
+found -- see 0cfa447.
+
+The limits, should a label ever need more room:
+
+| | |
+|---|---|
+| `CPY #$003C` at `01:8F6F` | the record length. 60 bytes, hardcoded |
+| `CPY #$0014` at `01:8F52` | where the price line ends and the text begins |
+| ten sprites | the most a label can use, slots 88-97 |
+| slots 96-99 | contended. An OAM capture shows another routine rewriting them every frame (the cursor), so in practice a label has **eight** dependable sprites, 88-95, and the shipped records blank the tail with tile `$0BF` |
+
+Raising the ceiling therefore means three things together, not one: a longer
+record, the loop bound to match, and OAM slots that nothing else claims. The
+first two are easy; the third is the real constraint.
+
+### A closed lead: `01:B79A` is not a text reader
+
+Searching for code referencing the status text block turns up `01:B7B1`,
+`LDA $9b51,X ; PHA ; LDA $9b59,X ; PHA ; LDA ($03,S),Y` -- the same
+stack-relative walk the label and coordinate tables use, with operands that
+land inside the block. It reads neither. `01:B79A` loads `$020d`, indexes
+`$018040,X` and `$018051,X`, and bounds-checks the result against `#$0078`
+(120, the map width): it is the building-placement coordinate checker, and
+its `LDA $9b51,X` resolves through a `DB` of `$00`, not `$01`. Any search for
+references into that block has to account for DB before it means anything.
