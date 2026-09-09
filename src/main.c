@@ -6693,6 +6693,57 @@ static void sc_dma_vram_probe(uint8_t aBank, uint16_t aAdr,
           size ? size : 0x10000u, words);
 }
 
+/* -- SC_VRAM_WRITE_WATCH: name the instruction that writes a VRAM range ---
+ *
+ * SC_VRAM_WRITE_WATCH="LO:HI" (hex VRAM WORD addresses) prints each CPU
+ * write through $2118/$2119 in that range with the 65816 PC behind it.
+ *
+ * The counterpart of SC_WRAM_WATCH, and needed because the status text box
+ * has no WRAM staging buffer to watch: SC_DMA_VRAM showed there is no
+ * per-frame tilemap DMA in game at all, so the text is written straight to
+ * VRAM. The debug server does carry a VRAM trace, but it is gated on
+ * SNESRECOMP_REVERSE_DEBUG, allocates gigabytes of ring, and records
+ * g_last_recomp_func -- an AOT function name, empty on the interp816 path
+ * this host runs. So ppu.c got a settable hook beside its existing
+ * debug_server_on_vram_write() calls, the same shape snes.c already had for
+ * WRAM, and this installs a callback on it. */
+static uint32_t s_vw_lo, s_vw_hi; static long s_vw_hits, s_vw_cap = 400;
+static unsigned long long s_vw_from;
+static int s_vw_nz;
+
+static void sc_vram_write_probe(uint32_t byte_addr, uint8_t value) {
+  const uint32_t word = byte_addr >> 1;
+  if (word < s_vw_lo || word > s_vw_hi || s_vw_hits >= s_vw_cap) return;
+  if (s_frames < s_vw_from) return;
+  /* SC_VRAM_WRITE_WATCH_NZ=1 drops zero writes. Screens are blanked with a
+   * clear loop before anything is drawn, and it spends the whole budget
+   * in one frame -- 600 hits at 00:869D, all of them zeros. */
+  if (s_vw_nz && value == 0) return;
+  fprintf(stderr, "[vramwrite] f%llu  $%04X%s = %02X  by %02X:%04X\n",
+          (unsigned long long)s_frames, word, (byte_addr & 1) ? "h" : "l",
+          value, (unsigned)((g_interp816_cur_pc >> 16) & 0xff),
+          (unsigned)(g_interp816_cur_pc & 0xffff));
+  s_vw_hits++;
+}
+
+static void sc_vram_write_watch_install(void) {
+  const char *e = getenv("SC_VRAM_WRITE_WATCH");
+  if (!e || !*e) return;
+  char *end = NULL;
+  s_vw_lo = (uint32_t)strtoul(e, &end, 16);
+  s_vw_hi = (end && *end == ':') ? (uint32_t)strtoul(end + 1, NULL, 16)
+                                 : s_vw_lo + 0x3f;
+  { const char *m = getenv("SC_VRAM_WRITE_WATCH_MAX");
+    if (m && *m) s_vw_cap = strtol(m, NULL, 0); }
+  { const char *f = getenv("SC_VRAM_WRITE_WATCH_FROM");
+    if (f && *f) s_vw_from = strtoull(f, NULL, 0); }
+  { const char *z = getenv("SC_VRAM_WRITE_WATCH_NZ");
+    s_vw_nz = (z && *z && *z != '0'); }
+  ppu_set_vram_write_log_hook(sc_vram_write_probe);
+  fprintf(stderr, "vram write watch: $%04X..$%04X, from frame %llu, up to %ld hits\n",
+          s_vw_lo, s_vw_hi, (unsigned long long)s_vw_from, s_vw_cap);
+}
+
 static void sc_dma_vram_install(void) {
   const char *e = getenv("SC_DMA_VRAM");
   if (!e || !*e || *e == '0') return;
@@ -8253,6 +8304,7 @@ int main(int argc, char **argv) {
   g_snes = snes_init(g_ram);
   sc_wram_watch_install();
   sc_dma_vram_install();
+  sc_vram_write_watch_install();
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;
   if (!snes_loadRom(g_snes, rom_data, (int)rom_size)) {
