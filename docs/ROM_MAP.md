@@ -3766,3 +3766,38 @@ Two things from the attempt are worth keeping regardless: the CMake fix that
 makes `-DSNESRECOMP_ENABLE_TRACE=ON` link for this target (it was inert here,
 it only failed), and the knowledge that `SNES_COSIM` can be turned on for a
 diagnostic build with three no-op stubs for the co-simulation entry points.
+
+## Correction: `00:859E` is not a message table
+
+d3d1aa1 recorded a "second message table" with a pointer table at `00:859E`
+into a text block in bank `$01`. The text block is real. The pointer table is
+not its index.
+
+`$01:859E` is read at `01:B878` and `01:B89D`, both as
+`ASL ; TAX ; LDA $01859E,X ; PHA`, and the walk that follows adds byte pairs
+to `$0205`/`$0207` and rejects them against `#$78` and `#$64` -- 120 and 100,
+the map dimensions. It is a table of **coordinate lists**, and it only looked
+like a text index because it points into the same address range the text
+happens to occupy. Records 0-5 decoded as sentences by coincidence of
+overlap; 6-15 decoded as garbage, which should have been the tell.
+
+What IS established about the status/advisor text:
+
+| | |
+|---|---|
+| Where | `$009824..$009C9C` in the US, `$00981E..$009CD7` in the German -- about 1.1KB, same region in both |
+| Encoding | byte − `$80`, then **two glyph banks**: codes under `$40` are the large bank and mean ASCII − `$20` (`$00` space, `$0E` `.`, `$01` `!`, `$33` `S`), `$41`-`$5A` are ordinary capitals. German accents sit in the lowercase slots (`d` = a-umlaut, `t` = o-umlaut, `a` = u-umlaut, `{` = eszett, `y` = O-umlaut) |
+| Contents | the advisor lines (`MORE RESIDENTIAL ZONES NEEDED.`, `BLACKOUTS REPORTED.`, the scenario countdown), plus the Save/Load and shutdown text (`UNABLE TO SAVE.`, `ONE MOMENT PLEASE...`, `GOOD BYE!`) |
+
+Decoded with the banks above the whole block reads cleanly in both languages,
+digits and punctuation included, so the encoding is settled.
+
+**How the game indexes it is not.** Not `00:859E`; not a fixed stride (the
+gaps between terminators run 20 to 50 bytes); and not by counting `.`, because
+the German `yFFENTL. VERKEHRSNETZ MU{ VERBESSERT WERDEN.` carries a period
+inside one message -- splitting on terminators yields 38 messages for the US
+and 39 for the German, and that extra one is the abbreviation. Translating
+this block needs its reader found, the same way the building labels needed
+theirs. SC_WRAM_WATCH is the wrong tool here -- this text goes to a tilemap,
+not to a WRAM staging buffer -- so the equivalent probe would have to watch
+the VRAM the message box draws into.
