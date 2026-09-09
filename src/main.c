@@ -87,6 +87,15 @@ uint8_t    g_ram[0x20000];
 #include "simcity_mapview.h"
 #include "simcity_mapgen.h"
 #include "simcity_decomp.h"
+/* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
+ * collides with the interp816 core this target actually builds against.
+ * Only present in a build configured with SNESRECOMP_TRACE=1. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+void cpu_trace_set_wram_watch(uint8_t bank, uint16_t addr, int width,
+                              int match_value, uint8_t value, int enabled);
+void cpu_trace_clear_wram_watches(void);
+void cpu_trace_dump_wram(const char *tag, int scan_n);
+#endif
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -1610,6 +1619,41 @@ static void handle_pos_stuff(void) {
           }
         } }
       vram_dump_done:
+      /* SC_OAM_WATCH=1 -- per-frame diff of OAM, as sprite entries.
+       *
+       * The main map's building labels turned out not to be on any
+       * background at all. In game the PPU runs mode 0 with CHR bases at
+       * $2000 and $0000, and the label artwork sits at VRAM word $6600 --
+       * which no background can reach, since the tile index would be 2240
+       * and the field is ten bits. Cycling every tool in the toolbar changed
+       * not one tilemap cell, which agrees. They are sprites, so this is
+       * where the per-label tile runs have to be read from. */
+      { static uint16_t shadow_oam[0x100]; static uint8_t shadow_hi[0x20];
+        static int on = -1, primed;
+        if (on < 0) { const char *e = getenv("SC_OAM_WATCH");
+                      on = (e && *e && *e != '0'); }
+        if (on && g_ppu) {
+          int shown = 0, changed = 0;
+          for (int i = 0; i < 0x80; i++) {
+            const uint16_t lo = g_ppu->oam[i * 2], hi = g_ppu->oam[i * 2 + 1];
+            if (lo == shadow_oam[i * 2] && hi == shadow_oam[i * 2 + 1]) continue;
+            changed++;
+            if (primed && shown < 24) {
+              fprintf(stderr, "[oam] f%llu $%02x  spr%-3d x=%-3u y=%-3u tile=$%03x attr=$%02x\n",
+                      (unsigned long long)s_frames, g_ram[0x14], i,
+                      (unsigned)(lo & 0xff), (unsigned)(lo >> 8),
+                      (unsigned)(hi & 0x1ff), (unsigned)((hi >> 8) & 0xfe));
+              shown++;
+            }
+            shadow_oam[i * 2] = lo; shadow_oam[i * 2 + 1] = hi;
+          }
+          for (int i = 0; i < 0x20; i++) shadow_hi[i] = g_ppu->highOam[i];
+          if (primed && changed > shown)
+            fprintf(stderr, "[oam] f%llu  ... and %d more sprites\n",
+                    (unsigned long long)s_frames, changed - shown);
+          primed = 1;
+        }
+      }
       /* SC_VRAM_WATCH=<hex word addr>[+<count>] -- per-frame diff of a VRAM
        * range, plus every layer's scroll when it moves.
        *
@@ -1639,20 +1683,29 @@ static void handle_pos_stuff(void) {
                          wbase, wbase + (unsigned)wcount - 1);
           }
         }
+        /* The cap was 12, which hid exactly the interesting part: a label
+         * redraw is ~16 cells, so the bulk arrived as "... and N more".
+         * SC_VRAM_WATCH_MAX raises it. */
+        static int cap = -1;
+        if (cap < 0) { const char *e = getenv("SC_VRAM_WATCH_MAX");
+                       cap = (e && *e) ? atoi(e) : 40; if (cap < 1) cap = 1; }
         if (wcount > 0 && g_ppu && shadow) {
           int shown = 0;
           for (int i = 0; i < wcount; i++) {
             const uint16_t now = g_ppu->vram[wbase + (unsigned)i];
             if (now == shadow[i]) continue;
-            if (shown < 12)
+            if (shown < cap)
               fprintf(stderr, "[watch] f%llu $%02x  $%04x: $%04x -> $%04x\n",
                       (unsigned long long)s_frames, g_ram[0x14],
                       wbase + (unsigned)i, shadow[i], now);
             shadow[i] = now; shown++;
           }
-          if (shown > 12)
+          if (shown > cap)
             fprintf(stderr, "[watch] f%llu  ... and %d more cells\n",
-                    (unsigned long long)s_frames, shown - 12);
+                    (unsigned long long)s_frames, shown - cap);
+          /* Scroll is opt-in. Left on it buried the cell changes: a run
+           * came back 5780 lines long with 240 of them the ones I wanted. */
+          if (!getenv("SC_VRAM_WATCH_SCROLL")) { scroll_seen = 1; goto watch_done; }
           for (int L = 0; L < 4; L++) {
             const uint16_t h = g_ppu->hScroll[L], v = g_ppu->vScroll[L];
             if (scroll_seen && h == last_h[L] && v == last_v[L]) continue;
@@ -1661,6 +1714,7 @@ static void handle_pos_stuff(void) {
             last_h[L] = h; last_v[L] = v;
           }
           scroll_seen = 1;
+        watch_done: ;
         }
       }
       apply_surfaces();
@@ -2875,6 +2929,29 @@ static void scpk_apply(uint32_t src, uint32_t out) {
       fprintf(stderr, "packet patch: applied at $%02x:%04x\n",
               (unsigned)(src >> 16), (unsigned)(src & 0xffff));
     }
+  }
+}
+
+/* The main map's building labels are not in a packet: they sit uncompressed
+ * at file $034C00 and are copied to VRAM byte $CC00 one for one. So they are
+ * patched in the cart IMAGE, the same way SC_TRANSLATION patches the message
+ * block -- and for the same reason it does it here: after the fingerprint has
+ * been taken, so a translated run keeps the host map renderer, SC_FIBER, the
+ * cursor cadence patch and the view fix. */
+static uint32_t s_scpk_rom_off, s_scpk_rom_len;   /* a witness for the recheck */
+static void scpk_apply_rom(uint8_t *rom, uint32_t size) {
+  if (s_scpk_count < 0) scpk_load();
+  for (int i = 0; i < s_scpk_count; i++) {
+    if (s_scpk[i].src != 0xfeffffu) continue;
+    uint32_t n = 0;
+    for (int k = 0; k < s_scpk[i].nspans; k++) {
+      const uint32_t at = s_scpk[i].spans[k].off;
+      if (at + s_scpk[i].spans[k].len > size) continue;
+      memcpy(rom + at, s_scpk[i].spans[k].data, s_scpk[i].spans[k].len);
+      if (!s_scpk_rom_len) { s_scpk_rom_off = at; s_scpk_rom_len = s_scpk[i].spans[k].len; }
+      n += s_scpk[i].spans[k].len;
+    }
+    fprintf(stderr, "packet patch: %u bytes laid over the cart image\n", n);
   }
 }
 
@@ -7206,6 +7283,24 @@ static int run_qualification(uint64_t frames) {
 #endif
   fprintf(stderr, "gen: 03:d862 seeding hits=%lu\n", s_gen_trigger_hits);
   if (s_dec_fast || s_dec_declined)
+  /* SC_LABEL_TRACE: who writes the main map's building labels?
+   *
+   * The labels are sprites -- OAM slots 90..97, which the game stages in
+   * WRAM at $7E:2168 before DMAing it. Every attempt to find their
+   * placement statically has failed: the run starts, the lengths, their
+   * deltas and several strides are all absent from the ROM, and the
+   * generated code addresses the slots computationally rather than by any
+   * literal this can be grepped for. So ask the runtime instead. The
+   * watch fires inside cpu_write8/16 and the ring keeps the most recent
+   * function entry, which names the routine.
+   *
+   * Needs a build with SNESRECOMP_TRACE=1; in the normal build this is
+   * a no-op and the dump prints nothing. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+  if (getenv("SC_LABEL_TRACE"))
+    cpu_trace_dump_wram("label writes", 64);
+#endif
+
     fprintf(stderr, "decomp: replaced=%lu declined=%lu\n",
             s_dec_fast, s_dec_declined);
   if (s_cls_hits || s_cls_fills || s_cls_mismatch)
@@ -7618,6 +7713,8 @@ int main(int argc, char **argv) {
      *
      * Latin releases store the block as characters. Japan stores tile
      * indices, so there is nothing here to overwrite. */
+    scpk_apply_rom(rom_data, rom_size);
+
     { const char *tr = getenv("SC_TRANSLATION");
       if (tr && *tr) {
         /* Blob from tools/text_tool.py: "SCTR", ver, target region, record
@@ -8076,6 +8173,18 @@ int main(int argc, char **argv) {
   /* cart_init() copies the ROM, so confirm the translation survived into
    * the buffer that actually executes. This file already records one
    * patch that landed in the wrong copy and silently did nothing. */
+  /* cart_init() copies the ROM. The building labels are patched in the
+   * image, so confirm they survived into the buffer that executes -- this
+   * file already records one patch that landed in the wrong copy and
+   * silently did nothing. */
+  if (s_scpk_rom_len) {
+    const uint8_t *live = sc_live_rom();
+    if (!live || memcmp(live + s_scpk_rom_off, rom_data + s_scpk_rom_off,
+                        s_scpk_rom_len) != 0)
+      fprintf(stderr, "packet patch: cart spans LOST -- the cart copy does not carry them\n");
+    else
+      fprintf(stderr, "packet patch: cart spans live in the cart image\n");
+  }
   if (s_tr_len) {
     const uint8_t *live = sc_live_rom();
     if (!live || memcmp(live + s_tr_off, rom_data + s_tr_off, s_tr_len) != 0)
@@ -8083,6 +8192,16 @@ int main(int argc, char **argv) {
     else
       fprintf(stderr, "translation: live in the cart image\n");
   }
+  /* Arm the label watch before the game runs. OAM slots 90..97 are staged
+   * at $7E:2168; a hit records the writing function in the trace ring. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+  if (getenv("SC_LABEL_TRACE")) {
+    cpu_trace_clear_wram_watches();
+    for (unsigned a = 0x2168; a < 0x2190; a += 2)
+      cpu_trace_set_wram_watch(0x7e, (uint16_t)a, 2, 0, 0, 1);
+    fprintf(stderr, "label trace: watching $7E:2168..$7E:218F  (needs SNESRECOMP_TRACE=1)\n");
+  }
+#endif
   snes_reset(g_snes, true);
   { const char *e = getenv("SC_WIDESCREEN");
     if (e && *e) {

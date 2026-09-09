@@ -78,6 +78,17 @@ set(SIMCITY_DEVICE_SOURCES
 )
 target_sources(SimCitySNESRecomp PRIVATE ${SIMCITY_DEVICE_SOURCES})
 
+# A trace build (-DSNESRECOMP_ENABLE_TRACE=ON) turns on the observability
+# rings in cpu_trace.h, and those call into the debug server. This target
+# hand-picks its sources instead of taking SNESRECOMP_RUNNER_SOURCES whole,
+# so runner.cmake's own trace block never reaches it and the link fails on a
+# dozen debug_server_* symbols. Add them here, for trace builds only.
+if(SNESRECOMP_ENABLE_TRACE)
+    target_sources(SimCitySNESRecomp PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src/debug_server.c
+        ${SNESRECOMP_ROOT}/runner/src/desktop/post_mortem.c)
+endif()
+
 
 if(NOT MSVC)
     target_compile_options(SimCitySNESRecomp PRIVATE

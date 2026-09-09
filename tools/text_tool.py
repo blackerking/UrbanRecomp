@@ -1077,6 +1077,15 @@ SYLT_SRC_ROW, SYLT_SRC_COL, SYLT_STRIP_LEN = 11, 23, 6
 SYLT_CARD_ROW, SYLT_CARD_COL, SYLT_CARD_W = 7, 1, 8
 SYLT_CARD_PSEUDO = -1            # not a ROM packet; encoded as $ff:ffff
 
+# The main map's building labels are NOT in a packet. They sit uncompressed
+# at file $034C00 and are copied to VRAM byte $CC00 one for one -- found by
+# taking tiles straight out of a live capture and searching the ROM for them:
+# 70 of 80 matched consecutively from that base, and none of them appeared in
+# any compressed packet. The German ROM keeps its own labels at the SAME
+# address with the same 16-tile rows, so the donor's bytes drop straight in.
+ROM_SPAN_PSEUDO = -2             # a raw cart-image span; encoded as $fe:ffff
+HUD_LABELS = (0x034C00, 0x036200)
+
 
 def _lz5():
     """the decompressor from extract_graphics.py, loaded as a module"""
@@ -1207,6 +1216,33 @@ def cmd_packets(a):
     # code from fixed slots and only the pictures change. Whether the German
     # strips really occupy the same slots is a question for the screen, not
     # for analysis -- this is how it gets asked.
+    # --rom-copy LO-HI lays the donor's bytes over that range of the cart
+    # image. Only the 32-byte tiles that actually differ are carried, so a
+    # generous range costs nothing and cannot drag in unrelated art.
+    rom_spans = []
+    for spec in (a.rom_copy or []):
+        lo, _, hi = spec.partition("-")
+        lo, hi = int(lo, 0), int(hi, 0)
+        n = 0
+        for t in range(lo, hi, 32):
+            if us[t:t + 32] != dn[t:t + 32]:
+                rom_spans.append((t, dn[t:t + 32])); n += 1
+        print("rom copy $%06X-$%06X: %d of %d tiles differ, %d bytes"
+              % (lo, hi, n, (hi - lo) // 32, n * 32))
+    if a.labels_from:
+        sp = label_spans(a.labels_from, us)
+        rom_spans += sp
+        print("building labels from %s: %d tiles changed"
+              % (os.path.basename(a.labels_from), len(sp)))
+    if a.hud:
+        lo, hi = HUD_LABELS
+        n = 0
+        for t in range(lo, hi, 32):
+            if us[t:t + 32] != dn[t:t + 32]:
+                rom_spans.append((t, dn[t:t + 32])); n += 1
+        print("building labels $%06X-$%06X: %d tiles taken from the donor"
+              % (lo, hi, n))
+
     extra = []
     for spec in (a.swap or []):
         off = int(spec, 0)
@@ -1223,10 +1259,14 @@ def cmd_packets(a):
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                (SELECTOR_CHR, len(uchr), spans),
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
+    if rom_spans:
+        entries.append((ROM_SPAN_PSEUDO, 0, rom_spans))
     blob += len(entries).to_bytes(2, "little")
     for src, outlen, sp in entries:
         if src == SYLT_CARD_PSEUDO:
             bank, addr = 0xff, 0xffff
+        elif src == ROM_SPAN_PSEUDO:
+            bank, addr = 0xfe, 0xffff
         else:
             bank = src // 0x8000
             addr = 0x8000 + (src % 0x8000)
@@ -1239,6 +1279,128 @@ def cmd_packets(a):
     open(a.out, "wb").write(blob)
     print("  %d bytes -> %s" % (len(blob), a.out))
 
+
+
+# -- the main map's building labels ---------------------------------------
+# These are the toolbar's two-line names. Unlike everything else translated
+# here they are NOT in a packet: they sit uncompressed at file $034C00 and are
+# copied to VRAM byte $CC00 one tile for one. Found by taking tiles straight
+# out of a live capture and searching the ROM -- 70 of 80 matched consecutively
+# from that base, and none appeared in any compressed packet.
+#
+# Taking the donor's block wholesale does NOT work. The words are pre-rendered
+# strips, the code slices fixed tile ranges out of them, and the German words
+# sit at different offsets, so "Bahngleis" came out in play as "n-en lei /
+# tung Parkal". The artwork copied; the slicing did not.
+#
+# So the block is exported as an ordinary image instead. A translator paints
+# both lines of each label where they belong -- the slices stay exactly where
+# the game expects them -- and imports it back. No donor ROM needed, and no
+# 65816 either.
+LABEL_BASE, LABEL_END = 0x034C00, 0x036200
+LABEL_COLS = 16                  # the block is 16 tiles wide
+LABEL_BPP = 4
+
+# One visually distinct colour per 4bpp index, so an editor can pick them
+# apart. Import maps back by nearest, exactly like tools/make_sylt_card.py.
+LABEL_PAL = [(0, 0, 0), (255, 255, 255), (170, 170, 170), (85, 85, 85),
+             (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+             (255, 0, 255), (0, 255, 255), (128, 0, 0), (0, 128, 0),
+             (0, 0, 128), (128, 128, 0), (128, 0, 128), (0, 128, 128)]
+
+
+def _label_tiles(blob):
+    """(index per pixel) for each 4bpp tile in the block"""
+    out = []
+    for t in range(len(blob) // 32):
+        px = [[0] * 8 for _ in range(8)]
+        for y in range(8):
+            p0, p1 = blob[t * 32 + y * 2], blob[t * 32 + y * 2 + 1]
+            p2, p3 = blob[t * 32 + 16 + y * 2], blob[t * 32 + 16 + y * 2 + 1]
+            for x in range(8):
+                b = 7 - x
+                px[y][x] = (((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
+                            (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3))
+        out.append(px)
+    return out
+
+
+def _tile_bytes(px):
+    """the inverse: 8x8 of 4bpp indices -> 32 bytes of SNES planar"""
+    out = bytearray(32)
+    for y in range(8):
+        p0 = p1 = p2 = p3 = 0
+        for x in range(8):
+            v = px[y][x] & 0xf
+            b = 7 - x
+            p0 |= (v & 1) << b
+            p1 |= ((v >> 1) & 1) << b
+            p2 |= ((v >> 2) & 1) << b
+            p3 |= ((v >> 3) & 1) << b
+        out[y * 2], out[y * 2 + 1] = p0, p1
+        out[16 + y * 2], out[16 + y * 2 + 1] = p2, p3
+    return bytes(out)
+
+
+def cmd_labels(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    rom = open(a.rom, "rb").read()
+    blob = rom[LABEL_BASE:LABEL_END]
+    tiles = _label_tiles(blob)
+    rows = (len(tiles) + LABEL_COLS - 1) // LABEL_COLS
+    img = PIL.Image.new("P", (LABEL_COLS * 8, rows * 8), 0)
+    pal = []
+    for c in LABEL_PAL:
+        pal += list(c)
+    img.putpalette(pal + [0] * (768 - len(pal)))
+    px = img.load()
+    for i, t in enumerate(tiles):
+        ox, oy = (i % LABEL_COLS) * 8, (i // LABEL_COLS) * 8
+        for y in range(8):
+            for x in range(8):
+                px[ox + x, oy + y] = t[y][x]
+    img.save(a.out)
+    print("building labels $%06X-$%06X: %d tiles, %dx%d -> %s"
+          % (LABEL_BASE, LABEL_END, len(tiles), img.width, img.height, a.out))
+    print("  16 tiles a row; each label is TWO rows, and the game slices fixed")
+    print("  tile ranges out of them -- keep every word inside the columns it")
+    print("  already occupies, and use both lines rather than overrunning one.")
+
+
+def label_spans(path, rom):
+    """an edited label image -> (rom offset, 32 bytes) spans for what changed"""
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    im = PIL.Image.open(path).convert("RGB")
+    if im.width != LABEL_COLS * 8:
+        sys.exit("%s is %d px wide; the label block is %d"
+                 % (path, im.width, LABEL_COLS * 8))
+    src = im.load()
+
+    def nearest(c):
+        best, bi = None, 0
+        for i, p in enumerate(LABEL_PAL):
+            d = sum((c[k] - p[k]) ** 2 for k in range(3))
+            if best is None or d < best:
+                best, bi = d, i
+        return bi
+
+    spans, n = [], (im.width // 8) * (im.height // 8)
+    for i in range(n):
+        off = LABEL_BASE + i * 32
+        if off + 32 > LABEL_END:
+            break
+        ox, oy = (i % LABEL_COLS) * 8, (i // LABEL_COLS) * 8
+        px = [[nearest(src[ox + x, oy + y]) for x in range(8)] for y in range(8)]
+        b = _tile_bytes(px)
+        if b != rom[off:off + 32]:
+            spans.append((off, b))
+    return spans
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -1310,9 +1472,21 @@ def main():
                     help="the US image the patch targets")
     pc.add_argument("--donor", required=True, help="a translated ROM")
     pc.add_argument("--out", required=True)
+    pc.add_argument("--labels-from", metavar="PNG",
+                    help="an edited building-label image (text_tool.py labels)")
+    pc.add_argument("--hud", action="store_true",
+                    help="take the main map's building labels from the donor")
+    pc.add_argument("--rom-copy", action="append", metavar="LO-HI",
+                    help="lay the donor's bytes over this cart-image range; "
+                         "repeatable")
     pc.add_argument("--swap", action="append", metavar="ADDR",
                     help="take this whole US packet from the donor "
                          "(a file offset, e.g. 0x04A571); repeatable")
+    lb = sub.add_parser("labels", help="export the main map's building "
+                                       "labels as an editable image")
+    lb.set_defaults(fn=cmd_labels)
+    lb.add_argument("--rom", default="Sim City (U) [!].sfc")
+    lb.add_argument("--out", required=True)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)
     a = p.parse_args()

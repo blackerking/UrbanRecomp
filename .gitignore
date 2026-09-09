@@ -114,3 +114,8 @@ sylt_graphics/*_check.png
 # Translation blobs (tools/text_tool.py import/pack). Same reason: the
 # words and glyphs are lifted out of a donor ROM.
 translation_*.bin
+
+# Building-label sheets (tools/text_tool.py labels). The exported image IS
+# the ROM's artwork, so it is ROM-derived exactly like the blobs above --
+# a translator's edited version is theirs to keep, not this repo's.
+labels_*.png
