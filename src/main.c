@@ -6670,6 +6670,42 @@ static void sc_wram_write_probe(uint32_t off, uint8_t val, const char *via) {
   s_ww_hits++;
 }
 
+/* -- SC_DMA_VRAM: every VRAM DMA, with the WRAM buffer it came from -------
+ *
+ * SC_DMA_VRAM=1 lists each VRAM transfer as source -> destination. Optional
+ * SC_DMA_VRAM_AT=<hex vmadd> reports only transfers covering that VRAM word.
+ *
+ * For finding where a screen's text is composed. The status/advisor block is
+ * ROM text (docs/ROM_MAP.md) but how the game indexes it is unknown, and
+ * unlike the building labels it draws to a tilemap rather than to the sprite
+ * staging buffer -- so SC_WRAM_WATCH has nothing to watch until the WRAM
+ * buffer behind that tilemap is known. This names it: the DMA source IS that
+ * buffer, and SC_WRAM_WATCH pointed there then names the writing routine. */
+static uint32_t s_dv_at = 0xffffffffu;
+
+static void sc_dma_vram_probe(uint8_t aBank, uint16_t aAdr,
+                              uint16_t vmadd, uint16_t size) {
+  const uint32_t words = size ? (uint32_t)size / 2u : 0x8000u;
+  if (s_dv_at != 0xffffffffu &&
+      !(vmadd <= s_dv_at && s_dv_at < vmadd + words)) return;
+  fprintf(stderr, "[dmavram] f%llu $%02x  $%02X:%04X -> vram $%04X  %u bytes  (%u words)\n",
+          (unsigned long long)s_frames, g_ram[0x14], aBank, aAdr, vmadd,
+          size ? size : 0x10000u, words);
+}
+
+static void sc_dma_vram_install(void) {
+  const char *e = getenv("SC_DMA_VRAM");
+  if (!e || !*e || *e == '0') return;
+  { const char *at = getenv("SC_DMA_VRAM_AT");
+    if (at && *at) s_dv_at = (uint32_t)strtoul(at, NULL, 16); }
+  dma_set_vram_notify_hook(sc_dma_vram_probe);
+  if (s_dv_at != 0xffffffffu)
+    fprintf(stderr, "dma vram probe: only transfers covering vram $%04X\n",
+            s_dv_at);
+  else
+    fprintf(stderr, "dma vram probe: every VRAM transfer\n");
+}
+
 static void sc_wram_watch_install(void) {
   const char *e = getenv("SC_WRAM_WATCH");
   if (!e || !*e) return;
@@ -8216,6 +8252,7 @@ int main(int argc, char **argv) {
 
   g_snes = snes_init(g_ram);
   sc_wram_watch_install();
+  sc_dma_vram_install();
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;
   if (!snes_loadRom(g_snes, rom_data, (int)rom_size)) {
