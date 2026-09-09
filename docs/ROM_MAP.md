@@ -3735,3 +3735,34 @@ It holds the Save/Load and "please wait" text (`ONE MOMENT PLEASE...` /
 `BITTE WARTEN...`, `UNABLE TO SAVE.` / `SPEICHERN NICHT MOEGLICH.`,
 `SAVE COMPLETED.`, `GOOD BYE.`) and the HUD advisor lines -- traffic jams,
 blackouts, fire and police department demands, the scenario countdown.
+
+## Correction: `SC_LABEL_TRACE` never fires in this target
+
+Commit 9ad16f5 added `SC_LABEL_TRACE` and described it as arming cpu_trace's
+WRAM watch on the label sprites so that "a hit names the routine". It does arm
+-- the watches report ARMED for every slot -- but it never fires, and neither
+does anything else built on that machinery. Measured, not assumed: a watch on
+`$7E:2000`, sprite 0's shadow slot, which the OAM captures show being written
+constantly, produced no hits either.
+
+The reason is structural. All of that instrumentation lives on the
+AOT/CpuState write path -- `cpu_write8`/`cpu_write16` in `cpu_state.c` -- and
+**this target executes through the interp816 core**, so those functions are
+never called. The same applies to the two watchpoints reached by defining
+`SNES_COSIM` (`SNESRECOMP_WRITE_WATCH` in `cpu_state.c`, `SNESRECOMP_WRAM_WATCH`
+in `WatchdogCheck`): both compile and link here, and both stay silent.
+`SNESRECOMP_WLOG_ADDR` fails for a different reason -- `wlog_addr_note_direct`
+is live in an AOT build, but nothing in the pinned `snes/` sources calls it, so
+the interpreter's writes never reach it.
+
+So there is currently **no hook on the write path this target actually uses**.
+Catching the routine that places the building labels needs one added to the
+interpreter's own WRAM store in the submodule, reporting `g_interp816_cur_pc`
+(interp816.c) -- which is the 65816 PC of the writing instruction, and exactly
+the answer wanted. That is a submodule change, so it is left as a decision
+rather than made in passing.
+
+Two things from the attempt are worth keeping regardless: the CMake fix that
+makes `-DSNESRECOMP_ENABLE_TRACE=ON` link for this target (it was inert here,
+it only failed), and the knowledge that `SNES_COSIM` can be turned on for a
+diagnostic build with three no-op stubs for the co-simulation entry points.
