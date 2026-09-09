@@ -3853,3 +3853,60 @@ land inside the block. It reads neither. `01:B79A` loads `$020d`, indexes
 (120, the map width): it is the building-placement coordinate checker, and
 its `LDA $9b51,X` resolves through a `DB` of `$00`, not `$01`. Any search for
 references into that block has to account for DB before it means anything.
+
+## `05:9653` -- how the main menu places its text
+
+The menu is reachable headlessly: hold ~8-10 seconds at the title, then Start.
+That makes it measurable without a capture session, and it settles what
+d3d1aa1 could not.
+
+The text is NOT written to VRAM by the drawing code. `00:8D43` is a DMA
+uploader -- a pending-mask in `$b7` selects among eight queued transfers, each
+with its VMADD in `$0143,X`, source in `$0163,X` and size in `$0183,X` -- so a
+VRAM write probe attributes every byte to the instruction that triggered the
+transfer. The menu is composed in WRAM first, at `$7E:2840`, and DMA'd from
+there.
+
+`SC_WRAM_WATCH` on that buffer names the composer: **`05:9653`**.
+
+```
+05:962F  LDA ($79),Y ; ASL ; STA $7f    ; entry count -> byte length
+05:9634  INC $79 ; INC $79              ; past the count
+05:9638  LDA $79 ; LDX $34
+05:963C  CLC ; ADC $7f ; DEX ; BPL      ; skip $34 records of $7f bytes
+05:9642  STA $7c                         ; -> the chosen record
+05:9647  LDA ($79),Y ; TAX               ; destination offset
+05:964A  LDA $7e2840,X ; AND #$fc00      ; keep the attribute bits
+05:9651  ORA ($7c),Y ; STA $7e2840,X     ; merge in this record's tile
+05:9659  CPY $7f ; BNE                   ; one entry per destination
+```
+
+So a block is: **a count, then that many destination offsets, then one record
+of tiles per variant**, with `$34` choosing the variant. `$79` is loaded by
+`05:9611`; observed values are `$96AE`, `$970A`, `$97B0`, all bank `$05`.
+
+`$05:96AE` reads `06 00` then `0BC2 0BC4 0BC6 0BC8 0BCA 0C0C` then
+`0024 0025 0026 0027 0028` -- six destinations and the tile run the probe
+caught being written. The structure decodes exactly.
+
+### Why the artwork-only swap failed, and what a fix needs
+
+3fb8871/d3d1aa1 established that the menu tilemap packet is byte-identical
+across regions and only the artwork differs, so swapping the artwork put
+German pixels at English positions (`GSSPIEL`, `STNESCHAUPUBUN`). The reason
+is now visible: the **destination offsets and the tile records live together**
+in these bank `$05` blocks, and a longer German word needs both -- more
+entries and different tiles.
+
+The blocks at `$96AE`, `$970A` and `$97B0` are identical between the US and
+German ROMs, so they are not the words. Of the 133 differing bytes in
+`$05:9600-$9C00`, most are 2-byte pointer shifts -- among them `$9126`,
+`$913F` and `$9158`, which hold the compressed-packet addresses `$9224`,
+`$942B`, `$966B` in the US and `$A15F`, `$A366`, `$A5A6` in the German, the
+same packets paired in 3fb8871. The one substantial run, `$05:9B90` for 1110
+bytes, contains CODE (`REP #$30 ; LDA $4e ; AND #$00ff`), so it cannot simply
+be copied from the donor: the German code sits where it does because its data
+moved.
+
+What is left is to find which blocks hold the menu words, which is now a
+bounded search of a known structure rather than an open question.

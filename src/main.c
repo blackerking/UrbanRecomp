@@ -6710,6 +6710,7 @@ static void sc_dma_vram_probe(uint8_t aBank, uint16_t aAdr,
 static uint32_t s_vw_lo, s_vw_hi; static long s_vw_hits, s_vw_cap = 400;
 static unsigned long long s_vw_from;
 static int s_vw_nz;
+static int s_vw_scr = -1;
 
 static void sc_vram_write_probe(uint32_t byte_addr, uint8_t value) {
   const uint32_t word = byte_addr >> 1;
@@ -6719,6 +6720,10 @@ static void sc_vram_write_probe(uint32_t byte_addr, uint8_t value) {
    * clear loop before anything is drawn, and it spends the whole budget
    * in one frame -- 600 hits at 00:869D, all of them zeros. */
   if (s_vw_nz && value == 0) return;
+  /* SC_VRAM_WRITE_WATCH_SCREEN=<hex $14>: only that screen. The title
+   * animates constantly and spends any budget before a later screen draws
+   * anything -- 4000 hits at 00:8D43 without ever reaching the menu. */
+  if (s_vw_scr >= 0 && g_ram[0x14] != (uint8_t)s_vw_scr) return;
   fprintf(stderr, "[vramwrite] f%llu  $%04X%s = %02X  by %02X:%04X\n",
           (unsigned long long)s_frames, word, (byte_addr & 1) ? "h" : "l",
           value, (unsigned)((g_interp816_cur_pc >> 16) & 0xff),
@@ -6739,6 +6744,8 @@ static void sc_vram_write_watch_install(void) {
     if (f && *f) s_vw_from = strtoull(f, NULL, 0); }
   { const char *z = getenv("SC_VRAM_WRITE_WATCH_NZ");
     s_vw_nz = (z && *z && *z != '0'); }
+  { const char *sc = getenv("SC_VRAM_WRITE_WATCH_SCREEN");
+    if (sc && *sc) s_vw_scr = (int)strtol(sc, NULL, 16); }
   ppu_set_vram_write_log_hook(sc_vram_write_probe);
   fprintf(stderr, "vram write watch: $%04X..$%04X, from frame %llu, up to %ld hits\n",
           s_vw_lo, s_vw_hi, (unsigned long long)s_vw_from, s_vw_cap);
