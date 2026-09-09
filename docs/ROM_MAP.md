@@ -3910,3 +3910,31 @@ moved.
 
 What is left is to find which blocks hold the menu words, which is now a
 bounded search of a known structure rather than an open question.
+
+### `05:9653` is language-independent -- so it is not the menu's words
+
+Follow-up measurement on the block structure above, and it narrows rather
+than delivers.
+
+`05:960E` is `LDA $9696,X ; STA $79`: the block pointers come from a table at
+`$05:9696`, indexed by `$32`. Twelve blocks are used -- `$96AE $96E0 $970A
+$9754 $9786 $97B0 $97DA $980C $9836 $9858 $9892 $98B4` -- captured by watching
+`$0079` while the menu drew.
+
+**All twelve blocks, and the pointer table itself, are byte-identical between
+the US and German ROMs.** So this whole path is language-independent, and the
+menu's words cannot come through it, however plainly it writes tiles into the
+buffer the menu is DMA'd from.
+
+That leaves the model incomplete rather than finished. The composer merges
+tiles into `$7E:2840`, which uploads to VRAM `$5800` -- BG2's map on the menu
+screen -- so it does draw part of that screen. Which part is not established:
+rendering BG2's map against the CHR bases the sidecar reports does not
+reproduce the menu options.
+
+What is now excluded for the menu words: the tilemap packet (identical across
+regions, 3fb8871), the artwork alone (swapping it scrambles the text in play,
+d3d1aa1), and this composer path (identical across regions). The remaining
+candidates are a second composer, or a different variant index reaching
+different blocks in the German build -- `$32` and `$34` both come from
+somewhere this has not yet traced.
