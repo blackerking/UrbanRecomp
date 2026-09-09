@@ -1084,7 +1084,22 @@ SYLT_CARD_PSEUDO = -1            # not a ROM packet; encoded as $ff:ffff
 # any compressed packet. The German ROM keeps its own labels at the SAME
 # address with the same 16-tile rows, so the donor's bytes drop straight in.
 ROM_SPAN_PSEUDO = -2             # a raw cart-image span; encoded as $fe:ffff
-HUD_LABELS = (0x034C00, 0x036200)
+HUD_LABELS = (0x034C00, 0x0376C0)
+
+# The artwork is only half of a label. Where each tile GOES -- which row,
+# what x, and whether the label is one centred line or two -- lives in a
+# 60-byte record per building, reached through a pointer table at $01:8FC4
+# indexed by the tool in $020d. The routine at 01:8F25 walks the record
+# writing (position, tile) word pairs into the sprite staging buffer.
+#
+# Found by watching the writes rather than reading the ROM: six searches for
+# a start/length table and five over the generated C all missed, because
+# there is no such table -- every sprite carries its own position.
+#
+# Copying the donor's artwork WITHOUT these records is what produced
+# "n-en lei / tung Parkal" in play: German pixels cut at English positions.
+# The pointer table is identical across regions, so the records drop in.
+HUD_RECORDS = (0x008FE4, 0x0093A4)      # 16 records x 60 bytes
 
 
 def _lz5():
@@ -1242,6 +1257,13 @@ def cmd_packets(a):
                 rom_spans.append((t, dn[t:t + 32])); n += 1
         print("building labels $%06X-$%06X: %d tiles taken from the donor"
               % (lo, hi, n))
+        rlo, rhi = HUD_RECORDS
+        rn = 0
+        for t in range(rlo, rhi, 4):
+            if us[t:t + 4] != dn[t:t + 4]:
+                rom_spans.append((t, dn[t:t + 4])); rn += 1
+        print("  placement records $%06X-$%06X: %d sprites repositioned"
+              % (rlo, rhi, rn))
 
     extra = []
     for spec in (a.swap or []):
@@ -1297,7 +1319,12 @@ def cmd_packets(a):
 # both lines of each label where they belong -- the slices stay exactly where
 # the game expects them -- and imports it back. No donor ROM needed, and no
 # 65816 either.
-LABEL_BASE, LABEL_END = 0x034C00, 0x036200
+# The block runs further than it looks. Sprite tile $060 is its first tile,
+# so tile T sits at LABEL_BASE + (T - 0x60) * 32, and the records reach tile
+# $1B5 -- ROM $0376C0. Stopping at $036200 (tile $110) left twelve tiles
+# behind, among them the second lines of Wohn-/Gewerbe-/Industrie-, which in
+# play showed as "Wohn- / Nucle": German first line, English second.
+LABEL_BASE, LABEL_END = 0x034C00, 0x0376C0
 LABEL_COLS = 16                  # the block is 16 tiles wide
 LABEL_BPP = 4
 
