@@ -4072,3 +4072,37 @@ that relies on the count.
 The artwork does carry an 8x8 alphabet -- sheet row 0 is `A`-`P` at tiles
 0-15, row 1 `Q`-`Z` then `! ? - . ,` at 16-30 -- so per-letter rendering is
 possible at 8x8 without any new artwork, at one sprite per character.
+
+### Menu records cannot be copied from a donor at all -- the indices differ
+
+c5665a1 relocated the donor's records for `$0C $0D $0F $10` instead of
+copying the whole region, which fixed the title but broke the menu: no
+option text, sprites in the wrong places, the SimCity logo gone.
+
+The indices do not mean the same thing in the two builds:
+
+| index | US | German |
+|---|---|---|
+| `$0C` | 1 sprite, tile `$0C2` | 8 sprites, `$04C $04E ...` |
+| `$0D` | 8 sprites, `$0B9 $12F ...` | 8 sprites, `$0AF $0B9 ...` |
+| `$0F` | 8 sprites, `$0E0-$0E6` at y=44 | **1 sprite**, `$19E` |
+| `$10` | 8 sprites, `$120-$12C` | 8 sprites, `$0C0-$0CE` (SCHAUPLAETZE) |
+
+The German build reassigned them: its title strip lives at `$10` where the US
+keeps a different element, and its `$0F` is a single sprite where the US has
+an eight-sprite record. Dropping the donor's `$0F` over the US `$0F` replaces
+an eight-sprite record with a one-sprite one, which is precisely the missing
+logo.
+
+So there is no index-wise correspondence to copy along, and pairing them by
+what they draw would be guesswork against artwork that also differs. Both
+donor routes are now closed: whole-region (breaks the title) and per-index
+(breaks the menu).
+
+**What remains is to author our own records**, keeping the US indices and
+their meanings, with text rendered by us. That needs an 8x16 font, and the
+8x8 alphabet in the artwork is a different, smaller face -- so the glyphs
+have to be harvested from the existing word strips, whose contents are known.
+The record format (7dd2072) is fully understood and the filler at `$00:FB4C`
+is available to write into, so only the font stands between here and
+arbitrary text.
