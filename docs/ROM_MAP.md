@@ -4018,3 +4018,57 @@ table slots and their records, and relocating the records into free ROM so
 their pointers can be repointed without disturbing the rest of the table.
 Alternatively the title's own artwork could be swapped so its German records
 match, but that widens the change rather than narrowing it.
+
+## `00:8EA9` decompiled -- the shared sprite-text emitter
+
+Every screen's sprite text goes through this: the menu's options, the title,
+the building labels' price line. Decompiled in full so a replacement renderer
+can be written against it.
+
+```
+00:8EA9  REP #$30
+         LDA $0261 ; ASL ; TAY
+         LDA $a164,Y ; PHA            ; record pointer, pushed for ($01,S),Y
+         LDY #$0000
+         LDX $0253                     ; OAM cursor, byte offset into shadow OAM
+         LDA #$0008 ; STA $0251        ; sprite budget: 8
+         LDA ($01,S),Y ; STA $025b     ; flags word
+  loop:  LDA ($01,S),Y ; AND #$00ff    ; X byte
+         LSR $025b ; BCC ; ORA #$0100  ; X high bit, shifted out of the flags
+         CMP #$0100 ; BEQ done         ; terminator: X == 0 with its flag set
+         CLC ; ADC $025d               ; + X base
+         STA $7e2000,X                 ; OAM X
+         ...                            ; high table at $7e2200: X bit 8 + size
+         LDA ($01,S),Y ; ADC $025f     ; Y byte + Y base
+         STA $7e2001,X                 ; OAM Y
+         LDA ($01,S),Y                 ; tile + attributes
+         STA $7e2002,X
+         INY x2 ; INX x4
+         DEC $0251 ; BEQ done ; BRA loop
+```
+
+**Record format**: a flags word, then up to eight sprites of
+`X byte, Y byte, tile+attr word`. So 34 bytes at most. Ended either by the
+budget in `$0251` or by an X of 0 whose flag bit is set.
+
+**Parameters**: `$0261` record index, `$0253` OAM cursor, `$025d` / `$025f`
+the X and Y bases, `$0251` the sprite budget.
+
+Verified against a live capture: German record `$10` at `$A594` decodes to
+tiles `$0C0`-`$0CE` along y=172, which is exactly the `SCHAUPLAETZE` strip the
+OAM watch recorded.
+
+### What this limits, and what it does not
+
+Eight sprites per record is the ceiling, and the words are 16x16 sprites
+carrying **two characters each** -- so sixteen characters per menu entry, and
+the pairs are pre-rendered, not composable.
+
+Raising `$0251` is NOT safe on its own: US record `$0D` uses all eight sprites
+with no terminator, so a larger budget would run it off the end of its data.
+Any change to the budget has to come with terminators added to every record
+that relies on the count.
+
+The artwork does carry an 8x8 alphabet -- sheet row 0 is `A`-`P` at tiles
+0-15, row 1 `Q`-`Z` then `! ? - . ,` at 16-30 -- so per-letter rendering is
+possible at 8x8 without any new artwork, at one sprite per character.
