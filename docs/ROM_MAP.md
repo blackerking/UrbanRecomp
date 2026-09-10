@@ -4233,3 +4233,42 @@ exactly what the German build did, and why its indices do not match the US
 ones. The caller is short, straight-line and now fully mapped, so adding or
 re-pointing a call is tractable; it is ROM code patching rather than data,
 which is a different risk class from everything done so far.
+
+### Record `$0F` owns SCENARIO and PRACTICE -- proved by marking it
+
+Blanking `$0F` (setting its first sprite's X to 0 with the flag bit, so the
+emitter terminates at once) removed all three option lines, but that was
+misleading: with `$0F` drawing nothing, the OAM cursor never advances and
+later records land in its slots.
+
+Marking instead is decisive. Setting all eight of `$0F`'s tile words to
+`$1ff` and snapshotting shows exactly which sprites are its:
+
+```
+ 29  179 160 $1ff      33  122 112 $1ff
+ 30  163 160 $1ff      34  106 112 $1ff
+ 31  147 160 $1ff      35   90 112 $1ff
+ 32  131 160 $1ff      36   74 112 $1ff
+```
+
+Four sprites are `SCENARIO` at y=160 and four are `PRACTICE` at y=112. The
+rest of each line -- `SELECT` before the first, `START NEW CITY` entirely, and
+the `>` arrow -- comes from records not yet identified.
+
+### And rows 2-3 are NOT free artwork
+
+Composing `UBUNG` and `SZENARIO` into rows 2-3 and repointing `$0F`'s tiles
+renders both correctly in play. It also breaks the line above them:
+`START NEW CITY` becomes `UNART NEW CITY`, because that line draws tile `$022`
+-- inside rows 2-3.
+
+The earlier scan that called rows 2-3 "entirely unreferenced" only walked
+records reachable from `$00:A164` with pointers in a plausible range. The
+record behind `START NEW CITY` is not among those, so its tiles never entered
+the used-set. **A free-space claim about this artwork cannot be made by
+scanning the table**; it has to be made from observation -- mark a candidate
+tile, run, and see whether anything on any screen changes.
+
+That is the outstanding blocker for composing menu text: not the font, not the
+record format, not the caller, all of which are now understood -- but knowing
+which tiles are genuinely spare.
