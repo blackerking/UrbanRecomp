@@ -4182,3 +4182,54 @@ that is now known: the record format (7dd2072), the 8x16 alphabet and
 `menu_compose()` (1a0c97e), the filler at `$00:FB4C`, and the on-screen
 geometry above. What must NOT be done is reusing a donor's records -- the
 indices mean different things in each build (449bea6).
+
+## `02:BC94` -- the menu's draw caller, and which record gets which base
+
+Traced by watching the emitter's own parameters (`$025d`, `$025f`, `$0261`)
+with `SC_WRAM_WATCH`, which names the writing instruction. Everything else in
+the log is the emitter writing its own scratch; the caller is bank `$02`.
+
+```
+02:BC94  LDA #$0080 ; STA $025d ; STA $025f   ; bases 128, 128
+02:BC9D  LDA #$000d ; STA $0261 ; COP         ; record $0D -- box / cursor
+02:BCAA  LDA #$0010 ; STA $0261 ; COP         ; record $10 -- SimCity logo
+02:BCB7  LDA #$0088 ; STA $025d               ; x base 136
+02:BCBD  LDA $44 ; BEQ $bcd0                  ; saved-game flag
+02:BCC1    LDA #$000e ; STA $0261 ; COP       ;   record $0E, then falls into
+02:BCCE    BRA $bcd6                          ;   $0F as well
+02:BCD0  LDA #$0074 ; STA $025f               ; y base 116
+02:BCD6  LDA #$000f ; STA $0261 ; COP         ; record $0F -- option lines
+02:BCE7  LDA #$32   ; STA $025d               ; x base 50
+02:BCF1  LDY $44 ; ... ; LDA $d37c,X ; STA $025f  ; y from a table on $3e/$44
+02:BD01  LDA #$0c   ; STA $0261 ; COP         ; record $0C -- cursor arrow
+02:BD0D  RTL
+```
+
+The emitter is reached by `LDA #$0002 ; COP #$00`, which is the COP dispatch
+`$0261` was already noted as feeding.
+
+Bases confirm the geometry exactly. Record `$10` at (128,128): its `y=167`
+lands at `(167+128)&255 = 39` and `y=151` at `23` -- the logo's two rows.
+Record `$0F` at (136,116): `y=44` lands at `160` (the scenario line) and
+`y=252` at `112` (the practice line), so **one record draws two option
+lines**, four sprites each.
+
+When `$44` is non-zero -- a saved game exists -- `$0E` is drawn as well and
+execution falls through into `$0F`, so both appear.
+
+### Why German still does not fit
+
+`ÜBUNGSSPIEL` and `SCHAUPLÄTZE` are 11 characters each, six 16x16 sprites
+apiece, and they share record `$0F`'s budget of eight. Twelve will not fit.
+
+Raising the budget is not available: `$0251` is set to 8 inside the emitter
+(`00:8EBA`), and **19 of the records end on that count rather than on a
+terminator**, so a larger budget would run every one of them off the end of
+its data. Relocating and terminating 19 records is a bigger change than the
+problem warrants.
+
+What is left is to restructure which record draws which line -- which is
+exactly what the German build did, and why its indices do not match the US
+ones. The caller is short, straight-line and now fully mapped, so adding or
+re-pointing a call is tractable; it is ROM code patching rather than data,
+which is a different risk class from everything done so far.
