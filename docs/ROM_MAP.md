@@ -3992,3 +3992,29 @@ only half:
 Verified by driving to the menu headlessly (Start after ~8-10 seconds at the
 title) and rendering the captured OAM against the patched artwork: it reads
 `- SCHAUPLAETZE -`, umlaut dots included.
+
+### ...but `--rom-copy 0x002100-0x003000` breaks the title. Do not use it
+
+Reported from play: title screen frozen, tiles corrupt. The recipe above is
+wrong, and the reason matters.
+
+`$00:A164` is not the menu's table. It is the **general** sprite-text table,
+and `00:8EA9` serves every screen through it -- the first OAM capture of this
+project caught `00:8EF2` writing on screen `$00`. Copying `$00:A100-$AFFF`
+whole therefore replaces the TITLE's sprite records as well, with German ones
+that index German artwork the title never loads. German records against
+English tiles: corrupt tiles, and the title sits there.
+
+That the recompiler finds no code in the region was necessary but not
+sufficient. The region is shared across screens, and only the menu's half of
+it has matching artwork installed.
+
+`--qualify` does not catch this. Headless runs pass 1400 frames and reach the
+menu, because the damage is graphical rather than a hang.
+
+A correct fix has to narrow the copy to the records the MENU uses -- which
+means finding the `$0261` values for the menu's entries, taking only those
+table slots and their records, and relocating the records into free ROM so
+their pointers can be repointed without disturbing the rest of the table.
+Alternatively the title's own artwork could be swapped so its German records
+match, but that widens the change rather than narrowing it.
