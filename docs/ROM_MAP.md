@@ -4145,3 +4145,40 @@ sheet, which is logo artwork, not text. That is why dropping the German `$10`
 the option lines have not been identified: an OAM watch reports only changes,
 and the menu's sprites are set on screen `$02` and persist unchanged into
 `$03`, so a change-triggered capture of `$03` sees nothing.
+
+## The main menu, mapped: `SC_OAM_DUMP`
+
+`SC_OAM_WATCH` reports changes, which is the wrong shape for a screen that is
+composed once and then sits there -- the menu sets its sprites on screen `$02`
+and they persist unchanged into `$03`, so a change-triggered capture of `$03`
+sees nothing. `SC_OAM_DUMP=<path>` with `SC_OAM_DUMP_ON=<hex $14>` and
+`SC_OAM_DUMP_WAIT=<frames>` writes all 128 sprites once: index, x (with bit 8
+from the high table), y, tile, attributes and size.
+
+With that, the menu:
+
+| element | y | sprites | tiles |
+|---|---|---|---|
+| SimCity logo | 23, 39 | 14, 16x16 | `$100`-`$10C`, `$120`-`$12C` |
+| cursor / box | 55-71 | 15, 8x8 | `$0b9`, `$10e`-`$13f` |
+| practice line | 112 | 5 | `$0c2` `$066` `$068` `$06a` `$06c` |
+| start-new-city line | 136 | 7 | `$022` `$06e` `$0c4` `$0c6` `$0c8` `$062` `$064` |
+| select-scenario line | 160 | 7 | `$0ca` `$0cc` `$0ce` `$0e0` `$0e2` `$0e4` `$0e6` |
+
+Reading those against the artwork bands -- rows 4-5 `RESUMESAVED`, rows 6-7
+`CITYPRACTICEAR`, rows 12-13 `- >T NEW SELECT`, rows 14-15 `SCENARIO` -- each
+line is assembled from **character pairs borrowed across bands**: y=160 is
+`EL` `EC` `T ` from rows 12-13 then `SC` `EN` `AR` `IO` from rows 14-15.
+
+### Why the tiles cannot simply be overwritten
+
+The bands are **shared between lines**. `$0c8` (` S`) serves y=136 while
+`$0ca` onward serves y=160, both out of the same rows 12-13 band. Rewriting a
+tile in place would change every line that borrows it.
+
+So composing translations means **authoring new records** that point at freshly
+composed tiles, not editing the tiles the shipped records use. Everything for
+that is now known: the record format (7dd2072), the 8x16 alphabet and
+`menu_compose()` (1a0c97e), the filler at `$00:FB4C`, and the on-screen
+geometry above. What must NOT be done is reusing a donor's records -- the
+indices mean different things in each build (449bea6).

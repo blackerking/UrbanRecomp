@@ -1622,6 +1622,52 @@ static void handle_pos_stuff(void) {
           }
         } }
       vram_dump_done:
+      /* SC_OAM_DUMP=<path> -- every sprite once, when SC_OAM_DUMP_ON names
+       * the screen (hex $14), SC_OAM_DUMP_WAIT frames after it appears.
+       *
+       * SC_OAM_WATCH reports CHANGES, which is the wrong shape for a screen
+       * that is composed once and then sits there: the main menu sets its
+       * sprites on screen $02 and they persist unchanged into $03, so a
+       * change-triggered capture of $03 sees nothing at all. A snapshot says
+       * what is on screen rather than what just moved.
+       *
+       * X bit 8 and the size bit come from the high table at highOam[], two
+       * bits per sprite, four sprites to a byte. */
+      { static int done; const char *od = getenv("SC_OAM_DUMP");
+        const char *oon = getenv("SC_OAM_DUMP_ON");
+        const char *ow = getenv("SC_OAM_DUMP_WAIT");
+        const int want = oon && *oon ? (int)strtol(oon, NULL, 16) : -1;
+        const int wait = ow && *ow ? atoi(ow) : 0;
+        static int seen;
+        if (od && *od && !done && g_ppu &&
+            (want < 0 || g_ram[0x14] == (uint8_t)want)) {
+          if (seen++ >= wait) {
+            done = 1;
+            FILE *f = fopen(od, "w");
+            if (f) {
+              fprintf(f, "# screen=%02x frame=%llu obsel=%02x objbase1=%04x objbase2=%04x\n",
+                      g_ram[0x14], (unsigned long long)s_frames, g_ppu->obsel,
+                      (unsigned)PPU_objTileAdr1(g_ppu),
+                      (unsigned)PPU_objTileAdr2(g_ppu));
+              fprintf(f, "# spr x y tile attr size\n");
+              for (int i = 0; i < 128; i++) {
+                const uint16_t lo = g_ppu->oam[i * 2], hi = g_ppu->oam[i * 2 + 1];
+                const uint8_t hb = g_ppu->highOam[i >> 2];
+                const int sh = (i & 3) * 2;
+                const unsigned x = (unsigned)(lo & 0xff) |
+                                   (((hb >> sh) & 1) ? 0x100u : 0u);
+                fprintf(f, "%3d %4u %3u $%03x $%02x %d\n", i, x,
+                        (unsigned)(lo >> 8), (unsigned)(hi & 0x1ff),
+                        (unsigned)((hi >> 8) & 0xfe),
+                        ((hb >> (sh + 1)) & 1));
+              }
+              fclose(f);
+              fprintf(stderr, "[oamdump] 128 sprites -> %s  screen=$%02x\n",
+                      od, g_ram[0x14]);
+            }
+          }
+        }
+      }
       /* SC_OAM_WATCH=1 -- per-frame diff of OAM, as sprite entries.
        *
        * The main map's building labels turned out not to be on any
