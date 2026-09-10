@@ -1118,6 +1118,53 @@ MENU_FREE = 0x007B4C                     # 1140 bytes of $FF, ending at the head
 MENU_FREE_END = 0x007FC0                 # the cartridge header starts here
 MENU_ART = 0x04A571                      # the artwork the records index into
 
+# The menu font is 8 wide x 16 tall: two stacked 8x8 tiles per character, and
+# a 16x16 sprite carries TWO characters side by side. The artwork already
+# holds the whole uppercase alphabet in that form -- rows 0-1 are A-P, rows
+# 2-3 are Q-Z followed by ! ? - . -- and it is the SAME face the word strips
+# use, not a lookalike: composing "RESUME" from these glyphs reproduces the
+# RESUMESAVED strip at rows 4-5 byte for byte.
+#
+# So no glyph harvesting from words is needed. Any string can be composed by
+# copying alphabet glyphs into free artwork tiles.
+#
+# (The 8x8 alphabet elsewhere in the sheet is a different, smaller face and
+# will not match -- that was the wrong lead.)
+MENU_FONT = {}
+for _i, _ch in enumerate("ABCDEFGHIJKLMNOP"):
+    MENU_FONT[_ch] = 0 * 16 + _i
+for _i, _ch in enumerate("QRSTUVWXYZ!?-."):
+    MENU_FONT[_ch] = 2 * 16 + _i
+
+
+def menu_glyph(art, ch):
+    """(top 32 bytes, bottom 32 bytes) for one character, or None"""
+    t = MENU_FONT.get(ch.upper())
+    if t is None:
+        return None
+    return art[t * 32:(t + 1) * 32], art[(t + 16) * 32:(t + 17) * 32]
+
+
+def menu_compose(art, text, dest_tile):
+    """text -> spans writing 8x16 glyphs into consecutive artwork tiles
+
+    dest_tile is the top-left tile of the run; each character takes one
+    column, its bottom half sitting 16 tiles later (one sheet row down).
+    Returns (spans, missing characters).
+    """
+    spans, missing = [], []
+    for i, ch in enumerate(text):
+        if ch == " ":
+            continue
+        g = menu_glyph(art, ch)
+        if g is None:
+            missing.append(ch)
+            continue
+        t = dest_tile + i
+        spans.append((t, g[0]))
+        spans.append((t + 16, g[1]))
+    return spans, missing
+
 
 def _menu_record(rom, ptr):
     """(bytes, sprite count) for one record, respecting its real terminator"""

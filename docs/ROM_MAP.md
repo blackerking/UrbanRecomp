@@ -4106,3 +4106,42 @@ have to be harvested from the existing word strips, whose contents are known.
 The record format (7dd2072) is fully understood and the filler at `$00:FB4C`
 is available to write into, so only the font stands between here and
 arbitrary text.
+
+## The menu font: 8x16, and already complete in the artwork
+
+The menu's words are 16x16 sprites carrying **two characters each**, so a
+character is 8 wide and 16 tall: two stacked 8x8 tiles, the top at tile `T`
+and the bottom at `T+16`, one sheet row lower.
+
+No harvesting from word strips is needed, which was the expectation. The
+artwork at `$04A571` already holds the whole uppercase alphabet in exactly
+that form:
+
+| rows | tiles | contents |
+|---|---|---|
+| 0-1 | `$000`-`$00F` / `$010`-`$01F` | `A` to `P` |
+| 2-3 | `$020`-`$02D` / `$030`-`$03D` | `Q` to `Z`, then `!` `?` `-` `.` |
+
+And it is the **same face** the strips use, not a lookalike: composing
+`RESUME` from these glyphs reproduces the `RESUMESAVED` strip at rows 4-5
+byte for byte, all six characters, both halves. Verified rather than eyeballed.
+
+So any string can be composed by copying glyphs into free artwork tiles --
+`tools/text_tool.py`'s `menu_compose()` does it -- and `SCHAUPLATZE`,
+`UBUNGSSPIEL`, `GESPEICHERTE STADT` and `NEUE STADT` all compose with no
+missing characters.
+
+Two things it does not cover. The alphabet has no umlauts or eszett: the game
+draws them by placing a separate 8x8 dots sprite above the base letter (the
+`Ue` of UEBUNGSSPIEL is char 232, spotted in bsnes), so a record composing
+German has to carry that extra sprite too. And the 8x8 alphabet elsewhere in
+the sheet is a different, smaller face -- an earlier lead, and the wrong one.
+
+### Still open: which record draws which menu option
+
+`$10` is the SimCity **logo** -- its tiles `$120`-`$12C` are rows 18-19 of the
+sheet, which is logo artwork, not text. That is why dropping the German `$10`
+(their SCHAUPLAETZE) onto it blanked the logo in play. The records that draw
+the option lines have not been identified: an OAM watch reports only changes,
+and the menu's sprites are set on screen `$02` and persist unchanged into
+`$03`, so a change-triggered capture of `$03` sees nothing.
