@@ -3938,3 +3938,57 @@ d3d1aa1), and this composer path (identical across regions). The remaining
 candidates are a second composer, or a different variant index reaching
 different blocks in the German build -- `$32` and `$34` both come from
 somewhere this has not yet traced.
+
+## The main menu: its words are SPRITES (`00:8EA9`, table `$00:A164`)
+
+Settled by a bsnes capture of the German ROM, which is the one thing this
+project cannot measure for itself -- the recomp only runs the US image.
+
+The menu's words are **sprites**: 16x16, two characters each. `UB` of
+UEBUNGSSPIEL is char 98, `UN` char 100, and the umlaut dots are a separate
+8x8 sprite at char 232. Nothing on any background layer carries them. That
+retrospectively explains three dead ends, each of which was individually
+correct and collectively misleading:
+
+* the menu tilemap packet is byte-identical across regions -- it never
+  carried the words (3fb8871)
+* swapping the artwork alone scrambles the text -- German pixels landing at
+  English sprite positions (d3d1aa1)
+* `05:9653`'s composer is language-independent -- it draws the menu's icons
+  and numerals, not its options (654b185)
+
+Sprites mean shadow OAM, and `SC_WRAM_WATCH` on `$7E:2000` named the writer
+immediately: `00:8EF2` / `00:8F2F` / `00:8F38` -- the **same shared sprite
+emitter the building labels use**. Its entry is `00:8EA9`:
+
+```
+00:8EA9  REP #$30
+         LDA $0261 ; ASL ; TAY
+         LDA $a164,Y ; PHA          ; pointer table at $00:A164
+         LDY #$0000
+         LDX $0253                   ; OAM cursor
+         LDA #$0008 ; STA $0251
+         LDA ($01,S),Y ; STA $025b   ; flags, then walk the record
+```
+
+`$0261` selects the record -- ROM_MAP already noted it being read here "as a
+jump-table selector (`ASL A`; index into `$00a164,Y`)" without knowing what
+the table was.
+
+**Every** entry of that table differs between the US and German ROMs, and the
+records fill `$00:A100-$AFFF` as one continuous data blob. The recompiler
+finds no code in `$00:A000-$AFFF` -- zero entry points -- so the region can be
+taken from the donor whole. The table lives inside the copied span, so its
+pointers stay valid.
+
+Translating the menu therefore needs two things, and the artwork was always
+only half:
+
+```
+--rom-copy 0x002100-0x003000   the sprite records and their table
+--swap 0x04A571                the artwork the records index into
+```
+
+Verified by driving to the menu headlessly (Start after ~8-10 seconds at the
+title) and rendering the captured OAM against the patched artwork: it reads
+`- SCHAUPLAETZE -`, umlaut dots included.
