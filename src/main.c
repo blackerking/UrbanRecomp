@@ -1524,6 +1524,9 @@ static void handle_pos_stuff(void) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {
           last = g_ram[0x14];
+          fprintf(stderr, "[layout]   obsel=%02x objbase1=%04x objbase2=%04x size=%d\n",
+                  g_ppu->obsel, (unsigned)PPU_objTileAdr1(g_ppu),
+                  (unsigned)PPU_objTileAdr2(g_ppu), (int)PPU_objSize(g_ppu));
           fprintf(stderr, "[layout] $14=%02x $01df=%u mode=%d main=%02x sub=%02x\n",
                   g_ram[0x14], g_ram[0x1df], (int)PPU_mode(g_ppu),
                   g_ppu->screenEnabled[0], g_ppu->screenEnabled[1]);

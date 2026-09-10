@@ -1101,6 +1101,56 @@ HUD_LABELS = (0x034C00, 0x0376C0)
 # The pointer table is identical across regions, so the records drop in.
 HUD_RECORDS = (0x008FE4, 0x0093A4)      # 16 records x 60 bytes
 
+# -- the main menu -------------------------------------------------------
+# The menu's words are SPRITES, emitted by 00:8EA9 from a record chosen by
+# $0261 through a pointer table at $00:A164 (docs/ROM_MAP.md). A record is a
+# flags word then up to eight (X, Y, tile+attr) sprites -- 34 bytes at most.
+#
+# $00:A164 is the GENERAL sprite-text table: it serves the title and every
+# other screen too. Copying its whole region from a donor, as 4228a5f did,
+# replaces the TITLE's records with German ones that index artwork the title
+# never loads, and the title comes up frozen with corrupt tiles. So only the
+# menu's own four entries are touched, and their records are RELOCATED into
+# filler rather than written over the US records that other screens use.
+MENU_INDICES = (0x0C, 0x0D, 0x0F, 0x10)
+MENU_TABLE = 0x002164                    # FILE offset of $00:A164 (addr - $8000)
+MENU_FREE = 0x007B4C                     # 1140 bytes of $FF, ending at the header
+MENU_FREE_END = 0x007FC0                 # the cartridge header starts here
+MENU_ART = 0x04A571                      # the artwork the records index into
+
+
+def _menu_record(rom, ptr):
+    """(bytes, sprite count) for one record, respecting its real terminator"""
+    a = ptr - 0x8000
+    flags = rom[a] | (rom[a + 1] << 8)
+    n = 0
+    for i in range(8):
+        if rom[a + 2 + i * 4] == 0 and ((flags >> (i * 2)) & 1):
+            break
+        n += 1
+    ln = 2 + (n + (1 if n < 8 else 0)) * 4
+    return rom[a:a + ln], n
+
+
+def menu_spans(us, dn):
+    """donor menu records, relocated into filler, plus the repointed table"""
+    spans, at = [], MENU_FREE
+    for idx in MENU_INDICES:
+        t = MENU_TABLE + idx * 2
+        dptr = dn[t] | (dn[t + 1] << 8)
+        rec, n = _menu_record(dn, dptr)
+        if at + len(rec) > MENU_FREE_END:
+            sys.exit("menu records do not fit in the filler at $%06X" % MENU_FREE)
+        spans.append((at, bytes(rec)))
+        new = 0x8000 + (at - 0x000000)       # bank $00: file offset -> address
+        spans.append((t, bytes([new & 0xff, (new >> 8) & 0xff])))
+        print("  idx $%02X: %d sprites, %d bytes, donor $%04X -> $%04X"
+              % (idx, n, len(rec), dptr, new))
+        at += len(rec)
+    print("  %d bytes used of the %d free at $%06X"
+          % (at - MENU_FREE, MENU_FREE_END - MENU_FREE, MENU_FREE))
+    return spans
+
 
 def _lz5():
     """the decompressor from extract_graphics.py, loaded as a module"""
@@ -1244,6 +1294,12 @@ def cmd_packets(a):
                 rom_spans.append((t, dn[t:t + 32])); n += 1
         print("rom copy $%06X-$%06X: %d of %d tiles differ, %d bytes"
               % (lo, hi, n, (hi - lo) // 32, n * 32))
+    if a.menu:
+        print("main menu: relocating the donor's four records")
+        rom_spans += menu_spans(us, dn)
+        if not a.swap or hex(MENU_ART) not in [hex(int(x, 0)) for x in a.swap]:
+            print("  NOTE: --menu needs --swap 0x%06X too; the records index"
+                  " the donor's artwork" % MENU_ART)
     if a.labels_from:
         sp = label_spans(a.labels_from, us)
         rom_spans += sp
@@ -1501,6 +1557,8 @@ def main():
     pc.add_argument("--out", required=True)
     pc.add_argument("--labels-from", metavar="PNG",
                     help="an edited building-label image (text_tool.py labels)")
+    pc.add_argument("--menu", action="store_true",
+                    help="translate the main menu (needs --swap 0x04A571)")
     pc.add_argument("--hud", action="store_true",
                     help="take the main map's building labels from the donor")
     pc.add_argument("--rom-copy", action="append", metavar="LO-HI",
