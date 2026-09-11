@@ -4301,10 +4301,10 @@ play, `> UBUNG` / `START NEW CITY` / `SELECT SZENARIO` -- the two translated
 lines correct and the third **intact**, which is the check the rows 2-3
 attempt failed.
 
-`text_tool.py packets --menu-text "UBUNG|SZENARIO"` does it. Eight characters
-a line: record `$0F` gives each line four 16x16 sprites and each sprite carries
-two characters. `UEBUNGSSPIEL` and `SCHAUPLAETZE` need six sprites apiece and
-do not fit without restructuring which record draws which line.
+That was the first pass, and it capped a line at eight characters because it
+only repointed the four sprites record `$0F`'s first chunk draws there.
+Decompiling the emitter lifted the cap -- see "Translating the menu into any
+language" below, where `--menu-text` takes all three lines and 36 characters.
 
 ### Why the menu lines are mixed, and where that stops
 
@@ -4340,3 +4340,139 @@ its caller -- that is how `$0F` was translated -- so `$00:A3F4` is directly
 translatable too. But covering a whole line means finding every record that
 contributes to it, and the search has to be confirmed by decoding positions,
 not by the tile sequence alone.
+
+**Retracted in part.** "Records reached without the table, through a second
+entry point" is wrong: there is no second entry point, and `$A3F4` is not a
+record. The emitter runs on past its eight-sprite budget into the next chunk
+of the SAME record, so all three lines belong to `$0F`. The next section has
+the decompilation.
+
+### The menu's sprite-text emitter, decompiled
+
+`$00:8EA9` is COP function 2, and it is what draws every line of the main
+menu. Decompiled in full it settles the questions the tile-sequence searches
+above could only guess at.
+
+```
+00:8ea9  REP #$30
+00:8eab  LDA $0261 / ASL / TAY / LDA $a164,Y / PHA   ; record pointer on the stack
+00:8eb4  LDY #$0000
+00:8eb7  LDX $0253                                   ; OAM byte cursor
+00:8eba  LDA #$0008 / STA $0251                      ; eight sprites a chunk
+00:8ec0  LDA ($01,S),Y / STA $025b                   ; the FLAGS word
+00:8ec5  INY / INY
+00:8ec7  TXA / LSR x4 / AND #$fffe -> $0255          ; high-table word index
+00:8ed2  TXA / LSR / AND #$000e   -> $0257           ; which sprite in that word
+00:8eda  LDA ($01,S),Y / AND #$00ff                  ; the entry's X byte
+00:8edf  LSR $025b / BCC / ORA #$0100                ; flag bit -> X bit 8
+00:8ee7  CMP #$0100 / BEQ $8f4d                      ; X=0 with its flag set: end
+00:8eec  CLC / ADC $025d                             ; + the X base
+00:8ef2  STA $7e2000,X                               ; low byte -> OAM
+00:8f00  AND #$0100 ...                              ; bit 8 -> the high table
+00:8f11  LSR $025b / BCC / ORA $8f62,Y               ; next flag bit -> size
+00:8f19  STA $7e2200,X
+00:8f25  LDA ($01,S),Y / CLC / ADC $025f             ; Y byte + the Y base
+00:8f36  LDA ($01,S),Y / STA $7e2002,X               ; tile + attribute, verbatim
+00:8f42  DEC $0251 / BEQ $8f4a
+00:8f47  JMP $8ec7                                   ; next sprite
+00:8f4a  JMP $8eba                                   ; budget spent: NEXT CHUNK
+```
+
+Three things follow, and each of them was a blocker before.
+
+**A record is a chain of chunks, not a 34-byte blob.** `$8F4A` does not
+return. It jumps back to `$8EBA`, which reloads the eight-sprite budget and
+reads a *fresh* flags word from the next two bytes. So a record simply carries
+on, eight sprites at a time, until a chunk terminates. Record `$0F` is
+therefore one record of three chunks -- `$A3CE` (8 sprites), `$A3F0` (8) and
+`$A412` (2 and the terminator) -- covering **all eighteen** text sprites of
+all three option lines.
+
+That retracts the reading above. `$00:A3F4` is not "a record reached through a
+second entry point": there is no second entry point. Nothing points at `$A3F0`
+or `$A412` because nothing needs to. The 16-bit value `$A3F4` appears once in
+the whole ROM, in unrelated data, which is exactly what the chain predicts.
+
+**The flags word is two bits a sprite, and the first is part of X.** Bit `2i`
+is OR'd into the entry's X byte as bit 8 *before* the base is added; bit
+`2i+1` is the 16x16 size bit. For an on-screen sprite the first bit has to be
+whatever carry the 8-bit sum produces, so it is really a sign extension: entry
+byte `$C2` plus base 136 is `$14A`, and only the flag bit, making it `$24A`,
+keeps bit 8 of the result clear.
+
+Writing new X bytes and leaving the US flags word alone puts sprites 256 pixels
+to the right. That happened on the first run of the new generator: five of the
+six sprites of the top line sat at x = 330..410, one of them by luck at 122.
+The x-high bit is written from the sum at `$8F00`, so it cannot be left to the
+old value.
+
+**The terminator is one byte, not one entry.** `CMP #$0100 / BEQ` at `$8EE7`
+tests the X byte together with its flag bit, and the record ends there. Record
+`$10` is pointed at `$A41D`, immediately after the `$00` at `$A41C` that ends
+the `$A412` chunk -- which is how the one-byte length was confirmed, and it is
+also why the pool cannot grow past eighteen in place.
+
+### Translating the menu into any language
+
+Because each entry carries its own X, Y and tile word, the eighteen sprites
+are a free pool: any of them can be given to any line. The US split of
+4 / 7 / 7 is not fixed by anything, and that is what lifts the eight-character
+cap. Eighteen 16x16 sprites, two characters each, is **36 characters across
+the three lines**, in any split.
+
+They were located by signature rather than by following pointers: an entry
+stores X and Y as offsets from the caller's base (136, 116), so searching the
+record region for the three bytes of a sprite seen on screen finds its entry.
+Eighteen of the nineteen sprites on the option lines resolve uniquely and
+contiguously, at `$00:A3D0` through `$00:A418`. The nineteenth is the cursor
+arrow, drawn from base (50, 112) by record `$0C`, and it is left alone.
+
+The generator writes, per publish: every entry's four bytes, every chunk's
+flags word, and the composed glyphs. Spare sprites are pointed at a blank
+pair, so a short set does not leave a fragment of `SCENARIO` on screen.
+
+```
+text_tool.py packets --menu-text "UEBUNGSSPIEL|NEUE STADT|SCHAUPLAETZE"
+```
+
+| line | US | sprites |
+|---|---|---|
+| y=112 | `PRACTICE` | 4 |
+| y=136 | `START NEW CITY` | 7 |
+| y=160 | `SELECT SCENARIO` | 7 |
+
+German needs 6 / 5 / 6 and leaves one spare; French
+(`ENTRAINEMENT` / `NOUVELLE VILLE` / `SCENARIOS`, with the accents) needs
+exactly 18 and leaves none.
+
+#### Accents, without a sprite to spend on them
+
+The font has no accented letters, and there is no room to add a sprite for the
+marks -- the German cartridge draws the dots of `UEBUNGSSPIEL` as an extra 8x8
+sprite at y=104, and this pool has no spare entry for one.
+
+So the mark is composited into the character cell. The cell is 8x16 and the
+letters fill all sixteen rows, but they are drawn as a vertical colour ramp,
+so two rows can come out of the middle without changing the shape: the squash
+drops the rows that differ least from the row above, which lands on the plain
+vertical strokes every time. The letter keeps its apex and its base, loses two
+rows of ramp, and the mark goes in the space that frees up, shaded like the
+rows it replaced. Diaeresis, acute, grave, circumflex, tilde, ring and cedilla
+are built this way, covering the Latin-1 letters.
+
+#### What the check has to cover
+
+Two failures earlier in this file came from checking too little, so the
+verification is fixed:
+
+1. The title screen's OAM must be **byte-identical** between a plain and a
+   patched run. Screens `$01` and `$02` both are.
+2. **All three** option lines must be rendered and read, not just the ones
+   expected to change. Reading them back from a live VRAM capture and matching
+   each 8x16 cell against the font gives `UEBUNGSSPIEL` / `NEUE STADT` /
+   `SCHAUPLAETZE` at a bit distance of zero.
+
+The live OAM also confirms the free bands directly, and more cheaply than the
+marker sweep did: the highest tile any sprite references on `$01`, `$02` or
+`$03` is `$13F`, the last tile of row 19. Rows 20-31 are unused on every
+screen that loads this artwork.

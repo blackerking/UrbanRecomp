@@ -1144,69 +1144,277 @@ for _i, _ch in enumerate("QRSTUVWXYZ!?-."):
 # tiles actually displayed, NOT by scanning the record table: that scan called
 # rows 2-3 free and composing there broke START NEW CITY, which draws tile
 # $022 from a record the scan never reached.
-MENU_TEXT_BASE = 0x1E0
-MENU_REC_0F = 0xA3CE                     # SCENARIO (4 sprites) + PRACTICE (4)
+# -- the menu generator --------------------------------------------------
+# The three option lines are drawn by three consecutive 34/34/11-byte chunks
+# at $00:A3CE, $00:A3F0 and $00:A412: a flags word, then 4-byte sprite entries
+# (x, y, tile low, tile high + attribute), ending either on the emitter's
+# eight-sprite budget or on a single x=$00 byte whose flag bit is set. Only
+# the first is in the record table (index $0F); the other two are reached by
+# the emitter carrying on past its budget, which is why chasing pointers to
+# them never terminated -- $A3F0 and $A412 are pointed at by nothing.
+#
+# They were found by signature instead: each entry stores x and y as offsets
+# from the caller's base (136, 116), so searching the record region for the
+# three bytes of a sprite seen on screen locates its entry. Eighteen of the
+# nineteen sprites on the option lines resolve uniquely and contiguously; the
+# nineteenth is the cursor arrow, a separate record drawn from base (50, 112),
+# and it is left alone.
+#
+# Because x, y and tile all live in the entry, those eighteen are a free pool:
+# any of them can be given to any line. That is what lifts the eight-character
+# cap. The US layout spends 4 + 7 + 7, but nothing fixes that split.
+#
+#   $A3CE  8 sprites   y=160 x131..179  then  y=112 x74..122
+#   $A3F0  8 sprites   y=136 x74..170   then  y=160 x106
+#   $A412  2 sprites   y=160 x74, x90
+#
+# Growing the pool past eighteen is NOT possible in place: the $A412 chunk
+# ends at $A41C and record $10 begins at $A41D. It would take relocating $10
+# into the filler at $00:FB4C, and $10 is the logo, which has broken this
+# screen before. Eighteen sprites is thirty-six characters, which is enough.
+MENU_SPRITES = [0xA3D0, 0xA3D4, 0xA3D8, 0xA3DC, 0xA3E0, 0xA3E4, 0xA3E8,
+                0xA3EC, 0xA3F2, 0xA3F6, 0xA3FA, 0xA3FE, 0xA402, 0xA406,
+                0xA40A, 0xA40E, 0xA414, 0xA418]
+# The pool as the emitter sees it: record $0F is ONE record of three chunks.
+# $00:8F4A, reached when the eight-sprite budget runs out, jumps back to
+# $00:8EBA, which reloads the budget and reads a FRESH flags word from the
+# next two bytes -- so a record simply carries on, 8 sprites at a time, until
+# a chunk terminates. That is why nothing points at $A3F0 or $A412.
+MENU_CHUNKS = [(0xA3CE, 8), (0xA3F0, 8), (0xA412, 2)]
+MENU_BASE_X, MENU_BASE_Y = 136, 116      # $025d / $025f for these three lines
+MENU_LINE_Y = (112, 136, 160)            # the arrow's stops, from table $d37c
+MENU_LINE_X0 = 74                        # all three lines are left-aligned here
+
+# Composed glyphs go in artwork rows 20-31, none of which is displayed on any
+# screen that loads this packet -- established by snapshotting OAM on each of
+# them and taking the union of the tiles actually used, NOT by scanning the
+# record table. That scan called rows 2-3 free; composing there broke START
+# NEW CITY, which draws tile $022 from a chunk the scan never reached.
+# A band is a pair of rows: a character's top half sits in the first and its
+# bottom half sixteen tiles later, in the second. Rows 30-31 are blank as well
+# as unused, so they come first.
+MENU_FREE_BANDS = (0x1E0, 0x1C0, 0x140, 0x160, 0x180, 0x1A0)
+MENU_BAND_COLS = 16
 
 
-def menu_text_spans(us, art, practice, scenario):
-    """compose two menu lines into spare artwork and repoint record $0F
 
-    Record $0F draws four sprites of SCENARIO at y=160 and four of PRACTICE at
-    y=112 -- proved by setting its tile words to a marker and snapshotting.
-    Each sprite is 16x16 and carries two characters, so each line gets eight
-    characters. Returns (artwork spans, cart spans).
-    """
-    lay = practice.ljust(6) + scenario.ljust(8) + "  "
-    if len(lay) > 16:
-        sys.exit("menu text does not fit: %r + %r needs %d columns of 16"
-                 % (practice, scenario, len(lay)))
-    spans, missing = menu_compose(art, lay, MENU_TEXT_BASE)
-    if missing:
-        sys.exit("no glyph for %s -- the alphabet is A-Z ! ? - . only"
-                 % " ".join(missing))
-    for col in (14, 15):                 # the padding sprite must draw nothing
-        spans.append((MENU_TEXT_BASE + col, bytes(32)))
-        spans.append((MENU_TEXT_BASE + 16 + col, bytes(32)))
-    a = MENU_REC_0F - 0x8000
-    b = MENU_TEXT_BASE
-    order = [b + 12, b + 10, b + 8, b + 6, b + 14, b + 4, b + 2, b + 0]
-    cart = []
-    for i, t in enumerate(order):
-        attr = us[a + 5 + i * 4] & 0xfe
-        cart.append((a + 4 + i * 4, bytes([t & 0xff, ((t >> 8) & 1) | attr])))
-    print("  practice %r, scenario %r -> %d artwork tiles, %d record spans"
-          % (practice, scenario, len(spans), len(cart)))
-    return spans, cart
+# -- accents ---------------------------------------------------------------
+# The font has no accented letters, and there is no room to add a sprite for
+# the marks: the German cartridge draws the dots of UEBUNGSSPIEL as an extra
+# 8x8 sprite at y=104, and this pool has no spare entry to spend on one.
+#
+# So the mark is composited into the character cell instead. The cell is 8x16
+# and the letters fill all sixteen rows, but they are drawn as a vertical
+# colour ramp, so two rows can come out of the middle without changing the
+# shape: the squash picks the rows that differ least from the row above, which
+# lands on the plain vertical strokes every time. The letter keeps its apex
+# and its base, loses two rows of ramp, and the mark goes in the space that
+# frees up, shaded like the rows it replaces.
+#
+# Each mark is (rows needed, above/below, pixels as (row, column)).
+MENU_MARKS = {
+    "dia":   (2, "above", [(0, 1), (0, 2), (0, 5), (0, 6),
+                           (1, 1), (1, 2), (1, 5), (1, 6)]),
+    "acute": (2, "above", [(0, 4), (0, 5), (1, 3), (1, 4)]),
+    "grave": (2, "above", [(0, 2), (0, 3), (1, 3), (1, 4)]),
+    "circ":  (2, "above", [(0, 3), (0, 4), (1, 2), (1, 5)]),
+    "tilde": (2, "above", [(0, 2), (0, 3), (0, 6),
+                           (1, 1), (1, 4), (1, 5)]),
+    "ring":  (3, "above", [(0, 3), (0, 4), (1, 2), (1, 5), (2, 3), (2, 4)]),
+    "ced":   (2, "below", [(0, 3), (0, 4), (1, 2), (1, 3)]),
+}
+MENU_ACCENTED = {}
+for _base, _mark, _set in (
+        ("AEIOUY", "dia",   "ÄËÏÖÜŸ"),
+        ("AEIOUY", "acute", "ÁÉÍÓÚÝ"),
+        ("AEIOU",  "grave", "ÀÈÌÒÙ"),
+        ("AEIOU",  "circ",  "ÂÊÎÔÛ"),
+        ("ANO",    "tilde", "ÃÑÕ"),
+        ("A",      "ring",  "Å"),
+        ("C",      "ced",   "Ç")):
+    for _b, _c in zip(_base, _set):
+        MENU_ACCENTED[_c] = (_b, _mark)
+
+
+def _tile_pixels(b):
+    """32 bytes of 4bpp -> 8 rows of 8 palette indices"""
+    rows = []
+    for y in range(8):
+        r = []
+        for x in range(8):
+            m = 0x80 >> x
+            r.append((1 if b[y * 2] & m else 0)
+                     | (2 if b[y * 2 + 1] & m else 0)
+                     | (4 if b[16 + y * 2] & m else 0)
+                     | (8 if b[16 + y * 2 + 1] & m else 0))
+        rows.append(r)
+    return rows
+
+
+def _tile_bytes(rows):
+    """8 rows of 8 palette indices -> 32 bytes of 4bpp"""
+    b = bytearray(32)
+    for y in range(8):
+        for x in range(8):
+            p, m = rows[y][x], 0x80 >> x
+            if p & 1: b[y * 2] |= m
+            if p & 2: b[y * 2 + 1] |= m
+            if p & 4: b[16 + y * 2] |= m
+            if p & 8: b[16 + y * 2 + 1] |= m
+    return bytes(b)
+
+
+def _squash(rows, n):
+    """drop n rows from the middle, the least distinct ones first"""
+    rows, hi = [r[:] for r in rows], 14
+    for _ in range(n):
+        cost = [(sum(1 for a, b in zip(rows[r], rows[r - 1]) if a != b), r)
+                for r in range(2, hi)]
+        rows.pop(min(cost)[1])
+        hi -= 1
+    return rows
 
 
 def menu_glyph(art, ch):
     """(top 32 bytes, bottom 32 bytes) for one character, or None"""
-    t = MENU_FONT.get(ch.upper())
-    if t is None:
+    ch = ch.upper()
+    if ch == " ":
+        return bytes(32), bytes(32)
+    t = MENU_FONT.get(ch)
+    if t is not None:
+        return art[t * 32:(t + 1) * 32], art[(t + 16) * 32:(t + 17) * 32]
+    acc = MENU_ACCENTED.get(ch)
+    if acc is None:
         return None
-    return art[t * 32:(t + 1) * 32], art[(t + 16) * 32:(t + 17) * 32]
+    base, mark = acc
+    n, side, pixels = MENU_MARKS[mark]
+    t = MENU_FONT[base]
+    cell = (_tile_pixels(art[t * 32:(t + 1) * 32])
+            + _tile_pixels(art[(t + 16) * 32:(t + 17) * 32]))
+    at = list(range(n)) if side == "above" else list(range(16 - n, 16))
+    shade = []
+    for r in at:
+        seen = set(cell[r]) - {0}
+        shade.append(max(seen, key=cell[r].count) if seen else 1)
+    body, blank = _squash(cell, n), [[0] * 8 for _ in range(n)]
+    out = blank + body if side == "above" else body + blank
+    for r, c in pixels:
+        out[at[r]][c] = shade[r]
+    return _tile_bytes(out[:8]), _tile_bytes(out[8:])
 
 
-def menu_compose(art, text, dest_tile):
-    """text -> spans writing 8x16 glyphs into consecutive artwork tiles
+def menu_slot(k):
+    """artwork tile for the k'th sprite in the pool
 
-    dest_tile is the top-left tile of the run; each character takes one
-    column, its bottom half sitting 16 tiles later (one sheet row down).
-    Returns (spans, missing characters).
+    A 16x16 sprite reads tiles T, T+1, T+16 and T+17, so it owns two adjacent
+    columns of a band and can never straddle one: a band is sixteen columns,
+    which is exactly eight sprites. Allocating per sprite rather than per line
+    means a line may be split across bands, which costs nothing -- every entry
+    carries its own tile word -- and wastes no columns.
     """
-    spans, missing = [], []
-    for i, ch in enumerate(text):
-        if ch == " ":
-            continue
-        g = menu_glyph(art, ch)
-        if g is None:
-            missing.append(ch)
-            continue
-        t = dest_tile + i
-        spans.append((t, g[0]))
-        spans.append((t + 16, g[1]))
-    return spans, missing
+    band, col = divmod(k, MENU_BAND_COLS // 2)
+    if band >= len(MENU_FREE_BANDS):
+        sys.exit("the menu needs %d free artwork bands and %d are listed"
+                 % (band + 1, len(MENU_FREE_BANDS)))
+    return MENU_FREE_BANDS[band] + col * 2
 
+
+def menu_flags(rom, xbyte):
+    """{sprite address: x byte} -> spans rewriting the chunks' flags words
+
+    The flags word is not decoration. Decompiled at $00:8EDF the emitter takes
+    TWO bits from it per sprite: the first is bit 8 of X, OR'd into the entry's
+    byte BEFORE the base is added, and the second is the 16x16 size bit. So
+    for an on-screen sprite the first bit has to be whatever carry the 8-bit
+    sum produces -- it is really a sign extension. An entry byte of $C2 with
+    base 136 adds to $14A, and only the flag bit, making it $24A, keeps bit 8
+    of the result clear.
+
+    Writing new X bytes and leaving the US flags alone is what put five
+    sprites 256 pixels right of where they belonged. Bits outside the sprites
+    actually written are preserved, which is what keeps the record's
+    terminator -- an x byte of $00 whose flag bit is set, tested at $00:8EE7.
+    """
+    spans = []
+    for addr, count in MENU_CHUNKS:
+        off = addr - 0x8000
+        flags = rom[off] | (rom[off + 1] << 8)
+        for i in range(count):
+            x = xbyte.get(addr + 2 + i * 4)
+            if x is None:
+                continue
+            carry = 1 if x + MENU_BASE_X >= 0x100 else 0
+            flags &= ~(3 << (i * 2))
+            flags |= (carry | 2) << (i * 2)
+        spans.append((off, bytes([flags & 0xff, (flags >> 8) & 0xff])))
+    return spans
+
+
+def menu_lines_spans(us, art, lines):
+    """{screen y: text} -> (artwork spans, cart spans)
+
+    Lays the three option lines out from scratch. Each sprite is 16x16 and
+    carries two characters, so a line of n characters costs ceil(n / 2) of the
+    eighteen in the pool, and the pool is shared: a long line borrows from a
+    short one. Every entry's x, y and tile word is written, and so is each
+    chunk's flags word, so nothing is inherited from the US layout but the
+    palette and priority bits. Spare sprites are pointed at a blank pair
+    rather than left drawing the fragment of SCENARIO they used to.
+    """
+    order = [y for y in MENU_LINE_Y if lines.get(y)]
+    texts = [lines[y].upper() for y in order]
+    need = [(len(t) + 1) // 2 for t in texts]
+    if sum(need) > len(MENU_SPRITES):
+        sys.exit("these lines need %d sprites and the menu has %d, which is "
+                 "%d characters in all: %s"
+                 % (sum(need), len(MENU_SPRITES), len(MENU_SPRITES) * 2,
+                    ", ".join('"%s" = %d' % (t, n)
+                              for t, n in zip(texts, need))))
+    art_spans, cart, xbyte, slot = [], [], {}, 0
+
+    def place(k, x, y, tile):
+        addr = MENU_SPRITES[k]
+        off = addr - 0x8000
+        xb = (x - MENU_BASE_X) & 0xff
+        xbyte[addr] = xb
+        attr = us[off + 3] & 0xfe
+        cart.append((off, bytes([xb, (y - MENU_BASE_Y) & 0xff, tile & 0xff,
+                                 ((tile >> 8) & 1) | attr])))
+
+    for y, text, n in zip(order, texts, need):
+        padded = text.ljust(n * 2)
+        missing = sorted(set(c for c in padded if menu_glyph(art, c) is None))
+        if missing:
+            sys.exit("no glyph for %s -- the font is A-Z, ! ? - . and the "
+                     "accented letters listed in MENU_ACCENTED"
+                     % " ".join("%s (U+%04X)" % (c, ord(c))
+                                for c in missing))
+        first = menu_slot(slot)
+        for i in range(n):
+            t = menu_slot(slot)
+            for half in (0, 1):
+                top, bot = menu_glyph(art, padded[i * 2 + half])
+                art_spans += [(t + half, top), (t + 16 + half, bot)]
+            place(slot, MENU_LINE_X0 + i * 16, y, t)
+            slot += 1
+        print('  y=%-3d  %-18s %2d sprites, artwork tile $%03X'
+              % (y, '"' + text + '"', n, first))
+    for k in range(slot, len(MENU_SPRITES)):
+        t = menu_slot(k)
+        for d in (0, 1, 16, 17):
+            art_spans.append((t + d, bytes(32)))
+        place(k, MENU_LINE_X0, MENU_LINE_Y[0], t)
+    spare = len(MENU_SPRITES) - slot
+    if spare:
+        print("  %d spare sprite%s pointed at a blank pair"
+              % (spare, "" if spare == 1 else "s"))
+    cart += menu_flags(us, xbyte)
+    bands = -(-len(MENU_SPRITES) // (MENU_BAND_COLS // 2))
+    print("  artwork rows %s, %d chunk flags words rewritten"
+          % (", ".join("%d-%d" % (MENU_FREE_BANDS[b] // 16,
+                                  MENU_FREE_BANDS[b] // 16 + 1)
+                       for b in range(bands)), len(MENU_CHUNKS)))
+    return art_spans, cart
 
 def _menu_record(rom, ptr):
     """(bytes, sprite count) for one record, respecting its real terminator"""
@@ -1217,7 +1425,7 @@ def _menu_record(rom, ptr):
         if rom[a + 2 + i * 4] == 0 and ((flags >> (i * 2)) & 1):
             break
         n += 1
-    ln = 2 + (n + (1 if n < 8 else 0)) * 4
+    ln = 2 + n * 4 + (1 if n < 8 else 0)
     return rom[a:a + ln], n
 
 
@@ -1424,11 +1632,19 @@ def cmd_packets(a):
 
     blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
     if a.menu_text:
-        practice, _, scenario = a.menu_text.partition("|")
+        field = [t.strip() for t in a.menu_text.split("|")]
+        if len(field) > len(MENU_LINE_Y):
+            sys.exit("--menu-text takes at most %d lines separated by |"
+                     % len(MENU_LINE_Y))
         art, _ = eg.nintendo_decompress(us, MENU_ART)
+        lines = dict(zip(MENU_LINE_Y, field))
+        for y, t in zip(MENU_LINE_Y, field):
+            if not t:
+                sys.exit("line y=%d was left empty. Every line has to be "
+                         "given: the eighteen sprites are one pool, so "
+                         "changing any line re-lays all three" % y)
         print("main menu text:")
-        art_spans, cart = menu_text_spans(us, art, practice.strip(),
-                                          scenario.strip())
+        art_spans, cart = menu_lines_spans(us, art, lines)
         extra.append((MENU_ART, len(art),
                       [(t * 32, d) for t, d in art_spans]))
         rom_spans += cart
@@ -1656,11 +1872,15 @@ def main():
     pc.add_argument("--out", required=True)
     pc.add_argument("--labels-from", metavar="PNG",
                     help="an edited building-label image (text_tool.py labels)")
-    pc.add_argument("--menu-text", metavar="PRACTICE|SCENARIO",
-                    help="compose two menu lines, 8 characters each, e.g. "
-                         "\"UBUNG|SZENARIO\"")
+    pc.add_argument("--menu-text", metavar="TOP|MIDDLE|BOTTOM",
+                    help="the main menu's three option lines, e.g. "
+                         "\"UBUNGSSPIEL|NEUE STADT|SCHAUPLATZE\". Leave a "
+                         "field empty to keep the US wording. 36 characters "
+                         "in all, and any three splits of that; accented "
+                         "letters are built on the fly")
     pc.add_argument("--menu", action="store_true",
-                    help="translate the main menu (needs --swap 0x04A571)")
+                    help="RETRACTED: relocates donor records and loses the "
+                         "logo. Use --menu-text")
     pc.add_argument("--hud", action="store_true",
                     help="take the main map's building labels from the donor")
     pc.add_argument("--rom-copy", action="append", metavar="LO-HI",
