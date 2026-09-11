@@ -4568,7 +4568,16 @@ English, 78 building-label tiles and 87 repositioned placement sprites. It
 qualifies clean over 1200 frames, and all three menu lines read back out of
 live VRAM at a bit distance of zero.
 
-Verified in play: the menu. **Not** verified in play: the scenario cards and
-the building labels, which go through the same code as the German build the
-cards and labels were confirmed on, but have not themselves been looked at on
-a screen.
+Checked: the menu and the scenario cards, by rendering them from live VRAM
+captures -- all ten cards French, all three menu lines at a bit distance of
+zero. The building labels were checked a different way, because they are
+sprites sliced out of a sheet and reaching the toolbar takes a played game:
+for every tile the PATCHED placement records slice, the patched sheet is
+compared against the donor's. 83 tiles for French, 92 for German, none
+differing.
+
+That check is worth keeping. It is what shows that the `Nuclear` still
+sitting in the French sheet is harmless: tiles `$1B0`..`$1B5` are dead space
+in the French cartridge, which left the US bytes there, and no French
+placement record references them. German does reference them, and translates
+them -- which is the same six tiles the `$036200` truncation once lost.
