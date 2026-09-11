@@ -4305,3 +4305,38 @@ attempt failed.
 a line: record `$0F` gives each line four 16x16 sprites and each sprite carries
 two characters. `UEBUNGSSPIEL` and `SCHAUPLAETZE` need six sprites apiece and
 do not fit without restructuring which record draws which line.
+
+### Why the menu lines are mixed, and where that stops
+
+In play the scenario line reads `SELECT SZENARIO` -- one English word, one
+German. Reported from play, and the cause is that a menu LINE is not one
+record.
+
+Marking every record in `$00:A164` with a unique tile and snapshotting the
+menu attributes each on-screen sprite:
+
+| sprites | record |
+|---|---|
+| y=112, x 74-122 | `$0F` |
+| y=160, x 131-179 | `$0F` |
+| y=112, x 50 (the arrow) | `$0C` |
+| logo, box | `$10`, `$0E`, and others |
+| **y=136 all, and y=160 x 74-106** | **unmarked -- not from the table at all** |
+
+So `START NEW CITY` and `SELECT` are drawn by the same emitter but from
+records reached without the table, through a second entry point that takes a
+pointer directly. Searching the ROM for their tile sequence finds
+`START NEW CITY` at **`$00:A3F4`**, immediately after `$0F`'s record, whose
+six sprites decode to screen (154,136) through (74,136) exactly.
+
+`SELECT` was not found the same way: the tile sequence `$0CA $0CC $0CE` does
+match at `$00:A5AE`, but that record's sprites decode to (119,32) and (103,32)
+under the menu's bases, so it is a different element and the match is
+coincidental. Bases vary per call, which makes tile-sequence search
+suggestive rather than conclusive.
+
+What this means practically: a record's tiles can be repointed without knowing
+its caller -- that is how `$0F` was translated -- so `$00:A3F4` is directly
+translatable too. But covering a whole line means finding every record that
+contributes to it, and the search has to be confirmed by decoding positions,
+not by the tile sequence alone.
