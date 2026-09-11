@@ -1160,30 +1160,38 @@ for _i, _ch in enumerate("QRSTUVWXYZ!?-."):
 # nineteenth is the cursor arrow, a separate record drawn from base (50, 112),
 # and it is left alone.
 #
-# Because x, y and tile all live in the entry, those eighteen are a free pool:
-# any of them can be given to any line. That is what lifts the eight-character
-# cap. The US layout spends 4 + 7 + 7, but nothing fixes that split.
+# Because x, y and tile all live in the entry, they are a free pool: any of
+# them can be given to any line. That is what lifts the eight-character cap.
+# The US layout spends 4 + 7 + 7 of its eighteen, but nothing fixes that split.
 #
 #   $A3CE  8 sprites   y=160 x131..179  then  y=112 x74..122
 #   $A3F0  8 sprites   y=136 x74..170   then  y=160 x106
 #   $A412  2 sprites   y=160 x74, x90
-#
-# Growing the pool past eighteen is NOT possible in place: the $A412 chunk
-# ends at $A41C and record $10 begins at $A41D. It would take relocating $10
-# into the filler at $00:FB4C, and $10 is the logo, which has broken this
-# screen before. Eighteen sprites is thirty-six characters, which is enough.
-MENU_SPRITES = [0xA3D0, 0xA3D4, 0xA3D8, 0xA3DC, 0xA3E0, 0xA3E4, 0xA3E8,
-                0xA3EC, 0xA3F2, 0xA3F6, 0xA3FA, 0xA3FE, 0xA402, 0xA406,
-                0xA40A, 0xA40E, 0xA414, 0xA418]
-# The pool as the emitter sees it: record $0F is ONE record of three chunks.
+# The pool as the emitter sees it: record $0F is ONE record of chained chunks.
 # $00:8F4A, reached when the eight-sprite budget runs out, jumps back to
 # $00:8EBA, which reloads the budget and reads a FRESH flags word from the
 # next two bytes -- so a record simply carries on, 8 sprites at a time, until
 # a chunk terminates. That is why nothing points at $A3F0 or $A412.
-MENU_CHUNKS = [(0xA3CE, 8), (0xA3F0, 8), (0xA412, 2)]
+#
+# As shipped the chain is 8 + 8 + 2 and ends at $A41C, because record $10
+# begins at $A41D. Growing it in place is therefore impossible -- but $10 is
+# reached ONLY through the table at $00:A164, and a record's entries are
+# self-contained (x, y, tile, attribute; no internal pointers), so its whole
+# 61-byte chain copies verbatim into the bank-0 filler and the table entry is
+# repointed at the copy. That frees $A41D onward and the chain becomes
+# 8 + 8 + 8 with a fourth chunk holding nothing but the terminator.
+#
+# 24 sprites, 48 characters. The US wording needs 18 and the French
+# cartridge's own needs 20.
+MENU_CHUNKS = [(0xA3CE, 8), (0xA3F0, 8), (0xA412, 8)]
+MENU_TAIL = 0xA434                       # flags word + terminator byte
+MENU_MOVE = (0x10, 0xA41D, 61)           # record, where it is, chain length
+MENU_SPRITES = [c + 2 + i * 4 for c, n in MENU_CHUNKS for i in range(n)]
 MENU_BASE_X, MENU_BASE_Y = 136, 116      # $025d / $025f for these three lines
 MENU_LINE_Y = (112, 136, 160)            # the arrow's stops, from table $d37c
 MENU_LINE_X0 = 74                        # all three lines are left-aligned here
+MENU_LINE_MAX = 252                      # and none may run past this
+MENU_PARK_Y = 224                        # spare sprites, clear of the screen
 
 # Composed glyphs go in artwork rows 20-31, none of which is displayed on any
 # screen that loads this packet -- established by snapshotting OAM on each of
@@ -1319,6 +1327,51 @@ def menu_slot(k):
     return MENU_FREE_BANDS[band] + col * 2
 
 
+def menu_layout(text):
+    """text -> [(x offset, the sprite's two characters)]
+
+    Words are packed whole, which is how both cartridges do it. A word of n
+    letters takes ceil(n / 2) sprites, and an odd-length word leaves its last
+    half blank -- that blank IS the space before the next word. Only after an
+    even-length word does the space cost anything, and then it costs 8 pixels
+    of position rather than a sprite.
+
+    Checked against the French cartridge, which is the one that spends its
+    sprites carefully: NOUVELLE CITE comes out at offsets 0 16 32 48 72 88,
+    exactly its own, and CHOISIS SCENARIO within a pixel of its own.
+    """
+    out, x = [], 0
+    for i, word in enumerate(w for w in text.split(" ") if w):
+        if i:
+            x += 8
+        pad = word if len(word) % 2 == 0 else word + " "
+        for k in range(0, len(pad), 2):
+            out.append((x, pad[k:k + 2]))
+            x += 16
+        if len(word) % 2:
+            x -= 8
+    return out
+
+
+def menu_relocate(rom):
+    """spans that move record $10 aside and close the grown chain
+
+    Record $0F ends where record $10 begins, so the chain can only grow if $10
+    moves. It is copied verbatim -- entries carry no internal pointers -- into
+    the bank-0 filler, the table entry is repointed, and a fourth chunk holding
+    only a terminator is written past the new eight-sprite third chunk.
+    """
+    idx, addr, length = MENU_MOVE
+    src = addr - 0x8000
+    ptr = 0x8000 + (MENU_FREE % 0x8000)
+    if MENU_FREE + length > MENU_FREE_END:
+        sys.exit("record $%02X does not fit in the filler at $%06X"
+                 % (idx, MENU_FREE))
+    return [(MENU_FREE, rom[src:src + length]),
+            (MENU_TABLE + idx * 2, bytes([ptr & 0xff, ptr >> 8])),
+            (MENU_TAIL - 0x8000, bytes([0x01, 0x00, 0x00]))]
+
+
 def menu_flags(rom, xbyte):
     """{sprite address: x byte} -> spans rewriting the chunks' flags words
 
@@ -1331,22 +1384,16 @@ def menu_flags(rom, xbyte):
     of the result clear.
 
     Writing new X bytes and leaving the US flags alone is what put five
-    sprites 256 pixels right of where they belonged. Bits outside the sprites
-    actually written are preserved, which is what keeps the record's
-    terminator -- an x byte of $00 whose flag bit is set, tested at $00:8EE7.
+    sprites 256 pixels right of where they belonged.
     """
     spans = []
     for addr, count in MENU_CHUNKS:
-        off = addr - 0x8000
-        flags = rom[off] | (rom[off + 1] << 8)
+        flags = 0
         for i in range(count):
-            x = xbyte.get(addr + 2 + i * 4)
-            if x is None:
-                continue
+            x = xbyte[addr + 2 + i * 4]
             carry = 1 if x + MENU_BASE_X >= 0x100 else 0
-            flags &= ~(3 << (i * 2))
             flags |= (carry | 2) << (i * 2)
-        spans.append((off, bytes([flags & 0xff, (flags >> 8) & 0xff])))
+        spans.append((addr - 0x8000, bytes([flags & 0xff, flags >> 8])))
     return spans
 
 
@@ -1354,66 +1401,74 @@ def menu_lines_spans(us, art, lines):
     """{screen y: text} -> (artwork spans, cart spans)
 
     Lays the three option lines out from scratch. Each sprite is 16x16 and
-    carries two characters, so a line of n characters costs ceil(n / 2) of the
-    eighteen in the pool, and the pool is shared: a long line borrows from a
-    short one. Every entry's x, y and tile word is written, and so is each
-    chunk's flags word, so nothing is inherited from the US layout but the
-    palette and priority bits. Spare sprites are pointed at a blank pair
-    rather than left drawing the fragment of SCENARIO they used to.
+    carries two characters, and the 24 in the pool are shared between the
+    lines: a long line borrows from a short one. Every entry's x, y and tile
+    word is written, and so is each chunk's flags word, so nothing is
+    inherited from the US layout but the palette and priority bits. Spare
+    sprites are parked below the screen with a blank tile rather than left
+    drawing the fragment of SCENARIO they used to.
     """
     order = [y for y in MENU_LINE_Y if lines.get(y)]
-    texts = [lines[y].upper() for y in order]
-    need = [(len(t) + 1) // 2 for t in texts]
-    if sum(need) > len(MENU_SPRITES):
+    laid = [(y, lines[y].upper(), menu_layout(lines[y].upper()))
+            for y in order]
+    need = sum(len(c) for _, _, c in laid)
+    if need > len(MENU_SPRITES):
         sys.exit("these lines need %d sprites and the menu has %d, which is "
                  "%d characters in all: %s"
-                 % (sum(need), len(MENU_SPRITES), len(MENU_SPRITES) * 2,
-                    ", ".join('"%s" = %d' % (t, n)
-                              for t, n in zip(texts, need))))
+                 % (need, len(MENU_SPRITES), len(MENU_SPRITES) * 2,
+                    ", ".join('"%s" = %d' % (t, len(c)) for _, t, c in laid)))
     art_spans, cart, xbyte, slot = [], [], {}, 0
+
+    # One attribute for the whole pool, taken from the US line text. It must
+    # NOT be inherited per sprite: past the original eighteen the bytes at
+    # those addresses are record $10's old data, so the last two sprites of a
+    # French layout would come out on the wrong palette.
+    attr = us[MENU_SPRITES[0] - 0x8000 + 3] & 0xfe
 
     def place(k, x, y, tile):
         addr = MENU_SPRITES[k]
         off = addr - 0x8000
         xb = (x - MENU_BASE_X) & 0xff
         xbyte[addr] = xb
-        attr = us[off + 3] & 0xfe
         cart.append((off, bytes([xb, (y - MENU_BASE_Y) & 0xff, tile & 0xff,
                                  ((tile >> 8) & 1) | attr])))
 
-    for y, text, n in zip(order, texts, need):
-        padded = text.ljust(n * 2)
-        missing = sorted(set(c for c in padded if menu_glyph(art, c) is None))
+    for y, text, cells in laid:
+        end = MENU_LINE_X0 + cells[-1][0] + 16 if cells else MENU_LINE_X0
+        if end > MENU_LINE_MAX:
+            sys.exit('"%s" is %d pixels wide and runs to x=%d; a line starts '
+                     "at x=%d and must end by x=%d, so about %d characters"
+                     % (text, end - MENU_LINE_X0, end, MENU_LINE_X0,
+                        MENU_LINE_MAX,
+                        (MENU_LINE_MAX - MENU_LINE_X0) // 8))
+        missing = sorted(set(c for _, pair in cells for c in pair
+                             if menu_glyph(art, c) is None))
         if missing:
             sys.exit("no glyph for %s -- the font is A-Z, ! ? - . and the "
                      "accented letters listed in MENU_ACCENTED"
-                     % " ".join("%s (U+%04X)" % (c, ord(c))
-                                for c in missing))
+                     % " ".join("%s (U+%04X)" % (c, ord(c)) for c in missing))
         first = menu_slot(slot)
-        for i in range(n):
+        for dx, pair in cells:
             t = menu_slot(slot)
             for half in (0, 1):
-                top, bot = menu_glyph(art, padded[i * 2 + half])
+                top, bot = menu_glyph(art, pair[half])
                 art_spans += [(t + half, top), (t + 16 + half, bot)]
-            place(slot, MENU_LINE_X0 + i * 16, y, t)
+            place(slot, MENU_LINE_X0 + dx, y, t)
             slot += 1
-        print('  y=%-3d  %-18s %2d sprites, artwork tile $%03X'
-              % (y, '"' + text + '"', n, first))
+        print('  y=%-3d  %-20s %2d sprites, artwork tile $%03X, x %d-%d'
+              % (y, '"' + text + '"', len(cells), first, MENU_LINE_X0, end))
     for k in range(slot, len(MENU_SPRITES)):
         t = menu_slot(k)
         for d in (0, 1, 16, 17):
             art_spans.append((t + d, bytes(32)))
-        place(k, MENU_LINE_X0, MENU_LINE_Y[0], t)
+        place(k, MENU_LINE_X0, MENU_PARK_Y, t)
     spare = len(MENU_SPRITES) - slot
     if spare:
-        print("  %d spare sprite%s pointed at a blank pair"
-              % (spare, "" if spare == 1 else "s"))
-    cart += menu_flags(us, xbyte)
-    bands = -(-len(MENU_SPRITES) // (MENU_BAND_COLS // 2))
-    print("  artwork rows %s, %d chunk flags words rewritten"
-          % (", ".join("%d-%d" % (MENU_FREE_BANDS[b] // 16,
-                                  MENU_FREE_BANDS[b] // 16 + 1)
-                       for b in range(bands)), len(MENU_CHUNKS)))
+        print("  %d spare sprite%s parked at y=%d with a blank tile"
+              % (spare, "" if spare == 1 else "s", MENU_PARK_Y))
+    cart += menu_flags(us, xbyte) + menu_relocate(us)
+    print("  record $%02X relocated to $%06X so the chain could grow to "
+          "%d sprites" % (MENU_MOVE[0], MENU_FREE, len(MENU_SPRITES)))
     return art_spans, cart
 
 def _menu_record(rom, ptr):
@@ -1553,6 +1608,43 @@ def cmd_packets(a):
         sys.exit("tiles %s carry different art in the donor but are still used "
                  "elsewhere on the US selector -- this patch would corrupt it"
                  % clashes)
+    # A cell whose tilemap entry is UNCHANGED can still need translating. The
+    # donor is free to reuse a tile index for a different glyph, and it does:
+    # San Francisco's first disaster line is tiles $0BE..$0C3 in both ROMs,
+    # US "Earthquake" and French "Tremblement", at the same indices. Taking
+    # art only for cells whose ENTRY changed left that line in English while
+    # the second line, which the donor does move, came out French --
+    # "Earthquake de terre" on the card.
+    #
+    # So the art of an unchanged cell is taken too, but only inside the card
+    # rectangles, and only if no cell outside them shares the tile. The screen
+    # around the cards -- the wood, the borders, MAP SELECT -- is left alone,
+    # and so is Sylt's card, which the host composes after this packet.
+    incard = set()
+    for row in CARD_ROWS:
+        for col in CARD_COLS:
+            for y in range(CARD_H):
+                for x in range(CARD_W):
+                    incard.add((row + y) * 32 + col + x)
+    outside = set(uw[i] & 0x3ff for i in range(len(uw)) if i not in incard)
+    reused, shared = set(), set()
+    for i in sorted(incard):
+        if i >= len(uw) or uw[i] != dw[i]:
+            continue
+        t = uw[i] & 0x3ff
+        if art(uchr, t) == art(dchr, t):
+            continue
+        (shared if t in outside else reused).add(t)
+    for t in sorted(reused):
+        spans.append((t * CHR_BYTES_PER_TILE, art(dchr, t)))
+    if reused:
+        print("  %d cells kept their entry but the donor draws them "
+              "differently: tiles %s" % (len(reused),
+              " ".join("$%03X" % t for t in sorted(reused))))
+    if shared:
+        print("  %d such tiles left alone, shared with the screen outside the "
+              "cards: %s" % (len(shared),
+              " ".join("$%03X" % t for t in sorted(shared))))
     print("  %d cells translated, %d unchanged, %d left as US (art not in this "
           "packet)" % (taken, kept, skipped))
     print("  %d tiles of artwork copied from the donor" % len(spans))

@@ -4410,15 +4410,16 @@ old value.
 tests the X byte together with its flag bit, and the record ends there. Record
 `$10` is pointed at `$A41D`, immediately after the `$00` at `$A41C` that ends
 the `$A412` chunk -- which is how the one-byte length was confirmed, and it is
-also why the pool cannot grow past eighteen in place.
+also why the pool cannot grow past eighteen in place -- though it can be
+grown by moving `$10` out of the way, which a later section does.
 
 ### Translating the menu into any language
 
 Because each entry carries its own X, Y and tile word, the eighteen sprites
 are a free pool: any of them can be given to any line. The US split of
 4 / 7 / 7 is not fixed by anything, and that is what lifts the eight-character
-cap. Eighteen 16x16 sprites, two characters each, is **36 characters across
-the three lines**, in any split.
+cap. Eighteen 16x16 sprites, two characters each, is 36 characters across the
+three lines in any split, and **48** once the pool is grown to 24.
 
 They were located by signature rather than by following pointers: an entry
 stores X and Y as offsets from the caller's base (136, 116), so searching the
@@ -4476,3 +4477,98 @@ The live OAM also confirms the free bands directly, and more cheaply than the
 marker sweep did: the highest tile any sprite references on `$01`, `$02` or
 `$03` is `$13F`, the last tile of row 19. Rows 20-31 are unused on every
 screen that loads this artwork.
+
+### Growing the pool to 24, and the French import
+
+Eighteen sprites is enough for German. It is not enough for French: the
+French cartridge's own wording is `ENTRAINE-TOI` / `NOUVELLE CITE` /
+`CHOISIS SCENARIO`, unaccented, and it spends **20** sprites on it -- read
+straight off that cartridge by capturing its menu and matching each 8x16 cell
+against the font, which returns all three lines at a bit distance of zero.
+
+So the chain grows. `$0F` ends at `$A41C` only because record `$10` starts at
+`$A41D`, and `$10` is reached **only** through the table at `$00:A164`. A
+record's entries are self-contained -- x, y, tile, attribute, no internal
+pointers -- so its whole 61-byte chain copies verbatim into the bank-0 filler
+at `$00:FB4C` and the table entry at file `$002184` is repointed at the copy.
+That frees `$A41D` onward, and the chain becomes:
+
+| chunk | was | now |
+|---|---|---|
+| `$A3CE` | 8 sprites | 8 |
+| `$A3F0` | 8 sprites | 8 |
+| `$A412` | 2 + terminator | 8 |
+| `$A434` | record `$10` | flags word + terminator |
+
+**24 sprites, 48 characters.** The filler is the 1140 bytes of `$FF` ending at
+the cartridge header, and nothing else in this repo uses it: the one thing
+that ever wanted it, Truttle1's powered-cell patch, is implemented host-side
+here precisely so that no ROM space is needed.
+
+Record `$10` is the logo, which has broken this screen before, so the check is
+the strict one. Against a plain US run the patched menu differs in exactly 25
+OAM slots: the 24 pool sprites and the cursor arrow, which moves six slots
+later because `$0F` now emits six more sprites before it. Every other slot,
+the logo included, is byte-identical, and so is the whole of screens `$01` and
+`$02`.
+
+One trap the growth introduced. The sprites past the original eighteen sit on
+bytes that used to be record `$10`, so inheriting the attribute byte per
+sprite -- which worked while the pool was eighteen -- gives the last sprites of
+a long line the wrong palette. French would have drawn its final two sprites
+at attribute `$18` instead of `$30`. The pool takes one attribute, from the US
+line text, for all of it.
+
+#### A cell can need translating without its entry changing
+
+The donor is free to reuse a tile index for a different glyph, and it does.
+San Francisco's first disaster line is tiles `$0BE`..`$0C3` in both ROMs --
+`Earthquake` in the US one, `Tremblement` in the French one, at the same
+indices. Taking artwork only for cells whose tilemap ENTRY changed left that
+line in English while the second line, which the donor does move, came out
+French: the card read `Earthquake de terre`.
+
+So the artwork of an unchanged cell is taken too, but only inside the card
+rectangles, and only when no cell outside them shares the tile. The screen
+around the cards is left alone, and so is Sylt's card, which the host composes
+after this packet.
+
+German never showed this, because the German cartridge moves those cells to
+different indices: its count of reused tiles is zero. French has six.
+
+One thing the French cards do not get: Sylt's disaster line reads
+`Inondation` where Rio's reads `Inondation cotiere`. Sylt takes a single
+six-tile strip from the donor, which is a whole word in German
+(`Hochwasser`) and only the first line of two in French.
+
+#### Words are packed whole
+
+Both cartridges lay their lines out by word, not by character, and it is worth
+copying: a word of n letters takes ceil(n / 2) sprites, and an odd-length word
+leaves its last half blank, which *is* the space before the next word. Only
+after an even-length word does the space cost anything, and then it costs 8
+pixels of position rather than a sprite. `NOUVELLE CITE` is 6 sprites that
+way and 7 laid out densely.
+
+Checked against the French cartridge, which is the one that spends carefully:
+`NOUVELLE CITE` comes out at offsets 0 16 32 48 72 88, exactly its own, and
+`CHOISIS SCENARIO` within a pixel of its own.
+
+#### The French build
+
+```
+text_tool.py import  --donor "Sim City (F).sfc" --briefs --out translation_fr.bin
+text_tool.py packets --donor "Sim City (F).sfc" --hud \
+    --menu-text "ENTRAINE-TOI|NOUVELLE CITE|CHOISIS SCENARIO" \
+    --out translation_fr_selector.scpk
+```
+
+53 messages and 12 briefing pages, 90 scenario-card cells with none left in
+English, 78 building-label tiles and 87 repositioned placement sprites. It
+qualifies clean over 1200 frames, and all three menu lines read back out of
+live VRAM at a bit distance of zero.
+
+Verified in play: the menu. **Not** verified in play: the scenario cards and
+the building labels, which go through the same code as the German build the
+cards and labels were confirmed on, but have not themselves been looked at on
+a screen.
