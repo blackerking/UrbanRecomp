@@ -4272,3 +4272,36 @@ tile, run, and see whether anything on any screen changes.
 That is the outstanding blocker for composing menu text: not the font, not the
 record format, not the caller, all of which are now understood -- but knowing
 which tiles are genuinely spare.
+
+### The marker sweep: which artwork tiles are genuinely spare
+
+Scanning the record table cannot answer this -- it called rows 2-3 free and
+composing there broke `START NEW CITY`. The answer has to come from what is
+actually on screen.
+
+`SC_OAM_DUMP` on every screen that loads `$04A571`, taking the union of the
+tiles displayed (16x16 sprites expanded to their four tiles, parked and
+off-screen sprites excluded):
+
+| screen | distinct tiles displayed |
+|---|---|
+| `$01` title | 48 |
+| `$02` transition | 53 |
+| `$03` menu | 141 |
+| `$0f` in game | 7 |
+| **union** | **178 of 512** |
+
+Rows 20-31 appear on none of them. And this packet is only resident on the
+title and menu screens, so nothing outside that set can be looking at it
+either. Rows 30-31 are also blank in the artwork, which makes them the safest
+choice of the free bands.
+
+Composing `UBUNG` and `SZENARIO` there and repointing record `$0F` gives, in
+play, `> UBUNG` / `START NEW CITY` / `SELECT SZENARIO` -- the two translated
+lines correct and the third **intact**, which is the check the rows 2-3
+attempt failed.
+
+`text_tool.py packets --menu-text "UBUNG|SZENARIO"` does it. Eight characters
+a line: record `$0F` gives each line four 16x16 sprites and each sprite carries
+two characters. `UEBUNGSSPIEL` and `SCHAUPLAETZE` need six sprites apiece and
+do not fit without restructuring which record draws which line.

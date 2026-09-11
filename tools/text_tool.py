@@ -1137,6 +1137,48 @@ for _i, _ch in enumerate("QRSTUVWXYZ!?-."):
     MENU_FONT[_ch] = 2 * 16 + _i
 
 
+# Where composed text goes. Rows 30-31 of the artwork are blank AND never
+# referenced by any sprite on the title or menu screens -- and this packet is
+# only resident there, so nothing else can be looking at them. Established by
+# snapshotting OAM on every screen that loads it and taking the union of the
+# tiles actually displayed, NOT by scanning the record table: that scan called
+# rows 2-3 free and composing there broke START NEW CITY, which draws tile
+# $022 from a record the scan never reached.
+MENU_TEXT_BASE = 0x1E0
+MENU_REC_0F = 0xA3CE                     # SCENARIO (4 sprites) + PRACTICE (4)
+
+
+def menu_text_spans(us, art, practice, scenario):
+    """compose two menu lines into spare artwork and repoint record $0F
+
+    Record $0F draws four sprites of SCENARIO at y=160 and four of PRACTICE at
+    y=112 -- proved by setting its tile words to a marker and snapshotting.
+    Each sprite is 16x16 and carries two characters, so each line gets eight
+    characters. Returns (artwork spans, cart spans).
+    """
+    lay = practice.ljust(6) + scenario.ljust(8) + "  "
+    if len(lay) > 16:
+        sys.exit("menu text does not fit: %r + %r needs %d columns of 16"
+                 % (practice, scenario, len(lay)))
+    spans, missing = menu_compose(art, lay, MENU_TEXT_BASE)
+    if missing:
+        sys.exit("no glyph for %s -- the alphabet is A-Z ! ? - . only"
+                 % " ".join(missing))
+    for col in (14, 15):                 # the padding sprite must draw nothing
+        spans.append((MENU_TEXT_BASE + col, bytes(32)))
+        spans.append((MENU_TEXT_BASE + 16 + col, bytes(32)))
+    a = MENU_REC_0F - 0x8000
+    b = MENU_TEXT_BASE
+    order = [b + 12, b + 10, b + 8, b + 6, b + 14, b + 4, b + 2, b + 0]
+    cart = []
+    for i, t in enumerate(order):
+        attr = us[a + 5 + i * 4] & 0xfe
+        cart.append((a + 4 + i * 4, bytes([t & 0xff, ((t >> 8) & 1) | attr])))
+    print("  practice %r, scenario %r -> %d artwork tiles, %d record spans"
+          % (practice, scenario, len(spans), len(cart)))
+    return spans, cart
+
+
 def menu_glyph(art, ch):
     """(top 32 bytes, bottom 32 bytes) for one character, or None"""
     t = MENU_FONT.get(ch.upper())
@@ -1381,6 +1423,16 @@ def cmd_packets(a):
               % (off, toff, agree, len(d), len(d) - agree))
 
     blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
+    if a.menu_text:
+        practice, _, scenario = a.menu_text.partition("|")
+        art, _ = eg.nintendo_decompress(us, MENU_ART)
+        print("main menu text:")
+        art_spans, cart = menu_text_spans(us, art, practice.strip(),
+                                          scenario.strip())
+        extra.append((MENU_ART, len(art),
+                      [(t * 32, d) for t, d in art_spans]))
+        rom_spans += cart
+
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                (SELECTOR_CHR, len(uchr), spans),
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
@@ -1604,6 +1656,9 @@ def main():
     pc.add_argument("--out", required=True)
     pc.add_argument("--labels-from", metavar="PNG",
                     help="an edited building-label image (text_tool.py labels)")
+    pc.add_argument("--menu-text", metavar="PRACTICE|SCENARIO",
+                    help="compose two menu lines, 8 characters each, e.g. "
+                         "\"UBUNG|SZENARIO\"")
     pc.add_argument("--menu", action="store_true",
                     help="translate the main menu (needs --swap 0x04A571)")
     pc.add_argument("--hud", action="store_true",
