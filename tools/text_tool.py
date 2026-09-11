@@ -1549,9 +1549,49 @@ def find_twin(packets, want):
     return best
 
 
+def write_packets(path, entries):
+    """serialise the packet list and write it"""
+    blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
+    blob += len(entries).to_bytes(2, "little")
+    for src, outlen, sp in entries:
+        if src == SYLT_CARD_PSEUDO:
+            bank, addr = 0xff, 0xffff
+        elif src == ROM_SPAN_PSEUDO:
+            bank, addr = 0xfe, 0xffff
+        else:
+            bank, addr = src // 0x8000, 0x8000 + (src % 0x8000)
+        blob += bytes([bank]) + addr.to_bytes(2, "little")
+        blob += outlen.to_bytes(4, "little")
+        blob += len(sp).to_bytes(2, "little")
+        for off, data in sp:
+            blob += off.to_bytes(4, "little") + len(data).to_bytes(2, "little")
+            blob += data
+    open(path, "wb").write(blob)
+    print("  %d bytes -> %s" % (len(blob), path))
+
+
+def _packets_menu_only(a, us, eg):
+    """the menu alone, for a language with no cartridge to copy from"""
+    art, _ = eg.nintendo_decompress(us, MENU_ART)
+    field = [t.strip() for t in a.menu_text.split("|")]
+    print("main menu text:")
+    art_spans, cart = menu_lines_spans(us, art, dict(zip(MENU_LINE_Y, field)))
+    write_packets(a.out, [(MENU_ART, len(art),
+                           [(t * 32, d) for t, d in art_spans]),
+                          (ROM_SPAN_PSEUDO, 0, cart)])
+
+
 def cmd_packets(a):
     eg = _lz5()
     us = open(a.rom, "rb").read()
+    if not a.donor:
+        # No cartridge to lift artwork from. The menu is composed from the
+        # US artwork itself, so it still works; the scenario card names and
+        # the building labels stay English, because they are pictures.
+        for opt in ("hud", "menu", "rom_copy", "swap"):
+            if getattr(a, opt, None):
+                sys.exit("--%s needs --donor" % opt.replace("_", "-"))
+        return _packets_menu_only(a, us, eg)
     dn = open(a.donor, "rb").read()
     umap, _ = eg.nintendo_decompress(us, SELECTOR_MAP)
     uchr, _ = eg.nintendo_decompress(us, SELECTOR_CHR)
@@ -1722,7 +1762,6 @@ def cmd_packets(a):
         print("swap $%06X  <-  donor $%06X  (%d/%d bytes agree, %d differ)"
               % (off, toff, agree, len(d), len(d) - agree))
 
-    blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
     if a.menu_text:
         field = [t.strip() for t in a.menu_text.split("|")]
         if len(field) > len(MENU_LINE_Y):
@@ -1746,23 +1785,7 @@ def cmd_packets(a):
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
     if rom_spans:
         entries.append((ROM_SPAN_PSEUDO, 0, rom_spans))
-    blob += len(entries).to_bytes(2, "little")
-    for src, outlen, sp in entries:
-        if src == SYLT_CARD_PSEUDO:
-            bank, addr = 0xff, 0xffff
-        elif src == ROM_SPAN_PSEUDO:
-            bank, addr = 0xfe, 0xffff
-        else:
-            bank = src // 0x8000
-            addr = 0x8000 + (src % 0x8000)
-        blob += bytes([bank]) + addr.to_bytes(2, "little")
-        blob += outlen.to_bytes(4, "little")
-        blob += len(sp).to_bytes(2, "little")
-        for off, data in sp:
-            blob += off.to_bytes(4, "little") + len(data).to_bytes(2, "little")
-            blob += data
-    open(a.out, "wb").write(blob)
-    print("  %d bytes -> %s" % (len(blob), a.out))
+    write_packets(a.out, entries)
 
 
 
@@ -1892,6 +1915,147 @@ def label_spans(path, rom):
             spans.append((off, b))
     return spans
 
+# ── one file per language ─────────────────────────────────────────────────
+# Everything above translates from a donor CARTRIDGE, which is fine for the
+# four regions Nintendo shipped and useless for a fifth. `template` writes one
+# JSON holding every string the game draws as text, and `translate` turns an
+# edited one back into the pair the runtime loads: the message blob and the
+# packet patch.
+#
+# What is text and what is a picture matters here. The 53 messages, the 12
+# scenario briefings and the 3 menu lines are text and live in this file. The
+# scenario card names and the toolbar's building labels are pre-rendered
+# artwork -- they come from a donor cartridge (--donor) or from an edited PNG
+# (labels, see `labels`), and no amount of typing replaces them.
+MENU_US = ("PRACTICE", "START NEW CITY", "SELECT SCENARIO")
+
+
+def cmd_template(a):
+    src = getattr(a, "from") or a.us_rom
+    ver = detect_region(src)
+    recs = split_records(load_block(src, ver))
+    doc = {
+        "_readme": [
+            "One translation, one file. Edit the strings; leave the ids and",
+            "page numbers alone -- they are what maps each string back.",
+            "",
+            "menu: the three main-menu option lines, top to bottom. 48",
+            "characters across all three, and no line may run past the screen.",
+            "Accented letters are built on the fly, so write them normally.",
+            "",
+            "messages: the in-game message box. It renders into a fixed-width",
+            "box, so runs of spaces are LAYOUT, not padding to strip.",
+            "",
+            "briefings: the scenario briefing pages. title is %d characters,"
+            % BRIEF_TITLE_MAX,
+            "each body line %d." % BRIEF_BODY_MAX,
+            "",
+            "Build it with:",
+            "  python tools/text_tool.py translate --in FILE --out-prefix NAME",
+            "Add --donor ROM for the accented glyphs of the message font, the",
+            "scenario card names and (with --hud) the building labels.",
+        ],
+        "language": ver,
+        "menu": list(MENU_US),
+        "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
+        "briefings": [{"page": p["page"], "title": p["title"],
+                       "body": p["body"], "row": p["row"], "col": p["col"]}
+                      for p in _briefs_doc(src)["pages"]],
+    }
+    with open(a.out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    print("template from %s (%s): %d menu lines, %d messages, %d briefings "
+          "-> %s" % (os.path.basename(src), ver, len(doc["menu"]),
+                     len(doc["messages"]), len(doc["briefings"]), a.out))
+
+
+def _translate_briefs(doc, us_rom):
+    """the JSON's briefing pages -> the strings buffer make_blob() takes
+
+    Page numbers come from the file; the source ADDRESS each page is keyed by
+    comes from the US image, because that is what the runtime hook at $00:9106
+    recognises. Taking it from the file would key a donor-seeded template by
+    the donor's addresses.
+    """
+    us = _briefs_doc(us_rom)["pages"]
+    by_page = {q["page"]: q for q in doc.get("briefings", [])}
+    pages, bad = [], []
+    for q in us:
+        o = by_page.get(q["page"], q)
+        title, body = o.get("title", q["title"]), o.get("body", q["body"])
+        if len(title) > BRIEF_TITLE_MAX:
+            bad.append("page %d title is %d characters, the paper holds %d"
+                       % (q["page"], len(title), BRIEF_TITLE_MAX))
+        for line in body:
+            if len(line) > BRIEF_BODY_MAX:
+                bad.append("page %d line %r is %d characters, the paper holds "
+                           "%d" % (q["page"], line[:20], len(line),
+                                   BRIEF_BODY_MAX))
+        pages.append((q["src"], title, body,
+                      o.get("row", q["row"]), o.get("col", q["col"])))
+    if bad:
+        for m in bad[:10]:
+            print("  " + m, file=sys.stderr)
+        sys.exit("%d briefing line%s run off the paper"
+                 % (len(bad), "" if len(bad) == 1 else "s"))
+    buf = bytearray(len(pages).to_bytes(2, "little"))
+    for src, title, body, brow, bcol in pages:
+        buf += src.to_bytes(4, "little") + bytes([brow & 0xff, bcol & 0xff])
+        tb = title.encode("latin-1", "replace")[:BRIEF_TITLE_MAX]
+        buf += bytes([len(tb)]) + tb
+        buf += bytes([min(len(body), 255)])
+        for line in body[:255]:
+            lb = line.encode("latin-1", "replace")[:BRIEF_BODY_MAX]
+            buf += bytes([len(lb)]) + lb
+    return bytes(buf), len(pages)
+
+
+def cmd_translate(a):
+    doc = json.load(open(getattr(a, "in"), encoding="utf-8"))
+    lang = doc.get("language", "xx")
+    print("translating %s (%s)" % (os.path.basename(getattr(a, "in")), lang))
+
+    entries = sorted(doc["messages"], key=lambda e: e["id"])
+    if [e["id"] for e in entries] != list(range(len(entries))):
+        sys.exit("message ids must be 0..n-1 with none missing or repeated")
+    recs, bad = [], []
+    for e in entries:
+        try:
+            recs.append(from_text(e["text"]))
+        except UnicodeEncodeError as ex:
+            bad.append((e["id"], e["text"][ex.start:ex.end]))
+    if bad:
+        for i, ch in bad[:10]:
+            print("  message %d: no glyph for %r" % (i, ch), file=sys.stderr)
+        sys.exit("%d message%s use characters the game cannot draw. The "
+                 "accented ones need --donor, which lifts their glyphs out of "
+                 "a cartridge that has them."
+                 % (len(bad), "" if len(bad) == 1 else "s"))
+
+    strings, npages = _translate_briefs(doc, a.us_rom)
+    glyphs, sglyphs = [], []
+    if a.donor:
+        dv = detect_region(a.donor)
+        glyphs = accent_glyphs(a.donor, dv, a.us_rom)
+        sglyphs = scen_glyphs(a.donor, dv)
+    elif any(ord(c) > 126 for e in entries for c in e["text"]):
+        print("  note: no --donor, so the message font keeps the US glyphs")
+
+    blob = make_blob(recs, (), None, glyphs, strings, sglyphs, None, None)
+    open(a.out_prefix + ".bin", "wb").write(blob)
+    print("  %d messages, %d briefing pages, %d accent glyphs -> %s.bin"
+          % (len(recs), npages, len(glyphs), a.out_prefix))
+
+    menu = doc.get("menu") or list(MENU_US)
+    if len(menu) != len(MENU_LINE_Y):
+        sys.exit("menu needs exactly %d lines, top to bottom; the file has %d"
+                 % (len(MENU_LINE_Y), len(menu)))
+    ns = argparse.Namespace(
+        rom=a.us_rom, donor=a.donor, out=a.out_prefix + "_selector.scpk",
+        labels_from=a.labels_from, menu_text="|".join(menu), menu=False,
+        hud=a.hud, rom_copy=None, swap=None)
+    cmd_packets(ns)
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1960,7 +2124,9 @@ def main():
     pc.set_defaults(fn=cmd_packets)
     pc.add_argument("--rom", default="Sim City (U) [!].sfc",
                     help="the US image the patch targets")
-    pc.add_argument("--donor", required=True, help="a translated ROM")
+    pc.add_argument("--donor", help="a translated ROM, for the scenario card "
+                    "names and the building labels. Without it only the menu "
+                    "and any --rom-copy/--swap are written")
     pc.add_argument("--out", required=True)
     pc.add_argument("--labels-from", metavar="PNG",
                     help="an edited building-label image (text_tool.py labels)")
@@ -1981,6 +2147,27 @@ def main():
     pc.add_argument("--swap", action="append", metavar="ADDR",
                     help="take this whole US packet from the donor "
                          "(a file offset, e.g. 0x04A571); repeatable")
+    tp = sub.add_parser("template", help="one JSON holding every string")
+    tp.set_defaults(fn=cmd_template)
+    tp.add_argument("--out", required=True)
+    tp.add_argument("--from", metavar="ROM",
+                    help="seed the strings from this ROM (default: the US one)")
+    tp.add_argument("--us-rom", default="Sim City (U) [!].sfc")
+
+    tr = sub.add_parser("translate", help="an edited template -> a runnable "
+                        "blob and packet")
+    tr.set_defaults(fn=cmd_translate)
+    tr.add_argument("--in", required=True)
+    tr.add_argument("--out-prefix", required=True,
+                    help="writes PREFIX.bin and PREFIX_selector.scpk")
+    tr.add_argument("--us-rom", default="Sim City (U) [!].sfc")
+    tr.add_argument("--donor", help="lift the message font's accented glyphs "
+                    "and the scenario card names from this cartridge")
+    tr.add_argument("--hud", action="store_true",
+                    help="also take the building labels from the donor")
+    tr.add_argument("--labels-from", metavar="PNG",
+                    help="an edited building-label image (text_tool.py labels)")
+
     lb = sub.add_parser("labels", help="export the main map's building "
                                        "labels as an editable image")
     lb.set_defaults(fn=cmd_labels)
