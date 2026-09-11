@@ -1576,9 +1576,19 @@ def _packets_menu_only(a, us, eg):
     field = [t.strip() for t in a.menu_text.split("|")]
     print("main menu text:")
     art_spans, cart = menu_lines_spans(us, art, dict(zip(MENU_LINE_Y, field)))
+    cart += _msg_cols_spans(a)
     write_packets(a.out, [(MENU_ART, len(art),
                            [(t * 32, d) for t, d in art_spans]),
                           (ROM_SPAN_PSEUDO, 0, cart)])
+
+
+def _msg_cols_spans(a):
+    cols = getattr(a, "columns", None) or MSG_COLS_US
+    sp = msg_width_spans(cols)
+    if sp:
+        print("message box: %d characters a line, not the US %d "
+              "($01:E59F and $01:E5C3)" % (cols, MSG_COLS_US))
+    return sp
 
 
 def cmd_packets(a):
@@ -1593,6 +1603,13 @@ def cmd_packets(a):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
     dn = open(a.donor, "rb").read()
+    # The text this packet is paired with comes from the donor, so the line
+    # width it was written for does too. Defaulting to the donor's own is what
+    # keeps "Dr. Wrigh / tund Du mußt" from coming back by forgetting a flag.
+    if getattr(a, "columns", None) is None:
+        dv = detect_region(a.donor)
+        a.columns = detect_msg_cols(
+            [to_text(r) for r in split_records(load_block(a.donor, dv))])
     umap, _ = eg.nintendo_decompress(us, SELECTOR_MAP)
     uchr, _ = eg.nintendo_decompress(us, SELECTOR_CHR)
     pk = scan_packets(dn, eg, 4096)
@@ -1783,6 +1800,7 @@ def cmd_packets(a):
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                (SELECTOR_CHR, len(uchr), spans),
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
+    rom_spans += _msg_cols_spans(a)
     if rom_spans:
         entries.append((ROM_SPAN_PSEUDO, 0, rom_spans))
     write_packets(a.out, entries)
@@ -1915,6 +1933,64 @@ def label_spans(path, rom):
             spans.append((off, b))
     return spans
 
+# ── how wide the message box is ───────────────────────────────────────────
+# A message record is a flat grid, not a string with line breaks: the renderer
+# at $01:E59F writes a fixed number of characters, then skips to the next
+# tilemap row, and the runs of spaces in a record are what pads each line out
+# to the edge. So the width the text was WRITTEN for has to match the width the
+# renderer draws, or every line walks.
+#
+#   01:e59f  LDA #$0018 / STA $79        24 characters a line
+#   01:e5a7  LDA $0f0000,X ...           one character
+#   01:e5c1  DEC $79 / BNE               until the line is full
+#   01:e5c3  TYA / CLC / ADC #$0010      then skip 8 words to the next row
+#
+# 24 + 8 = 32 words, one tilemap row. The German and French cartridges run the
+# same routine with `LDA #$0019` and `ADC #$000E`: 25 + 7, the same 32 words.
+# US and EU are 24, French and German 25 -- measured, not assumed, by wrapping
+# every record at each candidate width and counting the boundaries that fall
+# inside a word.
+#
+# Importing German text into the US renderer without this gives exactly what
+# was reported from play: "Dr. Wrigh / tund Du mußt" -- each line one character
+# short, so the text slides further out of step with every row.
+MSG_COLS_AT = 0x00E5A0           # the operand of LDA #$0018 at $01:E59F
+MSG_GAP_AT = 0x00E5C4            # the operand of ADC #$0010 at $01:E5C3
+MSG_ROW_WORDS = 32               # a tilemap row, which the two must add up to
+MSG_COLS_US = 24
+
+
+def msg_width_spans(cols):
+    """cart spans setting the renderer's line width, or none if it is the US one"""
+    if cols == MSG_COLS_US:
+        return []
+    if not 8 <= cols <= MSG_ROW_WORDS:
+        sys.exit("a message line of %d characters cannot work: the tilemap row "
+                 "is %d tiles" % (cols, MSG_ROW_WORDS))
+    return [(MSG_COLS_AT, bytes([cols])),
+            (MSG_GAP_AT, bytes([(MSG_ROW_WORDS - cols) * 2]))]
+
+
+def detect_msg_cols(texts):
+    """the width a set of records was laid out for
+
+    Wrap each record at every candidate width and count the boundaries that
+    land inside a word. The right width leaves almost none: on the US records
+    24 scores 75 out of 496 and the next best is 161, and on the French ones
+    25 scores 4. The residue is line-end hyphens and the records that are not
+    prose at all.
+    """
+    best = None
+    for w in range(16, MSG_ROW_WORDS + 1):
+        bad = 0
+        for t in texts:
+            for i in range(w, len(t), w):
+                if t[i - 1] not in " -" and t[i] != " ":
+                    bad += 1
+        if best is None or bad < best[0]:
+            best = (bad, w)
+    return best[1]
+
 # ── one file per language ─────────────────────────────────────────────────
 # Everything above translates from a donor CARTRIDGE, which is fine for the
 # four regions Nintendo shipped and useless for a fifth. `template` writes one
@@ -1944,7 +2020,9 @@ def cmd_template(a):
             "Accented letters are built on the fly, so write them normally.",
             "",
             "messages: the in-game message box. It renders into a fixed-width",
-            "box, so runs of spaces are LAYOUT, not padding to strip.",
+            "box, so runs of spaces are LAYOUT, not padding to strip. Each",
+            "line is exactly \"columns\" characters, padding included, and the",
+            "renderer is set to that width when the build is made.",
             "",
             "briefings: the scenario briefing pages. title is %d characters,"
             % BRIEF_TITLE_MAX,
@@ -1956,6 +2034,7 @@ def cmd_template(a):
             "scenario card names and (with --hud) the building labels.",
         ],
         "language": ver,
+        "columns": detect_msg_cols([to_text(r) for r in recs]),
         "menu": list(MENU_US),
         "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
         "briefings": [{"page": p["page"], "title": p["title"],
@@ -2050,10 +2129,11 @@ def cmd_translate(a):
     if len(menu) != len(MENU_LINE_Y):
         sys.exit("menu needs exactly %d lines, top to bottom; the file has %d"
                  % (len(MENU_LINE_Y), len(menu)))
+    cols = doc.get("columns") or detect_msg_cols([e["text"] for e in entries])
     ns = argparse.Namespace(
         rom=a.us_rom, donor=a.donor, out=a.out_prefix + "_selector.scpk",
         labels_from=a.labels_from, menu_text="|".join(menu), menu=False,
-        hud=a.hud, rom_copy=None, swap=None)
+        hud=a.hud, rom_copy=None, swap=None, columns=cols)
     cmd_packets(ns)
 
 def main():
@@ -2144,6 +2224,11 @@ def main():
     pc.add_argument("--rom-copy", action="append", metavar="LO-HI",
                     help="lay the donor's bytes over this cart-image range; "
                          "repeatable")
+    pc.add_argument("--columns", type=int, metavar="N",
+                    help="the line width the message text is written for. The "
+                         "US renderer draws %d; German and French text is laid "
+                         "out for 25 and needs it said, or every line walks"
+                         % MSG_COLS_US)
     pc.add_argument("--swap", action="append", metavar="ADDR",
                     help="take this whole US packet from the donor "
                          "(a file offset, e.g. 0x04A571); repeatable")

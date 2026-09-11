@@ -4581,3 +4581,64 @@ sitting in the French sheet is harmless: tiles `$1B0`..`$1B5` are dead space
 in the French cartridge, which left the US bytes there, and no French
 placement record references them. German does reference them, and translates
 them -- which is the same six tiles the `$036200` truncation once lost.
+
+### The message box is 24 characters wide, and German text is written for 25
+
+Reported from play: the Dr. Wright intro came out as `Hallo! Ich bin Dr. Wrigh` /
+`tund Du mußt der neue` / `  Bürgermeister sein. Ha` -- every line one
+character short of the cartridge's, so the text slides further out of step
+with every row.
+
+A message record is a flat grid, not a string with line breaks. The renderer
+writes a fixed number of characters, then skips to the next tilemap row, and
+the runs of spaces inside a record are what pad each line out to the edge:
+
+```
+01:e592  LDA $0397 / ASL / TAX
+01:e597  LDA $0fa800,X / TAX          ; the message pointer
+01:e59f  LDA #$0018 / STA $79         ; 24 characters a line
+01:e5a4  LDA $0f0000,X / AND #$00ff   ; one character
+01:e5ab  CMP #$00ff / BEQ             ; $FF ends the record
+01:e5b0  ORA #$0800                   ; its tile attribute
+01:e5b5  STA $7e3948,X                ; into the tilemap shadow
+01:e5bd  DEC $79 / BNE                ; until the line is full
+01:e5c1  TYA / CLC / ADC #$0010 / TAY ; then skip 8 words to the next row
+01:e5c7  BRA                          ; and start another line
+```
+
+24 characters plus 8 words is 32 words, one tilemap row. The German and French
+cartridges run the same routine at the same address with `LDA #$0019` and
+`ADC #$000E`: 25 plus 7, the same 32 words.
+
+| region | columns | skip |
+|---|---|---|
+| US, EU | 24 | `$0010` |
+| French, German | 25 | `$000E` |
+
+Measured as well as read, because a table like that is worth checking: wrap
+every record at each candidate width and count the boundaries that fall inside
+a word. On the US records 24 scores 75 of 496 and the next best is 161; on the
+French ones 25 scores 4 of 491. The residue is line-end hyphens and the
+records that are not prose.
+
+So the fix is two operand bytes, carried as ordinary cart spans in the packet:
+`$01:E5A0` and `$01:E5C4`. `--columns N` sets it, and on the donor path it
+**defaults to the donor's own measured width**, since the text this packet is
+paired with came from that donor. Forgetting a flag is how this would come
+back.
+
+The German record 27 wrapped at 24 reproduces the broken screenshot character
+for character, and at 25 reproduces the cartridge's own line breaks:
+
+```
+Hallo! Ich bin Dr. Wright     Hallo! Ich bin Dr. Wrigh
+und Du mußt der neue          tund Du mußt der neue
+Bürgermeister sein. Hab'        Bürgermeister sein. Ha
+ich recht? Laß uns doch       b' ich recht? Laß uns do
+        at 25                          at 24
+```
+
+Reflowing the text to 24 instead was the alternative and is worse: it would
+have to guess which line-end hyphens are soft (`Ver-` + `binde` is one word,
+`Wohn-` before `und` is not), and it adds a line per paragraph to a box of
+fixed height.
