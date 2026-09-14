@@ -6,6 +6,12 @@ the same general-purpose 65816-to-C framework used by
 other snesrecomp game repositories. This repository is ROM-free: you must
 supply your own legally obtained copy.
 
+**Adaptive Widescreen branch:** the shared Mods launcher now offers Fit to
+window, Fit height, Fit width, and 4:3 through 32:9 presets while keeping the
+full original view visible. See [build/run instructions and renderer scope](docs/ADAPTIVE_RENDERER.md)
+and [the shared-engine dependency audit](docs/DEPENDENCY_AUDIT.md). The audit
+also describes the experimental AOT migration needed with this engine pin.
+
 **Just want to build and play it?** See [SETUP.md](SETUP.md) for a
 Windows/Linux quick-start. Contributors should read
 [CONTRIBUTING.md](CONTRIBUTING.md) instead. For a consolidated map of

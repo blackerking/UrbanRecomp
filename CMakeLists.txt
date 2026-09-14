@@ -12,6 +12,11 @@ set(SNESRECOMP_ROOT "${CMAKE_SOURCE_DIR}/snesrecomp" CACHE PATH
 
 include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 
+set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH
+    "Shared Mods launcher checkout")
+set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL "SimCity presentation mods" FORCE)
+include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+
 # Phase-1 bring-up (see README.md and src/main.c): SimCity runs entirely on
 # the shared LLE interpreter tier (standalone interp816 over the device
 # models), NOT the AOT/CpuState hybrid runtime. `bash tools/regen.sh` already
@@ -35,6 +40,10 @@ endif()
 add_executable(SimCitySNESRecomp
     src/main.c
     src/simcity_mapview.c
+    src/sc_lle_adapter.c
+    src/sc_video.c
+    src/sc_mods.c
+    src/sc_renderer.c
 )
 
 target_include_directories(SimCitySNESRecomp PRIVATE
@@ -66,6 +75,7 @@ set(SIMCITY_DEVICE_SOURCES
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu.c
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu_legacy.c
     ${SNESRECOMP_ROOT}/runner/src/snes/sa1.c
+    ${SNESRECOMP_ROOT}/runner/src/snes/sdd1.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes_other.c
     ${SNESRECOMP_ROOT}/runner/src/snes/spc.c
@@ -101,6 +111,28 @@ endif()
 # dump (SC_DUMP_AT / write_ppm) is unaffected and is the reliable check --
 # it is byte-identical between the two backends.
 snesrecomp_target_sdl(SimCitySNESRecomp)
+recomp_target_launcher_ui(SimCitySNESRecomp CONSOLE snes)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(sc_video_test tests/sc_video_test.c src/sc_video.c src/sc_mods.c)
+    target_include_directories(sc_video_test PRIVATE src ${RECOMP_UI_ROOT}/src)
+    add_test(NAME simcity_video COMMAND sc_video_test ${CMAKE_CURRENT_BINARY_DIR}/sc-test-video.ini)
+    add_executable(sc_renderer_test tests/sc_renderer_test.c src/sc_renderer.c src/sc_video.c)
+    target_include_directories(sc_renderer_test PRIVATE src ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
+    add_test(NAME simcity_renderer COMMAND sc_renderer_test)
+    foreach(test sc_video_test sc_renderer_test)
+        if(MSVC)
+            target_compile_options(${test} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test} PRIVATE -UNDEBUG -Wall -Wextra)
+            target_link_libraries(${test} PRIVATE m)
+            if(MINGW)
+                target_link_options(${test} PRIVATE -static)
+            endif()
+        endif()
+    endforeach()
+endif()
 
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
 #
@@ -173,6 +205,9 @@ endif()
 if(SIMCITY_GEN_SOURCES)
     add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
         src/main.c
+        src/simcity_mapview.c
+        src/sc_video.c
+        src/sc_renderer.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c
         src/simcity_fiber.c

@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <stddef.h>
 
 /* Shared SDL2/SDL3 include boundary. SNESRECOMP_SDL3 is set by
  * snesrecomp_target_sdl() in CMakeLists.txt; the shim pulls in the right
@@ -29,6 +30,10 @@
  * explicitly at their call sites -- see runner/src/desktop/mmx23_host_main.inc
  * for how upstream does each one. */
 #include "sc_sdl_compat.h"
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 /* SDL3 switched the renderer rect APIs from SDL_Rect (int) to SDL_FRect
  * (float). SDL_ENABLE_OLD_NAMES preserves the NAMES but not the signatures,
  * so passing an SDL_Rect* to SDL_RenderFillRect under SDL3 reinterprets four
@@ -85,6 +90,17 @@ uint8_t    g_ram[0x20000];
  * returned false was observed as true, and the US-only gate silently passed on
  * a German ROM. It compiled and linked without a word. */
 #include "simcity_mapview.h"
+#include "sc_lle_adapter.h"
+#include "sc_renderer.h"
+#ifdef RECOMP_LAUNCHER
+#include "sc_mods.h"
+#endif
+static ScVideoSettings s_custom_video;
+static ScRenderer s_custom_renderer;
+static const char *s_video_config = "sc-video.ini";
+static int s_window_width = 1024, s_window_height = 768;
+static ScVideoRect s_destination;
+static bool s_fullscreen, s_linear_filter;
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -561,7 +577,11 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
       s_gfx_trace_hits++;
     }
   }
+#ifdef SIMCITY_AOT_TIER
   snes_write(g_snes, adr, v);
+#else
+  ScLleWrite(adr, v);
+#endif
 }
 
 /* SPC cycles per master clock (LakeSnes: (32040*32)/(1364*262*60)). */
@@ -864,6 +884,9 @@ static void handle_pos_stuff(void) {
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
       ppu_runLine(g_ppu, snes->vPos);
+      if (s_custom_video.enabled && snes->vPos > 0 && snes->vPos <= 224)
+        ScRendererLine(&s_custom_renderer, g_ppu, g_ram, snes->vPos - 1,
+          (const uint32_t *)(s_video_pixels + (size_t)(snes->vPos - 1) * s_video_pitch));
       if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0 &&
           snes->vPos <= kVideoHeight) {
         const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
@@ -2006,6 +2029,9 @@ static bool run_one_frame(void) {
     int cyc = interp816_runOpcode(cpu);
     if (cyc <= 0) cyc = 1;
     int master = cyc * 8;
+#ifndef SIMCITY_AOT_TIER
+    master += (int)ScLleTakeDmaCycles();
+#endif
     g_master_cycles += (uint64_t)master;
     for (int i = 0; i < master; i += 2) handle_pos_stuff();
     snes->apuCatchupCycles += (double)master * kApuCyclesPerMaster;
@@ -2637,10 +2663,13 @@ static bool write_ppm(const char *path) {
   /* Row-wise at the ACTIVE width, using the buffer's real stride. The buffer
    * is allocated for the widescreen maximum, so a flat index over
    * s_video_w * height would walk diagonally through it. */
-  fprintf(f, "P6\n%d %d\n255\n", s_video_w, kVideoHeight);
-  for (int y = 0; y < kVideoHeight; y++) {
-    const uint32_t *row = (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-    for (int x = 0; x < s_video_w; x++) {
+  int width = s_custom_video.enabled ? s_custom_renderer.view.width : s_video_w;
+  int height = s_custom_video.enabled ? s_custom_renderer.view.height : kVideoHeight;
+  fprintf(f, "P6\n%d %d\n255\n", width, height);
+  for (int y = 0; y < height; y++) {
+    const uint32_t *row = s_custom_video.enabled ? s_custom_renderer.pixels + (size_t)y * width :
+      (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    for (int x = 0; x < width; x++) {
       uint8_t rgb[3] = { (uint8_t)(row[x] >> 16), (uint8_t)(row[x] >> 8), (uint8_t)row[x] };
       if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); return false; }
     }
@@ -2765,6 +2794,13 @@ static void file_sli_read(SaveLoadInfo *sli, void *data, size_t n) {
   if (fs->ok && fread(data, 1, n, fs->f) != n) fs->ok = false;
 }
 
+/* The shared PPU snapshot contains picture registers and memories, but omits
+ * its CPU-port latches. In particular, losing VMAIN's increment-on-high bit
+ * shifts subsequent tile/palette uploads after a load. Keep that native-layout
+ * bus region and our host clock/HDMA walker alongside the machine snapshot.
+ * These files, like the underlying snapshot, are local to this engine build. */
+enum { kScPpuBusBytes = offsetof(Ppu, extraLeftCur) - offsetof(Ppu, vramPointer) };
+static const uint32_t kScStateHeader[] = {0x54534353, 1, kScPpuBusBytes, sizeof(s_hdma)};
 static bool save_state(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) return false;
@@ -2772,9 +2808,13 @@ static bool save_state(const char *path) {
   fs.base.func = file_sli_write;
   fs.f = f;
   fs.ok = true;
+  file_sli_write(&fs.base, (void *)kScStateHeader, sizeof(kScStateHeader));
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
+  fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
+  fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
   bool ok = fs.ok;
   return fclose(f) == 0 && ok;
 }
@@ -2782,6 +2822,12 @@ static bool save_state(const char *path) {
 static bool load_state(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return false;
+  uint32_t header[4];
+  if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
+      memcmp(header, kScStateHeader, sizeof(header))) {
+    fprintf(stderr, "state: incompatible format; create a new state with this build\n");
+    fclose(f); return false;
+  }
   FileSli fs;
   fs.base.func = file_sli_read;
   fs.f = f;
@@ -2789,6 +2835,10 @@ static bool load_state(const char *path) {
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
+  fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
+  fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
+  g_ppu->lastBrightnessMult = 0xff; /* rebuild derived color lookup tables */
   bool ok = fs.ok;
   fclose(f);
   return ok;
@@ -4101,6 +4151,8 @@ static int run_qualification(uint64_t frames) {
   uint64_t last_ram_hash = 0, last_video_hash = 0;
   uint32_t last_sample_write = 0;
   int16_t audio_buf[1024 * 2];
+  FILE *state_trace = NULL;
+  { const char *p = getenv("SC_STATE_TRACE"); if (p) state_trace = fopen(p, "w"); }
 
   uint64_t stall_run = 0, stall_max = 0;
   for (uint64_t f = 0; f < frames; f++) {
@@ -4117,6 +4169,12 @@ static int run_qualification(uint64_t frames) {
     if (f > 1 && h != last_ram_hash) { logic_changes++; stall_run = 0; }
     else if (f > 1) { stall_run++; if (stall_run > stall_max) stall_max = stall_run; }
     last_ram_hash = h;
+    if (state_trace) fprintf(state_trace, "%llu %016llx %02x%04x %04x %04x %04x %04x %02x %llu\n",
+      (unsigned long long)f, (unsigned long long)h, g_cpu->k, g_cpu->pc,
+      g_cpu->a, g_cpu->x, g_cpu->y, g_cpu->sp, interp816_getFlags(g_cpu),
+      (unsigned long long)g_master_cycles);
+    { const char *at = getenv("SC_SAVE_AT"), *path = getenv("SC_SAVE_PATH");
+      if (at && path && f == strtoull(at, NULL, 0)) save_state(path); }
     static int s_dbg_interval = -1;
     if (s_dbg_interval < 0) {
       const char *e = getenv("SC_DEBUG");
@@ -4321,10 +4379,18 @@ static int run_qualification(uint64_t frames) {
       fprintf(stderr, write_sram_dump(p) ? "dumped SRAM to %s\n"
                                          : "failed to write SRAM dump to %s\n", p);
     } }
+  if (state_trace) fclose(state_trace);
   return rc;
 }
 
 int main(int argc, char **argv) {
+  for (int i = 1; i + 1 < argc; ++i)
+    if (!strcmp(argv[i], "--video-config")) s_video_config = argv[++i];
+  if (!ScVideoLoad(&s_custom_video, s_video_config)) {
+    fprintf(stderr, "Invalid widescreen settings: %s\n", s_video_config); return 2;
+  }
+  bool show_mods = argc == 1;
+  bool explicit_size = false;
   /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
    *
    * All five regions are 512KB and all five pass --qualify 600 unchanged on
@@ -4337,6 +4403,16 @@ int main(int argc, char **argv) {
    * carry decorations ("[!]") that vary by dump. An explicit ROM argument
    * always wins over SC_LANG. */
   const char *rom_path = "simcity.sfc";
+  char remembered_rom[1024] = {0};
+  { FILE *f = fopen("rom.cfg", "r");
+    if (f) {
+      if (fgets(remembered_rom,sizeof(remembered_rom),f)) {
+        remembered_rom[strcspn(remembered_rom,"\r\n")]=0;
+        if (remembered_rom[0]) rom_path=remembered_rom;
+      }
+      fclose(f);
+    }
+  }
   { const char *lang = getenv("SC_LANG");
     if (lang && *lang) {
       static const struct { char code; const char *names[3]; } kRoms[] = {
@@ -4466,7 +4542,34 @@ int main(int argc, char **argv) {
   { const char *e = getenv("SC_DEBUG_CODE_AT");
     if (e && *e) queue_debug_menu_code(strtoull(e, NULL, 0)); }
   for (int i = 1; i < argc; i++) {
-    if (!strcmp(argv[i], "--qualify") && i + 1 < argc) {
+    if (!strcmp(argv[i], "--video-config") && i + 1 < argc) { ++i;
+    } else if (!strcmp(argv[i], "--help")) {
+      puts("SimCitySNESRecomp [ROM] [--mods] [--widescreen | --no-widescreen]\n"
+           "  --aspect Fit|Height|Width|4:3|8:7|16:10|16:9|21:9|32:9\n"
+           "  --view-position Center|TopLeft  --window-size WIDTHxHEIGHT\n"
+           "  --video-config FILE  --fullscreen  --scale N\n"
+           "  --qualify FRAMES  --load-state FILE  --input FRAME:DURATION:HEX_MASK\n"
+           "F11: fullscreen. F10: game settings. No arguments: Mods launcher.");
+      return 0;
+    } else if (!strcmp(argv[i], "--fullscreen")) { s_fullscreen=true;
+    } else if (!strcmp(argv[i], "--mods")) { show_mods = true;
+    } else if (!strcmp(argv[i], "--widescreen")) { s_custom_video.enabled = true;
+    } else if (!strcmp(argv[i], "--no-widescreen")) { s_custom_video.enabled = false;
+    } else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
+      if (!ScParseAspect(argv[++i], &s_custom_video.aspect)) {
+        fprintf(stderr, "Unknown view size: %s\n", argv[i]); return 2;
+      }
+    } else if (!strcmp(argv[i], "--view-position") && i + 1 < argc) {
+      const char *v = argv[++i];
+      if (strcmp(v,"Center") && strcmp(v,"TopLeft")) return 2;
+      s_custom_video.centered = !strcmp(v,"Center");
+    } else if (!strcmp(argv[i], "--window-size") && i + 1 < argc) {
+      explicit_size=true;
+      char tail;
+      if (sscanf(argv[++i], "%dx%d%c", &s_window_width, &s_window_height, &tail) != 2 ||
+          s_window_width < 64 || s_window_height < 64 || s_window_width > 16384 || s_window_height > 16384)
+        return 2;
+    } else if (!strcmp(argv[i], "--qualify") && i + 1 < argc) {
       qualify_frames = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
       scale = atoi(argv[++i]);
@@ -4487,6 +4590,47 @@ int main(int argc, char **argv) {
     }
   }
 
+  char launcher_rom[1024] = {0};
+#ifdef RECOMP_LAUNCHER
+  if (show_mods && !qualify_frames) {
+    RecompLauncherCSettings settings = {0};
+    RecompLauncherCGameInfo game = {0};
+    static const uint8_t rom_hash[1][32] = {{
+      0xe9,0xc0,0xbc,0x05,0x51,0x1e,0x05,0xa0,0xd7,0xc3,0xe7,0xcc,0x42,0xe7,0x61,0xe1,
+      0xe8,0xe5,0x32,0xd4,0x6f,0x59,0xb9,0x85,0x4b,0x69,0x02,0xe1,0xa2,0xe9,0xdd,0x0a}};
+    game.name = "SimCity"; game.region = "SNES"; game.platform = "SUPER NINTENDO";
+    game.num_players = 1; game.mods = ScModsProvider(&s_custom_video, s_video_config);
+    game.known_sha256=rom_hash; game.num_known_sha256=1;
+    game.expected_crc=0x8aedd3a1u; game.has_expected_crc=1;
+    game.lock_device=1; /* Input remains the game's existing keyboard/mouse controls. */
+    settings.window_scale = scale; settings.audio_freq = 48000;
+#if SNESRECOMP_SDL3
+    const char *base = SDL_GetBasePath();
+#else
+    char *base = SDL_GetBasePath();
+#endif
+    int result = recomp_launcher_run_window("SimCity - Mods", &settings, &game,
+      base ? base : ".", rom_path, launcher_rom, sizeof(launcher_rom));
+#if !SNESRECOMP_SDL3
+    SDL_free(base);
+#endif
+    if (result == RECOMP_LAUNCHER_RESULT_QUIT) return 0;
+    if (result != RECOMP_LAUNCHER_RESULT_LAUNCH || !launcher_rom[0]) {
+      fprintf(stderr,"Unable to open the Mods launcher.\n"); return 1;
+    }
+    rom_path = launcher_rom;
+    scale=settings.window_scale>0 ? settings.window_scale : scale;
+    s_fullscreen=settings.fullscreen!=0;
+    s_linear_filter=settings.linear_filter!=0;
+    { FILE *f=fopen("rom.cfg","w"); if (f) { fprintf(f,"%s\n",rom_path); fclose(f); } }
+  }
+#endif
+  if (!explicit_size) {
+    s_window_height=224*scale;
+    ScViewport initial=ScVideoViewport(&s_custom_video,1280,720);
+    s_window_width=(int)(s_window_height*initial.width*initial.pixel_aspect/initial.height+.5);
+    if (s_window_width>1600) { s_window_height=s_window_height*1600/s_window_width; s_window_width=1600; }
+  }
   uint32_t rom_size = 0;
   uint8_t *rom_data = read_file(rom_path, &rom_size);
   s_rom_data = rom_data; s_rom_size = rom_size;
@@ -4751,6 +4895,10 @@ int main(int argc, char **argv) {
     if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_mapgen_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
     if (e && *e && *e != '0') s_host_map = true; }
+  if (s_custom_video.enabled) {
+    /* The custom mod owns a separate canvas; guest raster stays native. */
+    s_ws_extra = 0; s_host_map = false;
+  }
   if (s_ws_extra > 0) {
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
@@ -4762,6 +4910,12 @@ int main(int argc, char **argv) {
   }
   PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
   host_map_init();
+  ScRendererInit(&s_custom_renderer, g_snes->cart->rom, rom_size, s_rom_is_us);
+  if (!ScRendererResize(&s_custom_renderer,
+        ScVideoViewport(&s_custom_video, s_window_width, s_window_height))) return 1;
+  if (s_custom_video.enabled) fprintf(stderr,"custom renderer: %s, %dx%d, core %d,%d\n",
+    ScAspectName(s_custom_video.aspect), s_custom_renderer.view.width, s_custom_renderer.view.height,
+    s_custom_renderer.view.core_x, s_custom_renderer.view.core_y);
 
   g_cpu = interp816_init(NULL, bus_read, bus_write);
   interp816_reset(g_cpu);
@@ -4800,7 +4954,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   SDL_Window *window = snesrecomp_sdl_create_window(
-      "SimCitySNESRecomp", s_video_w * scale, kVideoHeight * scale, 0);
+      "SimCitySNESRecomp", s_window_width, s_window_height,
+      SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
@@ -4815,7 +4970,8 @@ int main(int argc, char **argv) {
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-      s_video_w, kVideoHeight);
+      s_custom_video.enabled ? s_custom_renderer.view.width : s_video_w,
+      s_custom_video.enabled ? s_custom_renderer.view.height : kVideoHeight);
 
   /* The framebuffer is ARGB8888 but the PPU never writes an alpha byte, so
    * every pixel carries A=0. Under SDL2 that was harmless: a texture defaults
@@ -4823,6 +4979,7 @@ int main(int argc, char **argv) {
    * to blending, so A=0 renders it fully transparent -- a black window, with a
    * frame loop, blit and present that all report success. Pin the mode. */
   SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
+  snesrecomp_sdl_set_texture_linear(texture,s_linear_filter);
 
   /* Queued (pushed) audio, not a pull callback: this host owns the DSP drain
    * loop and hands over finished samples. SDL3 removed SDL_QueueAudio and
@@ -4858,6 +5015,15 @@ int main(int argc, char **argv) {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) quit = true;
+      if (getenv("SC_SCRIPTED_INPUT")) continue; /* owned UI regression window */
+      if (ev.type == SDL_KEYDOWN && !ev.key.repeat && SC_EVENT_SCANCODE(ev)==SDL_SCANCODE_F11) {
+        s_fullscreen=!s_fullscreen;
+#if SNESRECOMP_SDL3
+        SDL_SetWindowFullscreen(window,s_fullscreen);
+#else
+        SDL_SetWindowFullscreen(window,s_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+#endif
+      }
       if (ev.type == SDL_KEYDOWN && SNESRECOMP_SDL_EVENT_KEY(ev) == SDLK_ESCAPE) quit = true;
       if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F1) {
         if (s_pc_bitmap_bank != -1) {
@@ -5034,8 +5200,33 @@ int main(int argc, char **argv) {
         }
       }
     }
-    const uint8_t *keys = SDL_GetKeyboardState(NULL);
-    if (s_mouse_enabled) {
+    int drawable_w = 0, drawable_h = 0;
+    SDL_GetRendererOutputSize(renderer, &drawable_w, &drawable_h);
+    ScViewport viewport = ScVideoViewport(&s_custom_video, drawable_w, drawable_h);
+    /* A paused frame is retained until simulation resumes, including while
+     * resizing its window. Never clear the paused picture for a new canvas. */
+    if (s_menu_open && s_custom_video.enabled) viewport=s_custom_renderer.view;
+    if (s_custom_video.enabled &&
+        (viewport.width != s_custom_renderer.view.width || viewport.height != s_custom_renderer.view.height)) {
+      SDL_Texture *replacement = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING, viewport.width, viewport.height);
+      if (!replacement || !ScRendererResize(&s_custom_renderer, viewport)) {
+        if (replacement) SDL_DestroyTexture(replacement);
+        fprintf(stderr,"Unable to resize widescreen surface: %s\n",SDL_GetError());
+        quit = true; continue;
+      }
+      SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
+      snesrecomp_sdl_set_texture_linear(replacement, s_linear_filter);
+      SDL_DestroyTexture(texture); texture = replacement;
+      fprintf(stderr,"custom resize: %dx%d -> %dx%d core %d,%d\n",drawable_w,drawable_h,
+        viewport.width,viewport.height,viewport.core_x,viewport.core_y);
+    }
+    s_destination = ScVideoDestination(viewport, drawable_w, drawable_h);
+    const uint8_t *keys = snesrecomp_sdl_get_keyboard_state();
+    bool scripted_input = getenv("SC_SCRIPTED_INPUT") != NULL;
+    static const uint8_t empty_keys[512] = {0};
+    if (scripted_input) keys = empty_keys;
+    if (s_mouse_enabled && !scripted_input) {
       /* SDL reports the pointer delta in HOST SCREEN pixels; the cursor lives
        * in SNES pixels. Feeding one straight into the other made the cursor
        * move `scale` times too fast -- 3x at the default window size. Reported
@@ -5071,8 +5262,12 @@ int main(int argc, char **argv) {
 #else
         SDL_GetRendererOutputSize(renderer, &ow, &oh);
 #endif
-        double sx = ow > 0 ? (double)ow / (double)s_video_w  : (double)scale;
-        double sy = oh > 0 ? (double)oh / (double)kVideoHeight : (double)scale;
+        int window_w = 0, window_h = 0;
+        SDL_GetWindowSize(window, &window_w, &window_h);
+        double dpi_x = window_w > 0 ? (double)ow / window_w : 1;
+        double dpi_y = window_h > 0 ? (double)oh / window_h : 1;
+        double sx = s_destination.w > 0 ? (double)s_destination.w / viewport.width / dpi_x : scale;
+        double sy = s_destination.h > 0 ? (double)s_destination.h / viewport.height / dpi_y : scale;
         if (sx < 1.0) sx = 1.0;
         if (sy < 1.0) sy = 1.0;
         const double sens = (double)s_mouse_sensitivity / 100.0;
@@ -5226,7 +5421,7 @@ int main(int argc, char **argv) {
      * SNES D-pad and Start bindings. The game is frozen so nothing acts on
      * them immediately, but whatever is held on the frame the menu closes
      * would otherwise leak straight through as a real button press. */
-    if (s_menu_open) input = 0;
+    if (s_menu_open || scripted_input) input = 0;
     apply_frame_input(s_frames);
     apply_freezes();
     g_snes->input1_currentState |= input;
@@ -5424,14 +5619,38 @@ int main(int argc, char **argv) {
      * runtime value -- copying sizeof() of it into a narrower texture would
      * both overrun the destination and misalign every row. */
     if (_lok && pixels) {
-      const int row_bytes = s_video_w * 4;
-      for (int y = 0; y < kVideoHeight; y++)
+      const int width = s_custom_video.enabled ? s_custom_renderer.view.width : s_video_w;
+      const int height = s_custom_video.enabled ? s_custom_renderer.view.height : kVideoHeight;
+      const int row_bytes = width * 4;
+      for (int y = 0; y < height; y++)
         memcpy((uint8_t *)pixels + (size_t)y * pitch,
-               s_video_pixels + (size_t)y * s_video_pitch, (size_t)row_bytes);
+          s_custom_video.enabled ? (const uint8_t *)(s_custom_renderer.pixels + (size_t)y * width) :
+          s_video_pixels + (size_t)y * s_video_pitch, (size_t)row_bytes);
     }
-    SDL_UnlockTexture(texture);
+    if (_lok) SDL_UnlockTexture(texture);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
-    bool _cok = SDL_RenderCopy(renderer, texture, NULL, NULL) SC_SDL_OK;
+    ScRect dest = SC_RECT(s_destination.x, s_destination.y, s_destination.w, s_destination.h);
+    bool _cok = SDL_RenderCopy(renderer, texture, NULL, &dest) SC_SDL_OK;
+    /* Validation hook: publish only complete presented frames, atomically.
+     * No guest work is performed for a capture, including during resizing. */
+    if (s_custom_video.enabled) {
+      const char *capture=getenv("SC_LIVE_CAPTURE");
+      static int last_w,last_h;
+      if (capture && (last_w!=viewport.width || last_h!=viewport.height)) {
+        char path[1024], temp[1024];
+        snprintf(path,sizeof(path),"%s-%dx%d.ppm",capture,viewport.width,viewport.height);
+        snprintf(temp,sizeof(temp),"%s.tmp",path);
+        if (write_ppm(temp)) {
+#ifdef _WIN32
+          MoveFileExA(temp,path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+#else
+          rename(temp,path);
+#endif
+        }
+        last_w=viewport.width; last_h=viewport.height;
+      }
+    }
     { static int diag = -1;
       if (diag < 0) diag = getenv("SC_SDL_DIAG") ? 0 : 99;
       if (diag < 99 && (s_frames % 60) == 0) {
@@ -5520,6 +5739,7 @@ int main(int argc, char **argv) {
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
+  ScRendererDestroy(&s_custom_renderer);
   write_pc_bitmap_dump();
   write_map_trace_summary();
   { const char *p = getenv("SC_WRAM_MAP"); if (s_wram_map && p) write_wram_map(p); }
