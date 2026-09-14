@@ -228,21 +228,48 @@ def font_raw(rom_path, version):
     return raw, cfg["ascii_offset"]
 
 
-def accent_glyphs(donor_rom, donor, us_rom):
-    """(code, 16 raw bytes) for each accent the donor draws and we lack."""
+# Where the accent glyphs go in the US message font.
+#
+# They used to go at their CP437 codes, $81..$9B, on the grounds that the US
+# message records never use those. That is true and not enough: the in-city
+# notice table in bank 01 ($01:9824..$01:9C9C -- "More Residential zones
+# needed", "Save completed.") draws from the same font with every character
+# stored as its code plus $60, so that table's space, punctuation and digits
+# ARE $80..$9F. An accent written over $8E turned its full stop into an
+# accented letter, reported from play as "Save completed" ending in a wrong
+# character, and the same collision hit "!", ",", "3", "4" and "7".
+#
+# Tiles $E0..$FE are blank in the US font and used by neither the messages
+# nor that table, so the accents go there, in order, and the translated
+# records are rewritten to point at them.
+ACCENT_SLOT_BASE = 0xE0
+
+
+def _accent_pairs(donor_rom, donor):
+    """(code, 16 raw bytes) for each accent the donor's font actually draws"""
     dn, dn_off = font_raw(donor_rom, donor)
-    us, us_off = font_raw(us_rom, TARGET)
     out = []
     for code in ACCENT_CODES:
         di = code - dn_off
-        ui = code - us_off
         if (di + 1) * FONT_RAW_TILE > len(dn):
             continue
         glyph = dn[di * FONT_RAW_TILE:(di + 1) * FONT_RAW_TILE]
-        if glyph == bytes(FONT_RAW_TILE):
-            continue                      # donor has nothing there either
-        out.append((ui, glyph))
+        if glyph != bytes(FONT_RAW_TILE):
+            out.append((code, glyph))
     return out
+
+
+def accent_glyphs(donor_rom, donor, us_rom):
+    """(font slot, 16 raw bytes) for each accent, in the free slots from $E0"""
+    return [(ACCENT_SLOT_BASE + k, g)
+            for k, (_, g) in enumerate(_accent_pairs(donor_rom, donor))]
+
+
+def remap_accents(recs, donor_rom, donor):
+    """message records with every accent code pointed at its new font slot"""
+    table = dict((code, ACCENT_SLOT_BASE + k)
+                 for k, (code, _) in enumerate(_accent_pairs(donor_rom, donor)))
+    return [bytes(table.get(b, b) for b in r) for r in recs]
 
 
 # ── briefings as STRINGS (the Sylt model) ────────────────────────────────
@@ -583,6 +610,8 @@ def cmd_import(a):
               % (len(keep), min(keep), max(keep)))
 
     glyphs = accent_glyphs(a.donor, donor, a.us_rom) if not a.no_glyphs else []
+    if glyphs:
+        recs = remap_accents(recs, a.donor, donor)
 
     # Briefings as STRINGS, composed by the US build. Words come from the
     # donor, addresses from the US image, because the blob is recognised by
@@ -1117,6 +1146,16 @@ MENU_TABLE = 0x002164                    # FILE offset of $00:A164 (addr - $8000
 MENU_FREE = 0x007B4C                     # 1140 bytes of $FF, ending at the header
 MENU_FREE_END = 0x007FC0                 # the cartridge header starts here
 MENU_ART = 0x04A571                      # the artwork the records index into
+# The screen the menu unpacks it on. It is not the only one: the scenario
+# selector unpacks the same packet on $0a and draws its win marks from it
+# (record $29, tiles $1B0 $1B2 $1D0 $1D2), and the new-city screens unpack it
+# on $04. Glyphs composed for the menu are therefore applied only on the
+# screens the menu's own loader ($02:BB23) runs on: $02, reached from the
+# title, back from the selector and back from the new-city screens, and $12,
+# the way back from a city. Scoping to $02 alone left the menu blank after
+# returning from a city -- reported from play, and traced to the loader
+# unpacking on $12.
+MENU_SCREENS = (0x02, 0x12)
 
 # The menu font is 8 wide x 16 tall: two stacked 8x8 tiles per character, and
 # a 16x16 sprite carries TWO characters side by side. The artwork already
@@ -1186,6 +1225,14 @@ for _i, _ch in enumerate("QRSTUVWXYZ!?-."):
 MENU_CHUNKS = [(0xA3CE, 8), (0xA3F0, 8), (0xA412, 8)]
 MENU_TAIL = 0xA434                       # flags word + terminator byte
 MENU_MOVE = (0x10, 0xA41D, 61)           # record, where it is, chain length
+# The saved-game line, record $0E: drawn only while a save exists, from base
+# (136, 128), eight sprites at y=100 reading RESUME SAVED CITY. It ends where
+# $0F begins ($A3A9..$A3CD), so a longer line cannot grow in place either; it
+# is rebuilt in the filler after the copy of $10. The German cartridge's own
+# wording is GESPEICHERTE STADT, nine sprites laid out by word.
+MENU_SAVED = (0x0E, 0xA3A9, 37)          # record, where it is, chain length
+MENU_SAVED_BASE = (136, 128)
+MENU_SAVED_Y, MENU_SAVED_X0 = 100, 73
 MENU_SPRITES = [c + 2 + i * 4 for c, n in MENU_CHUNKS for i in range(n)]
 MENU_BASE_X, MENU_BASE_Y = 136, 116      # $025d / $025f for these three lines
 MENU_LINE_Y = (112, 136, 160)            # the arrow's stops, from table $d37c
@@ -1193,10 +1240,12 @@ MENU_LINE_X0 = 74                        # all three lines are left-aligned here
 MENU_LINE_MAX = 252                      # and none may run past this
 MENU_PARK_Y = 224                        # spare sprites, clear of the screen
 
-# Composed glyphs go in artwork rows 20-31, none of which is displayed on any
-# screen that loads this packet -- established by snapshotting OAM on each of
-# them and taking the union of the tiles actually used, NOT by scanning the
-# record table. That scan called rows 2-3 free; composing there broke START
+# Composed glyphs go in artwork rows 20-31, none of which the title or the
+# menu displays -- established by snapshotting OAM on those screens and taking
+# the union of the tiles actually used, NOT by scanning the record table.
+# They are not free everywhere this packet is unpacked: the scenario selector
+# draws its win marks from $1B0 $1B2 $1D0 $1D2, which is why the glyphs are
+# applied on the menu's screen only (MENU_SCREEN). That scan called rows 2-3 free; composing there broke START
 # NEW CITY, which draws tile $022 from a chunk the scan never reached.
 # A band is a pair of rows: a character's top half sits in the first and its
 # bottom half sixteen tiles later, in the second. Rows 30-31 are blank as well
@@ -1370,6 +1419,61 @@ def menu_relocate(rom):
     return [(MENU_FREE, rom[src:src + length]),
             (MENU_TABLE + idx * 2, bytes([ptr & 0xff, ptr >> 8])),
             (MENU_TAIL - 0x8000, bytes([0x01, 0x00, 0x00]))]
+
+
+def menu_saved_spans(us, art, text):
+    """the saved-game line, record $0E, laid out afresh -> (art spans, cart spans)
+
+    Its glyphs take the pool slots after the option lines' 24, in the same
+    screen-scoped artwork entry, and the record is rebuilt whole: flags words
+    with the X-carry and size bits, the entries, and a one-byte terminator.
+    """
+    idx, addr, length = MENU_SAVED
+    bx, by = MENU_SAVED_BASE
+    text = text.upper()
+    cells = menu_layout(text)
+    if not cells:
+        sys.exit("the saved-game line is empty")
+    end = MENU_SAVED_X0 + cells[-1][0] + 16
+    if end > MENU_LINE_MAX:
+        sys.exit('"%s" runs to x=%d; the saved-game line must end by x=%d'
+                 % (text, end, MENU_LINE_MAX))
+    missing = sorted(set(c for _, pair in cells for c in pair
+                         if menu_glyph(art, c) is None))
+    if missing:
+        sys.exit("no glyph for %s in the saved-game line"
+                 % " ".join("%s (U+%04X)" % (c, ord(c)) for c in missing))
+    attr = us[addr - 0x8000 + 5] & 0xfe
+    art_spans, entries = [], []
+    for k, (dx, pair) in enumerate(cells):
+        t = menu_slot(len(MENU_SPRITES) + k)
+        for half in (0, 1):
+            top, bot = menu_glyph(art, pair[half])
+            art_spans += [(t + half, top), (t + 16 + half, bot)]
+        entries.append(((MENU_SAVED_X0 + dx - bx) & 0xff,
+                        (MENU_SAVED_Y - by) & 0xff, t))
+    rec = bytearray()
+    for c0 in range(0, len(entries) + 1, 8):
+        part = entries[c0:c0 + 8]
+        flags, body = 0, bytearray()
+        for i, (xb, yb, t) in enumerate(part):
+            carry = 1 if xb + bx >= 0x100 else 0
+            flags |= (carry | 2) << (i * 2)
+            body += bytes([xb, yb, t & 0xff, ((t >> 8) & 1) | attr])
+        if len(part) < 8:
+            flags |= 1 << (len(part) * 2)
+            body += bytes([0])
+        rec += bytes([flags & 0xff, (flags >> 8) & 0xff]) + body
+        if len(part) < 8:
+            break
+    at = MENU_FREE + MENU_MOVE[2]
+    if at + len(rec) > MENU_FREE_END:
+        sys.exit("the saved-game line does not fit in the filler at $%06X" % at)
+    ptr = 0x8000 + (at % 0x8000)
+    print('  saved line "%s": %d sprites, record $%02X rebuilt at $%06X'
+          % (text, len(entries), idx, at))
+    return art_spans, [(at, bytes(rec)),
+                       (MENU_TABLE + idx * 2, bytes([ptr & 0xff, ptr >> 8]))]
 
 
 def menu_flags(rom, xbyte):
@@ -1551,9 +1655,11 @@ def find_twin(packets, want):
 
 def write_packets(path, entries):
     """serialise the packet list and write it"""
-    blob = bytearray(PACKET_MAGIC + bytes([1, 0]))
+    blob = bytearray(PACKET_MAGIC + bytes([2, 0]))
     blob += len(entries).to_bytes(2, "little")
-    for src, outlen, sp in entries:
+    for ent in entries:
+        src, outlen, sp = ent[:3]
+        screens = ent[3] if len(ent) > 3 else ()
         if src == SYLT_CARD_PSEUDO:
             bank, addr = 0xff, 0xffff
         elif src == ROM_SPAN_PSEUDO:
@@ -1561,6 +1667,7 @@ def write_packets(path, entries):
         else:
             bank, addr = src // 0x8000, 0x8000 + (src % 0x8000)
         blob += bytes([bank]) + addr.to_bytes(2, "little")
+        blob += bytes([len(screens)]) + bytes(screens)
         blob += outlen.to_bytes(4, "little")
         blob += len(sp).to_bytes(2, "little")
         for off, data in sp:
@@ -1576,9 +1683,13 @@ def _packets_menu_only(a, us, eg):
     field = [t.strip() for t in a.menu_text.split("|")]
     print("main menu text:")
     art_spans, cart = menu_lines_spans(us, art, dict(zip(MENU_LINE_Y, field)))
+    if getattr(a, "menu_saved", None):
+        sa, sc = menu_saved_spans(us, art, a.menu_saved)
+        art_spans += sa
+        cart += sc
     cart += _msg_cols_spans(a)
     write_packets(a.out, [(MENU_ART, len(art),
-                           [(t * 32, d) for t, d in art_spans]),
+                           [(t * 32, d) for t, d in art_spans], MENU_SCREENS),
                           (ROM_SPAN_PSEUDO, 0, cart)])
 
 
@@ -1793,8 +1904,12 @@ def cmd_packets(a):
                          "changing any line re-lays all three" % y)
         print("main menu text:")
         art_spans, cart = menu_lines_spans(us, art, lines)
+        if getattr(a, "menu_saved", None):
+            sa, sc = menu_saved_spans(us, art, a.menu_saved)
+            art_spans += sa
+            cart += sc
         extra.append((MENU_ART, len(art),
-                      [(t * 32, d) for t, d in art_spans]))
+                      [(t * 32, d) for t, d in art_spans], MENU_SCREENS))
         rom_spans += cart
 
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
@@ -2018,6 +2133,8 @@ def cmd_template(a):
             "menu: the three main-menu option lines, top to bottom. 48",
             "characters across all three, and no line may run past the screen.",
             "Accented letters are built on the fly, so write them normally.",
+            "menu_saved: the line above them while a save exists. Empty keeps",
+            "the US RESUME SAVED CITY.",
             "",
             "messages: the in-game message box. It renders into a fixed-width",
             "box, so runs of spaces are LAYOUT, not padding to strip. Each",
@@ -2036,6 +2153,7 @@ def cmd_template(a):
         "language": ver,
         "columns": detect_msg_cols([to_text(r) for r in recs]),
         "menu": list(MENU_US),
+        "menu_saved": "",
         "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
         "briefings": [{"page": p["page"], "title": p["title"],
                        "body": p["body"], "row": p["row"], "col": p["col"]}
@@ -2116,6 +2234,7 @@ def cmd_translate(a):
     if a.donor:
         dv = detect_region(a.donor)
         glyphs = accent_glyphs(a.donor, dv, a.us_rom)
+        recs = remap_accents(recs, a.donor, dv)
         sglyphs = scen_glyphs(a.donor, dv)
     elif any(ord(c) > 126 for e in entries for c in e["text"]):
         print("  note: no --donor, so the message font keeps the US glyphs")
@@ -2133,7 +2252,8 @@ def cmd_translate(a):
     ns = argparse.Namespace(
         rom=a.us_rom, donor=a.donor, out=a.out_prefix + "_selector.scpk",
         labels_from=a.labels_from, menu_text="|".join(menu), menu=False,
-        hud=a.hud, rom_copy=None, swap=None, columns=cols)
+        hud=a.hud, rom_copy=None, swap=None, columns=cols,
+        menu_saved=doc.get("menu_saved") or None)
     cmd_packets(ns)
 
 def main():
@@ -2216,6 +2336,10 @@ def main():
                          "field empty to keep the US wording. 36 characters "
                          "in all, and any three splits of that; accented "
                          "letters are built on the fly")
+    pc.add_argument("--menu-saved", metavar="TEXT",
+                    help="the saved-game line above the three options, shown "
+                         "only while a save exists, for example GESPEICHERTE "
+                         "STADT; needs --menu-text")
     pc.add_argument("--menu", action="store_true",
                     help="RETRACTED: relocates donor records and loses the "
                          "logo. Use --menu-text")

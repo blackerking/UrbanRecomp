@@ -4291,9 +4291,9 @@ off-screen sprites excluded):
 | `$0f` in game | 7 |
 | **union** | **178 of 512** |
 
-Rows 20-31 appear on none of them. And this packet is only resident on the
-title and menu screens, so nothing outside that set can be looking at it
-either. Rows 30-31 are also blank in the artwork, which makes them the safest
+Rows 20-31 appear on none of them. That this packet is only resident on the title and menu screens, so that
+nothing else could be looking at it, was wrong: the scenario selector and the
+new-city screens unpack it too. See "The menu's artwork is shared" below. Rows 30-31 are also blank in the artwork, which makes them the safest
 choice of the free bands.
 
 Composing `UBUNG` and `SZENARIO` there and repointing record `$0F` gives, in
@@ -4475,8 +4475,10 @@ verification is fixed:
 
 The live OAM also confirms the free bands directly, and more cheaply than the
 marker sweep did: the highest tile any sprite references on `$01`, `$02` or
-`$03` is `$13F`, the last tile of row 19. Rows 20-31 are unused on every
-screen that loads this artwork.
+`$03` is `$13F`, the last tile of row 19. Rows 20-31 are unused on those
+screens -- and only on those. The scenario selector loads the same artwork and
+draws its win marks from rows 27 and 29; see "The menu's artwork is shared"
+below.
 
 ### Growing the pool to 24, and the French import
 
@@ -4642,3 +4644,80 @@ Reflowing the text to 24 instead was the alternative and is worse: it would
 have to guess which line-end hyphens are soft (`Ver-` + `binde` is one word,
 `Wohn-` before `und` is not), and it adds a line per paragraph to a box of
 fixed height.
+
+### The menu's artwork is shared, so its glyphs are applied on the menu only
+
+Reported from play: on the scenario selector, the red X marking a won scenario
+came out as coloured fragments of `STADT`.
+
+The sprite artwork at `$09:A571` is not the menu's alone. Tracing every unpack:
+
+| screen | when |
+|---|---|
+| `$02` | into the menu: from the title, back from the selector (X), back from the new-city screens |
+| `$04` | the new-city screens |
+| `$0a` | the scenario selector |
+| `$12` | into the menu from a city (GOTO MENU); the same loader, `$02:BB23` |
+
+The packet patch matched entries by source address only, so the glyphs composed
+for the menu were laid over every one of those unpacks. The selector draws each
+win mark as sprite-text record `$29` -- `03:DED0` sets the emitter's base from
+`$DF30`/`$DF20` and calls COP 2 with `$0261 = $29` -- and that record's four
+sprites are tiles `$1B0 $1B2 $1D0 $1D2`. The generator had written glyphs into
+`$1D0` and `$1D2`.
+
+The earlier observation was true as far as it went: rows 20-31 are unused on the
+title and menu. What did not follow was that they were free, because the marks
+only draw once a scenario has been won and no capture had any wins. Walking every
+record in the table with the chunk rule shows the "free" bands referenced
+throughout, and only 8 two-by-two units in the whole sheet are referenced by no
+record at all, against the 24 the pool needs. Moving the glyphs elsewhere was
+never an option.
+
+So a packet entry can now name its screens. SCPK v2 adds a count and a list of
+screens after each entry's address, and the runtime applies such an entry only
+while `$14` is one of them. An empty list means every screen, which is what a v1
+file means, and v1 files still load that way. The menu artwork entry is written
+for `$02` and `$12`, the two screens the menu's own loader runs on.
+
+Checked:
+
+- A selector unpacked fresh after the menu had applied its glyphs matches the
+  original artwork on all 512 tiles.
+- On the `savestate_1` path, where the marks draw (28 sprites, seven wins), the
+  patched selector's sprite art and OAM are byte-identical to a run with no
+  translation and no packet.
+- Entering the new-city screens no longer applies the glyphs.
+- The German and French menus still read back at a bit distance of zero, with
+  their sprite tables unchanged.
+
+### The accent glyphs moved out of the notice table's punctuation
+
+Reported from play: the in-city "Save completed." dialog ended in a wrong
+character.
+
+The accent glyphs of a translated message font went at their CP437 codes,
+`$81`..`$9B`, because the US message records never use those codes. That was
+true and not enough. The in-city notice table in bank 01, `$01:9824`..`$01:9C9C`
+("More Residential zones needed", "Save completed."), draws from the same font
+with every character stored as its code plus `$60`, so its space, punctuation
+and digits are `$80`..`$9F`. The German blob's accents overwrote `!`, `,`, `.`,
+`3`, `4` and `7` there; the wrong last character was the full stop at `$8E`.
+
+Tiles `$E0`..`$FE` of the US font are blank and used by neither the messages
+nor that table, so the accents now go there in order, and the translated
+records are rewritten to point at them. German's 203 and French's 276 accented
+message bytes all moved; the blobs are the same size.
+
+Checked inside a city entered fresh, so the font was unpacked with the new
+blob: the notice table's `.` `!` `,` `3` and the message full stop are the
+original glyphs, and all 16 German accents sit at `$E0`..`$EF`.
+
+The notice table itself is still English; it is not among the 53 messages.
+
+Scoping to `$02` alone was one screen short. Reported from play: after going
+back from a city to the main menu the German lines were missing. Traced in
+that session: GOTO MENU passes through game state `$12`, which runs the same
+menu loader at `$02:BB27` and unpacks the artwork while `$14` is `$12`, so the
+entry skipped it. A save state taken nine frames before that transition
+reproduces it headless.

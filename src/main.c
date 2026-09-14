@@ -810,6 +810,8 @@ static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
 static void widen_title_lights(void);
+static void title_ws_update(void);
+static bool title_ws_live(void);
 static void ws_fill_margins(void);
 static void ws_fill_flat_margins(void);
 static void ws_hide_backdrop_furniture(void);
@@ -1166,11 +1168,12 @@ static void handle_pos_stuff(void) {
             if ((g_ppu->screenEnabled[0] >> L) & 1) { s_ws_margin_layer = L; break; }
         PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
+      title_ws_update();
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
       memset(s_oam_left_hints, 0, sizeof s_oam_left_hints);
       widen_wood_bg();
       /* AFTER widen_wood_bg(), which clears the flag for the frame. */
-      if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
+      if (title_ws_live() && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
       widen_title_lights();
       /* BG3 is hard-clamped independent of wsLayerClamp:
@@ -1217,7 +1220,7 @@ static void handle_pos_stuff(void) {
          * Clamping them stops the gradient dead at the authentic edge, which
          * is exactly what it did once the flags below started reaching the PPU
          * per frame and the clamp became live for the first time. */
-        if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title)
+        if (s_ws_clamp_auto && title_ws_live() && s_ws_widen_title)
           clamp &= (uint8_t)~0x06;   /* BG2 | BG3 */
         /* The wood-only margin pass needs its layer to REACH the margins, or
          * the pass renders 256 px of desk and nothing beyond. Its own map
@@ -1309,7 +1312,7 @@ static void handle_pos_stuff(void) {
                 s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
           }
         }
-        if (s_ws_oam_strict && g_ram[0x14] == 0x01 && s_ws_widen_title) {
+        if (s_ws_oam_strict && title_ws_live() && s_ws_widen_title) {
           static int on = -1;
           if (on < 0) {
             const char *e = getenv("SC_WS_TITLE_OAM_RIGHT");
@@ -2904,7 +2907,8 @@ static int sc_decomp_mode(void) {
  * instead of trying to win it. */
 typedef struct ScpkSpan { uint32_t off; uint16_t len; uint8_t *data; } ScpkSpan;
 typedef struct ScpkEntry { uint32_t src, outlen; uint16_t nspans;
-                           int reported; ScpkSpan *spans; } ScpkEntry;
+                           int reported; ScpkSpan *spans;
+                           uint8_t nscreens, screens[8]; } ScpkEntry;
 static ScpkEntry *s_scpk;
 static int s_scpk_count = -1;          /* -1 = not looked for yet */
 static uint32_t s_scpk_src, s_scpk_out;
@@ -2918,8 +2922,8 @@ static void scpk_load(void) {
   uint32_t n = 0;
   uint8_t *b = read_file(path, &n);
   if (!b) { fprintf(stderr, "packet patch: cannot read %s\n", path); return; }
-  if (n < 8 || memcmp(b, "SCPK", 4) != 0 || b[4] != 1) {
-    fprintf(stderr, "packet patch: %s is not an SCPK v1 file\n", path);
+  if (n < 8 || memcmp(b, "SCPK", 4) != 0 || b[4] < 1 || b[4] > 2) {
+    fprintf(stderr, "packet patch: %s is not an SCPK v1 or v2 file\n", path);
     free(b); return;
   }
   const int cnt = b[6] | (b[7] << 8);
@@ -2927,13 +2931,25 @@ static void scpk_load(void) {
   if (!s_scpk) { free(b); return; }
   uint32_t p = 8;
   for (int i = 0; i < cnt; i++) {
-    if (p + 9 > n) break;
+    if (p + 4 > n) break;
     ScpkEntry *e = &s_scpk[s_scpk_count];
     e->src = ((uint32_t)b[p] << 16) | b[p + 1] | ((uint32_t)b[p + 2] << 8);
-    e->outlen = (uint32_t)b[p + 3] | ((uint32_t)b[p + 4] << 8) |
-                ((uint32_t)b[p + 5] << 16) | ((uint32_t)b[p + 6] << 24);
-    e->nspans = (uint16_t)(b[p + 7] | (b[p + 8] << 8));
-    p += 9;
+    /* v2 carries the screens an entry is for, right after the address; an
+     * empty list means every screen, which is all v1 could say. */
+    uint32_t q = p + 3;
+    e->nscreens = 0;
+    if (b[4] >= 2) {
+      const uint8_t ns = b[q++];
+      if (q + ns > n) break;
+      for (uint8_t s = 0; s < ns; s++)
+        if (e->nscreens < sizeof e->screens) e->screens[e->nscreens++] = b[q + s];
+      q += ns;
+    }
+    if (q + 6 > n) break;
+    e->outlen = (uint32_t)b[q] | ((uint32_t)b[q + 1] << 8) |
+                ((uint32_t)b[q + 2] << 16) | ((uint32_t)b[q + 3] << 24);
+    e->nspans = (uint16_t)(b[q + 4] | (b[q + 5] << 8));
+    p = q + 6;
     e->spans = (ScpkSpan *)calloc((size_t)(e->nspans ? e->nspans : 1),
                                   sizeof(ScpkSpan));
     if (!e->spans) break;
@@ -2958,6 +2974,11 @@ static void scpk_load(void) {
     fprintf(stderr, "packet patch: $%02x:%04x  %u bytes out, %u spans\n",
             (unsigned)(s_scpk[i].src >> 16), (unsigned)(s_scpk[i].src & 0xffff),
             s_scpk[i].outlen, (unsigned)s_scpk[i].nspans);
+  for (int i = 0; i < s_scpk_count; i++)
+    if (s_scpk[i].nscreens)
+      fprintf(stderr, "packet patch: $%02x:%04x  only while $14 = $%02x%s\n",
+              (unsigned)(s_scpk[i].src >> 16), (unsigned)(s_scpk[i].src & 0xffff),
+              s_scpk[i].screens[0], s_scpk[i].nscreens > 1 ? " (and more)" : "");
 }
 
 /* `out` is where the ROM put the packet: $8000 + X, in bank $7E. */
@@ -2966,6 +2987,18 @@ static void scpk_apply(uint32_t src, uint32_t out) {
   for (int i = 0; i < s_scpk_count; i++) {
     ScpkEntry *e = &s_scpk[i];
     if (e->src != src) continue;
+    /* The menu's sprite artwork ($09:A571) is not the menu's alone. The
+     * scenario selector unpacks it again on screen $0a and draws its win marks
+     * from it -- record $29, tiles $1B0 $1B2 $1D0 $1D2 -- and the new-city
+     * screens unpack it on $04. A patch keyed only by source reached all of
+     * them, so the composed menu letters landed on the marks: reported from
+     * play as the red X turned into coloured fragments of STADT. An entry
+     * that names its screens is applied on those screens only. */
+    if (e->nscreens) {
+      int hit = 0;
+      for (int s = 0; s < e->nscreens; s++) hit |= e->screens[s] == g_ram[0x14];
+      if (!hit) continue;
+    }
     for (int k = 0; k < e->nspans; k++) {
       const uint32_t at = out + e->spans[k].off;
       if (at + e->spans[k].len > 0x20000u) continue;
@@ -3996,9 +4029,47 @@ static void oam_put(int i, int x, int y, int tile, int attr, int size) {
   if (size)        *hb = (uint8_t)(*hb | (2u << bit));
 }
 
+/* The title's widescreen settings have to outlive screen $01.
+ *
+ * Pressing Start runs INC $14 at 03:D301 on the very next frame, but the
+ * picture does not leave then: screen $02 fades it out first, and only blanks
+ * to upload the menu once it is dark. Every title policy in this file -- BG3
+ * widened, BG2 and BG3 left unclamped, the right-margin OAM hints, the light
+ * row carried outward -- keyed on $14 == $01, so all of them dropped at once
+ * while the centre was still at full brightness. Reported from play as the
+ * widescreen elements being deleted instead of fading.
+ *
+ * It only shows once the title has finished building up, which is how it
+ * was reported. Measured over the whole frame with Start pressed at frame
+ * 1200: on the frame after Start the margins dropped from 43.4 and 33.8
+ * mean brightness to 32.1 and 18.5 while the centre stayed at 56.8, taking
+ * the margin-to-centre ratio from 0.68 to 0.45, and to 0.39 once the fade
+ * itself began. With the latch the ratio holds at 0.68 all the way to
+ * black. Pressed early, while the city is still rising, it shows nothing,
+ * because the margins hold little yet.
+ *
+ * So the policies stay latched through $02 until the display is dark --
+ * brightness 0 or forced blank -- and let go there. Nothing of the menu can
+ * be on screen before that, because the menu is uploaded during the blank.
+ * The latch only arms on $01, so the menu's own fade-in on $02 runs with the
+ * ordinary settings. */
+static bool s_title_ws_latched;
+
+static void title_ws_update(void) {
+  if (g_ram[0x14] == 0x01) { s_title_ws_latched = true; return; }
+  if (s_title_ws_latched &&
+      (g_ram[0x14] != 0x02 || !g_ppu ||
+       PPU_forcedBlank(g_ppu) || PPU_brightness(g_ppu) == 0))
+    s_title_ws_latched = false;
+}
+
+static bool title_ws_live(void) {
+  return g_ram[0x14] == 0x01 || s_title_ws_latched;
+}
+
 static void widen_title_lights(void) {
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_lights) return;
-  if (g_ram[0x14] != 0x01) return;                 /* title only */
+  if (!title_ws_live()) return;     /* the title, and its fade-out */
 
   /* The row is the largest group of sprites sharing a Y, tile and attribute in
    * the bottom of the picture. Found rather than hard-coded, so a different
