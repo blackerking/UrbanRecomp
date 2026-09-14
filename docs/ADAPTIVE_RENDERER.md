@@ -6,11 +6,19 @@ arguments (or with `--mods`), select **Mods**, enable **Adaptive Widescreen**,
 choose a view size, and press **Play**. Settings persist in `sc-video.ini`.
 The mod starts disabled in a fresh directory.
 
+See the [screenshot gallery](screenshots/adaptive-renderer/README.md) for the
+Mods controls, adaptive landscape/portrait views, and fixed 21:9 gameplay.
+
 The entire original 256x224 view stays visible in every mode. Terrain and
 buildings extend into the extra space; the original controls, text, cursor,
 and simulation retain their native coordinates. The original view can be
 centered or placed at the top left. The window is resizable; **F11** toggles
 fullscreen. **F10** still opens the game's existing settings menu.
+
+Draft follow-up: advisor/tutorial/budget dialogs currently follow the original
+view's anchor too. In top-left mode, those panels should eventually remain
+centered independently of the gameplay/HUD placement. This branch retains the
+current behavior while that layout work is deferred.
 
 | View size | Behavior |
 | --- | --- |
