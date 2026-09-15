@@ -4721,3 +4721,148 @@ that session: GOTO MENU passes through game state `$12`, which runs the same
 menu loader at `$02:BB27` and unpacks the artwork while `$14` is `$12`, so the
 entry skipped it. A save state taken nine frames before that transition
 reproduces it headless.
+
+## In-city notices: reader, format, and import
+
+The two-line boxes over the city ("More Residential zones needed.",
+"Blackouts reported.", the scenario countdown, "Save completed.") are not among
+the 53 messages. Their reader is at `$01:9C9D`, byte-identical in all four
+cartridges:
+
+```
+01:9c9d  LDA $0381 / ASL / TAX / LDA $0197E3,X / STA $79   string pointer
+01:9ca8  LDA #$0610 / STA $7C                              tilemap offset
+01:9cad  LDA $0381 / TAX / LDA $0194FB,X / AND #$FF / TAX  width class
+01:9cb9  LDA $01978C,X / AND #$FF / SEC / SBC #2 / STA $7F characters a line
+01:9cc6  LDA #2 / STA $82                                  two lines
+01:9cd2  LDA $010000,X / AND #$FF / ORA #$2C00 / STA $7E3840,Y   byte = tile
+```
+
+This settles what the correction above left open: the index is `$0381`, the
+pointer table is `$01:97E3` (33 words), and the text is not terminated at all --
+each notice is exactly two lines of its class width.
+
+| | |
+|---|---|
+| width classes `$01:978C` | 14 17 21 25, minus 2 = 12, 15, 19, 23 characters a line; the same in all regions |
+| class per notice `$01:94FB` | also read by the box frame at `$01:9797`; German and French change 19 and 16 of them |
+| byte | the tile number. The font holds a recoloured copy of its glyphs `$60` up, so a notice byte is the CP437 code plus `$60` (German ue `$E1`, ss `$FB`) |
+| written by | `$01:9473`, `$03:B020` (26), `$03:CB37` (31), `$03:CBD5` (30), `$00:D2C7` (32) |
+
+`text_tool.py template` exports them as `notices` (id, width, two lines),
+`translate` imports them, and `packets --notices` takes the donor's. The text
+runs up to the reader, so a translation cannot stay in place: it goes to the
+`$FF` filler at `$01:F924` (1756 bytes) and all 33 pointers and the class table
+are rewritten. German needs 1224 bytes, French 1274.
+
+Accented letters need their own slots. The notice copies of the glyphs sit
+exactly where the message font's accents now live (`$E0`..`$EF`), so a notice
+accent takes a slot from `$F0`..`$FE` and its glyph comes from the donor's own
+notice bank, already in the notice colours, as a packet span on the in-city
+font `$09:C0FB`.
+
+Checked: the US notices round-trip identically through export and import;
+the German and French imports decode back to their cartridges on all 33
+notices with identical classes; in a freshly entered German city the five
+notice accents are at `$F0`..`$F4`, the notice bank `$80`..`$DF` is untouched
+and the 16 message accents are intact. Not yet seen: a notice drawn on
+screen -- none fired in 2600 frames of a new city, and nothing headless can
+set `$0381`.
+
+## Report screens: budget, evaluation, overview, events
+
+Pictures, not text: one 2048-byte tilemap per screen over a shared 2bpp tile
+set, found by matching live captures against every packet in the ROM.
+
+| screen | tilemap | load site |
+|---|---|---|
+| budget | `$0B:BF0E` | `$02:A36C` |
+| evaluation | `$0B:C0C9` | `$02:A441` |
+| overview | `$0B:C29F` | `$02:A4A2` |
+| events | `$0B:C488` | `$02:B626` |
+| tile set | `$09:875C` | `$02:A132` (reports, `$14 = $00`), `$03:DF77` (briefing, `$14 = $0C`) |
+
+The German and French cartridges keep the four screens in the same order,
+so their tilemaps are the four 2048-byte packets from the budget map's twin.
+Byte agreement alone pairs them wrongly (three US maps matched one German
+one), because the donors number their tiles differently.
+
+The tile set cannot be swapped whole. It differs on 714 of 1024 tiles, and
+the game draws words from it at runtime at tile numbers fixed in the US code:
+the city category is one ("Metropolis" is `$197`..`$19D`, a fragment in the
+German set). So the import changes only what the picture changes. A cell's
+tile is redrawn in place if no other cell uses it; otherwise an identical
+untouched tile is reused, or a free one is taken -- blank, unreferenced by the
+four maps, not seen written at runtime, and not on a sheet row holding any
+unreferenced artwork, which is where runtime word strips and their padding
+live. All entries are scoped to `$14 = $00`, so the briefing keeps its tiles.
+
+`text_tool.py reports --out DIR [--from ROM]` exports the four screens as
+PNGs; `packets --reports-from DIR` imports painted ones and `packets
+--reports` takes the donor's, colour attributes included.
+
+Checked offline: US export and import changes nothing; the German import
+matches the German screens on all 1024 cells of all four, pixels and colour
+attributes, uses 60 of 296 free tiles, and leaves every runtime tile and all
+264 unreferenced artwork tiles untouched; French uses 83. Not yet seen in
+play.
+
+### Correction: menu glyph rows 24-27 were not free
+
+The save list (screen `$11`, through RESUME SAVED CITY) draws its digits from
+the menu artwork as 8x8 sprites, tops `$190`..`$199` and bottoms `$1A0`..`$1A9`.
+The sweep that called rows 20-31 free never visited that screen, and the ninth
+sprite of GESPEICHERTE STADT spilled into the band at `$180`, whose lower half
+is `$190`/`$191` -- reported from play as the "1" missing its top. The bands
+at rows 24-27 are gone from the list, and the spare menu sprites now share one
+blank pair so the saved-game line still fits. Checked against a capture of
+the save list: no tile it draws is written any more.
+
+## Map window titles
+
+The map analysis window ("COMPREHENSIVE", "POWER GRID", fourteen maps) draws
+its title as four 32x32 sprites over tiles `$100`..`$13F`, and the game copies
+the strip for the current map into those tiles when the window opens. The
+strips are pre-rendered in the window's graphics packet `$0A:D381` (4bpp,
+1024 tiles): fourteen of them, 16 tiles wide and 2 rows tall, at packet tiles
+512..959. Located by finding the title tiles of two live captures inside the
+packet.
+
+The German and French cartridges keep all fourteen at exactly the same
+tiles, GESAMTUEBERBLICK where COMPREHENSIVE is, and every tile either donor
+changes lies inside 512..959 (German 383 tiles, French 364). So a title is
+translated tile for tile, with no copy table and no layout.
+
+`text_tool.py maptitles --out PNG [--from ROM]` exports the sheet;
+`packets --maptitles-from PNG` imports an edited one and `packets --maptitles`
+takes the donor's, as a packet entry on `$0A:D381` scoped to `$14 = $00`.
+Checked offline: the US export imports to no change, and both German routes
+reproduce the German packet exactly.
+
+A trap found on the way: `scan_packets` with a large minimum length does not
+step over the shorter packets in front of the one wanted, so a false stream
+decoded from inside them can swallow its start. At 32768 this packet was not
+found at all; at 512 it is. Scans now use 512 and filter afterwards.
+
+### Open: reported from play on the German build, not yet fixed
+
+Reported after the report screens, notices and map titles went in. Listed
+with the lead each one has, where there is one; none is investigated yet.
+
+- **Map select and PLEASE WAIT are English.** Not located yet.
+- **Evaluation title misaligned.** The US screen has the year in its title
+  and the US code writes it into the title cells; the German title has no
+  year, so the digits land on STATISTISCHE. The earlier cell check already
+  flagged German artwork at rows 1-2, col 8, a runtime cell.
+- **Evaluation: Kategorie and Schwierigkeitsgrad come out misspelled.** The
+  US code draws the category and level words ("Village", "Easy") at US
+  cell positions, and the longer German labels run into those cells.
+- **Evaluation: the "($)" after Wert der Stadt shows wrong tiles.**
+- **Overview: one wrong tile each in Feuerwehrstationen and Wasserflaechen.**
+  The title is correct. Lead for this and the one above: a tile redrawn in
+  place or reused by the import is also drawn at runtime, and was missing from
+  the runtime set measured from one capture per screen.
+- **Events: title correct, event lines English.** The lines are text written
+  at runtime from bank 02, and the German cartridge has them as strings
+  ("Wahl des neuen Buergermeisters"), so they need a string import like the
+  notices.

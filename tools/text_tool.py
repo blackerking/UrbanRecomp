@@ -1250,7 +1250,13 @@ MENU_PARK_Y = 224                        # spare sprites, clear of the screen
 # A band is a pair of rows: a character's top half sits in the first and its
 # bottom half sixteen tiles later, in the second. Rows 30-31 are blank as well
 # as unused, so they come first.
-MENU_FREE_BANDS = (0x1E0, 0x1C0, 0x140, 0x160, 0x180, 0x1A0)
+# Rows 24-27 are NOT free, whatever the sweep said: the save list (screen $11,
+# reached through RESUME SAVED CITY) draws its digits from this artwork as 8x8
+# sprites, tops at $190-$199 and bottoms at $1A0-$1A9. The sweep never visited
+# that screen, and the ninth sprite of GESPEICHERTE STADT spilled into $180,
+# whose lower half is $190/$191 -- reported from play as the "1" of "1." and
+# "196." missing its top.
+MENU_FREE_BANDS = (0x1E0, 0x1C0, 0x140, 0x160)
 MENU_BAND_COLS = 16
 
 
@@ -1446,7 +1452,8 @@ def menu_saved_spans(us, art, text):
     attr = us[addr - 0x8000 + 5] & 0xfe
     art_spans, entries = [], []
     for k, (dx, pair) in enumerate(cells):
-        t = menu_slot(len(MENU_SPRITES) + k)
+        t = menu_slot(getattr(menu_lines_spans, "next_slot",
+                              len(MENU_SPRITES)) + k)
         for half in (0, 1):
             top, bot = menu_glyph(art, pair[half])
             art_spans += [(t + half, top), (t + 16 + half, bot)]
@@ -1561,16 +1568,22 @@ def menu_lines_spans(us, art, lines):
             slot += 1
         print('  y=%-3d  %-20s %2d sprites, artwork tile $%03X, x %d-%d'
               % (y, '"' + text + '"', len(cells), first, MENU_LINE_X0, end))
-    for k in range(slot, len(MENU_SPRITES)):
-        t = menu_slot(k)
+    # All spare sprites point at ONE blank pair. A pair each was a waste of
+    # slots the saved-game line needs, now that rows 24-27 are off limits.
+    next_slot = slot
+    if slot < len(MENU_SPRITES):
+        t = menu_slot(slot)
         for d in (0, 1, 16, 17):
             art_spans.append((t + d, bytes(32)))
-        place(k, MENU_LINE_X0, MENU_PARK_Y, t)
+        for k in range(slot, len(MENU_SPRITES)):
+            place(k, MENU_LINE_X0, MENU_PARK_Y, t)
+        next_slot = slot + 1
     spare = len(MENU_SPRITES) - slot
     if spare:
         print("  %d spare sprite%s parked at y=%d with a blank tile"
               % (spare, "" if spare == 1 else "s", MENU_PARK_Y))
     cart += menu_flags(us, xbyte) + menu_relocate(us)
+    menu_lines_spans.next_slot = next_slot
     print("  record $%02X relocated to $%06X so the chain could grow to "
           "%d sprites" % (MENU_MOVE[0], MENU_FREE, len(MENU_SPRITES)))
     return art_spans, cart
@@ -1619,8 +1632,22 @@ def _lz5():
     return m
 
 
+_SCAN_MEMO = {}
+
+
 def scan_packets(rom, eg, minlen=1024):
-    """every LZ5 stream in `rom` that unpacks to at least `minlen` bytes"""
+    """every LZ5 stream in `rom` that unpacks to at least `minlen` bytes
+
+    Keep `minlen` small and filter afterwards. A packet shorter than the
+    minimum is not skipped over, so the scan walks through it byte by byte, and
+    a false stream decoded from inside it can run long enough to swallow the
+    start of the real packet that follows: at 32768 the map window graphics
+    were not found at all, at 512 they are. Memoised, because a donor is
+    scanned by several steps of one run.
+    """
+    key = (len(rom), hash(bytes(rom)), minlen)
+    if key in _SCAN_MEMO:
+        return _SCAN_MEMO[key]
     out, off, n = [], 0, len(rom)
     while off < n:
         try:
@@ -1633,6 +1660,7 @@ def scan_packets(rom, eg, minlen=1024):
             off = end
         else:
             off += 1
+    _SCAN_MEMO[key] = out
     return out
 
 
@@ -1651,6 +1679,481 @@ def find_twin(packets, want):
         if best is None or same > best[1]:
             best = (off, same, d)
     return best
+
+
+# ── in-city notices ───────────────────────────────────────────────────────
+# The two-line boxes that pop up over the city: "More Residential zones
+# needed.", "Blackouts reported.", the scenario countdown, "Save completed.".
+# They are not among the 53 messages. Found by their reader, decompiled at
+# $01:9C9D and identical in all four cartridges:
+#
+#   LDA $0381 ; ASL ; TAX ; LDA $0197E3,X ; STA $79    string pointer
+#   LDA $0381 ; TAX ; LDA $0194FB,X ; AND #$FF ; TAX    width class
+#   LDA $01978C,X ; AND #$FF ; SEC ; SBC #2 ; STA $7F   characters a line
+#   two lines of exactly that many bytes, each byte ORed with $2C00 and
+#   written to the tilemap AS the tile number
+#
+# So a byte is a tile, and the font holds a second copy of its glyphs $60
+# tiles up, recoloured: a notice byte is the CP437 code plus $60. That is also
+# why German ue is $E1 and the German ss $FB in the German table.
+#
+# The widths are a class per notice -- 12, 15, 19 or 23 characters -- and the
+# German and French cartridges change the classes as well as the text, so an
+# import copies both. The class table is also read by the box frame at
+# $01:9797, which is what keeps the frame and its text the same size.
+#
+# The text runs up to the reader itself at $01:9C9D, so a longer translation
+# cannot stay in place. It goes to the $FF filler at the end of bank 01 and
+# all 33 pointers are rewritten -- the reader addresses bank 01 with
+# LDA $010000,X, so any address there works.
+#
+# Accented letters: the notice copies of the glyphs sit at code + $60, which
+# is exactly where the message font's accents live now ($E0..$EF). So a
+# notice's accents get their own slots, $F0..$FE, and their glyphs come from
+# the donor's own notice bank, already in the notice colours.
+NOTICE_PTRS = 0x0097E3          # $01:97E3; bank 01 file offsets equal addresses
+NOTICE_COUNT = 33
+NOTICE_CLASS = 0x0094FB         # $01:94FB
+NOTICE_WIDTHS = 0x00978C        # $01:978C, box width per class, text = width - 2
+NOTICE_CLASSES = 4
+NOTICE_FREE = (0x00F924, 0x010000)
+NOTICE_BIAS = 0x60
+NOTICE_GLYPH_SLOTS = tuple(range(0xF0, 0xFF))
+FONT_PACKET = 0x04C0FB          # $09:C0FB, the in-city BG3 font the notices use
+FONT_TILES = 640
+
+
+def notice_widths(rom):
+    return [rom[NOTICE_WIDTHS + c] - 2 for c in range(NOTICE_CLASSES)]
+
+
+def read_notices(rom):
+    """[{id, width, lines: [first, second]}] for the 33 notices of a cartridge"""
+    widths = notice_widths(rom)
+    out = []
+    for i in range(NOTICE_COUNT):
+        ptr = rom[NOTICE_PTRS + 2 * i] | (rom[NOTICE_PTRS + 2 * i + 1] << 8)
+        w = widths[rom[NOTICE_CLASS + i]]
+        chars = []
+        for b in rom[ptr:ptr + 2 * w]:
+            chars.append(bytes([b - NOTICE_BIAS]).decode(CODEC)
+                         if 0x80 <= b <= 0xFE else " ")
+        text = "".join(chars)
+        out.append({"id": i, "width": w,
+                    "lines": [text[:w].rstrip(), text[w:].rstrip()]})
+    return out
+
+
+def notice_spans(us, entries, donor=None):
+    """notices -> (cart spans, font packet spans)
+
+    Strings are laid end to end in the bank-01 filler, and the pointer and
+    class tables rewritten to match. Accented letters take slots from $F0 in
+    the order they first appear, with glyphs from the donor's notice bank.
+    """
+    widths = notice_widths(us)
+    by_id = dict((e["id"], e) for e in entries)
+    if sorted(by_id) != list(range(NOTICE_COUNT)):
+        sys.exit("notices need ids 0..%d, each exactly once" % (NOTICE_COUNT - 1))
+    donor_font = font_raw(donor, detect_region(donor))[0] if donor else None
+    slot_of, font_spans = {}, []
+    blob, ptrs, classes = bytearray(), bytearray(), bytearray()
+    at = NOTICE_FREE[0]
+    for i in range(NOTICE_COUNT):
+        e = by_id[i]
+        w, lines = e.get("width"), e.get("lines")
+        if w not in widths:
+            sys.exit("notice %d: width %r; a notice line holds %s characters"
+                     % (i, w, " or ".join(str(x) for x in widths)))
+        if not isinstance(lines, list) or len(lines) != 2:
+            sys.exit("notice %d: \"lines\" must be two strings" % i)
+        for n, line in enumerate(lines):
+            if len(line) > w:
+                wider = [x for x in widths if x >= len(line)]
+                sys.exit('notice %d line %d is %d characters, "%s"; this notice '
+                         "holds %d a line%s" % (i, n + 1, len(line), line, w,
+                         "" if not wider else ", so set its width to %d" % wider[0]))
+        body = bytearray()
+        for ch in lines[0].ljust(w) + lines[1].ljust(w):
+            try:
+                code = ch.encode(CODEC)[0]
+            except UnicodeEncodeError:
+                sys.exit("notice %d: %r has no code in the game's character set"
+                         % (i, ch))
+            if 0x20 <= code <= 0x7E:
+                body.append(code + NOTICE_BIAS)
+                continue
+            if code not in slot_of:
+                src = code + NOTICE_BIAS
+                if donor_font is None:
+                    sys.exit("notice %d uses %r: accented letters need --donor, "
+                             "whose font supplies the glyph" % (i, ch))
+                glyph = (donor_font[src * FONT_RAW_TILE:(src + 1) * FONT_RAW_TILE]
+                         if src < FONT_TILES else b"")
+                if len(glyph) != FONT_RAW_TILE or glyph == bytes(FONT_RAW_TILE):
+                    sys.exit("notice %d uses %r, which the donor's notices have "
+                             "no glyph for" % (i, ch))
+                if len(slot_of) == len(NOTICE_GLYPH_SLOTS):
+                    sys.exit("the notices use more than %d different accented "
+                             "letters" % len(NOTICE_GLYPH_SLOTS))
+                slot = NOTICE_GLYPH_SLOTS[len(slot_of)]
+                slot_of[code] = slot
+                font_spans.append((slot * FONT_RAW_TILE, glyph))
+            body.append(slot_of[code])
+        ptrs += bytes([at & 0xff, (at >> 8) & 0xff])
+        classes.append(widths.index(w))
+        blob += body
+        at += len(body)
+    if at > NOTICE_FREE[1]:
+        sys.exit("the notices need %d bytes and bank 01 has %d free"
+                 % (len(blob), NOTICE_FREE[1] - NOTICE_FREE[0]))
+    print("in-city notices: %d, %d bytes at $01:%04X, %d accented letter%s"
+          % (NOTICE_COUNT, len(blob), NOTICE_FREE[0], len(slot_of),
+             "" if len(slot_of) == 1 else "s"))
+    return ([(NOTICE_FREE[0], bytes(blob)), (NOTICE_PTRS, bytes(ptrs)),
+             (NOTICE_CLASS, bytes(classes))], font_spans)
+
+
+def _notices_for(a, us):
+    """the notice cart spans and font entry a packets run asks for, if any"""
+    doc = getattr(a, "notices_doc", None)
+    if doc is None and getattr(a, "notices", False):
+        if not a.donor:
+            sys.exit("--notices takes the donor's notices and needs --donor")
+        doc = read_notices(open(a.donor, "rb").read())
+    if doc is None:
+        return [], []
+    cart, glyphs = notice_spans(us, doc, a.donor)
+    return cart, ([(FONT_PACKET, FONT_TILES * FONT_RAW_TILE, glyphs)]
+                  if glyphs else [])
+
+
+# ── report screens: budget, evaluation, overview, events ─────────────────
+# These are pictures, not text: a 2048-byte tilemap per screen over one shared
+# 2bpp tile set, $09:875C, loaded by $02:A132 while a city is running ($14 =
+# $00). Identified by matching live captures against every packet in the ROM:
+# the set supplies 576 of the budget screen's 584 tiles, and each tilemap
+# matches its screen on every cell except the ones the game fills in.
+#
+#   budget $0B:BF0E   evaluation $0B:C0C9   overview $0B:C29F   events $0B:C488
+#
+# The German and French cartridges keep the same four screens in the same
+# order, so a donor's tilemaps are the four 2048-byte packets starting at the
+# twin of the budget map.
+#
+# Why not simply take the donor's tile set: it differs on 714 of 1024 tiles,
+# and the game also draws words from it at runtime -- the city category
+# ("Metropolis" is tiles $197..$19D), the problem list, the game level -- at
+# tile numbers fixed in the US code. The donor keeps those words elsewhere, so
+# a swapped set turns "Metropolis" into a fragment. The same set is also
+# loaded by the briefing screen through $03:DF77, on $14 = $0C.
+#
+# So an import changes only what the picture changes. Per cell: a tile used by
+# that cell alone is rewritten in place; otherwise an identical existing tile
+# is reused, or a free one taken. Free means blank, referenced by none of the
+# four maps, not among the tiles seen written at runtime, and not on a row of
+# the 16-wide sheet that holds any unreferenced artwork -- runtime word strips
+# are unreferenced artwork, and their blank padding is on the same rows. The
+# entries are scoped to $14 = $00, so the briefing screen keeps its tiles.
+US_ROM_DEFAULT = "Sim City (U) [!].sfc"
+REPORT_CHR = 0x04875C
+REPORT_SCREEN = 0x00
+REPORTS = (("budget", 0x05BF0E), ("evaluation", 0x05C0C9),
+           ("overview", 0x05C29F), ("events", 0x05C488))
+REPORT_RAMP = ((20, 20, 30), (110, 120, 150), (190, 195, 215), (250, 250, 255))
+REPORT_ATTR = 0x3C00            # palette and priority; tile and flips excluded
+# Tiles seen written at runtime on the four screens, from captures of each.
+REPORT_RUNTIME_TILES = frozenset(
+    [0x000, 0x004, 0x009, 0x00D, 0x01F, 0x030, 0x032, 0x033, 0x034, 0x03B,
+     0x03C, 0x03E, 0x041, 0x042, 0x043, 0x046, 0x048, 0x051, 0x052, 0x056,
+     0x059, 0x061, 0x062, 0x066, 0x069, 0x3FF]
+    + list(range(0x020, 0x02A)) + list(range(0x197, 0x19E)))
+
+
+def _map_words(b):
+    return [b[i] | (b[i + 1] << 8) for i in range(0, len(b), 2)]
+
+
+def _cell_px(chrb, e):
+    """64 colour indices for one tilemap cell, flips applied"""
+    t = e & 0x3ff
+    g = chrb[t * 16:t * 16 + 16]
+    rows = [[(1 if g[y * 2] & (0x80 >> x) else 0)
+             | (2 if g[y * 2 + 1] & (0x80 >> x) else 0) for x in range(8)]
+            for y in range(8)]
+    if e & 0x4000:
+        rows = [r[::-1] for r in rows]
+    if e & 0x8000:
+        rows = rows[::-1]
+    return tuple(v for r in rows for v in r)
+
+
+def _tile_2bpp(px):
+    b = bytearray(16)
+    for y in range(8):
+        for x in range(8):
+            v, m = px[y * 8 + x], 0x80 >> x
+            if v & 1:
+                b[y * 2] |= m
+            if v & 2:
+                b[y * 2 + 1] |= m
+    return bytes(b)
+
+
+def report_sources(path, eg):
+    """(tile set, [(name, map words)]) for a cartridge's four report screens"""
+    rom = open(path, "rb").read()
+    us = open(US_ROM_DEFAULT, "rb").read()
+    uchr, _ = eg.nintendo_decompress(us, REPORT_CHR)
+    umaps = [(n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS]
+    if rom == us:
+        return bytes(uchr), umaps
+    pk = scan_packets(rom, eg, 512)
+    chr_tw = find_twin([x for x in pk if len(x[1]) == 16384], uchr)
+    maps = sorted(x for x in pk if len(x[1]) == 2048)
+    budget = find_twin(maps, bytes(eg.nintendo_decompress(us, REPORTS[0][1])[0]))
+    if not chr_tw or not budget:
+        sys.exit("no report screens found in %s" % os.path.basename(path))
+    start = [o for o, _ in maps].index(budget[0])
+    picked = maps[start:start + len(REPORTS)]
+    print("report screens from %s: tile set $%06X, maps %s"
+          % (os.path.basename(path), chr_tw[0],
+             " ".join("$%06X" % o for o, _ in picked)))
+    return chr_tw[2], [(n, _map_words(d)) for (n, _), (_, d) in zip(REPORTS, picked)]
+
+
+def cmd_reports(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    chrb, maps = report_sources(getattr(a, "from") or a.rom, eg)
+    os.makedirs(a.out, exist_ok=True)
+    pal = []
+    for c in REPORT_RAMP:
+        pal += list(c)
+    for name, words in maps:
+        img = PIL.Image.new("P", (256, 256), 0)
+        img.putpalette(pal + [0] * (768 - len(pal)))
+        px = img.load()
+        for i, e in enumerate(words):
+            cell = _cell_px(chrb, e)
+            for k, v in enumerate(cell):
+                px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8] = v
+        img.save(os.path.join(a.out, name + ".png"))
+        print("  %s.png" % name)
+    print("report screens -> %s. Paint in the four colours only, keep text on "
+          "the 8-pixel grid, and leave the areas the game fills in (numbers, "
+          "the year, the problem list) empty." % a.out)
+
+
+def report_spans(us, eg, painted, attrs=None):
+    """{screen: 1024 cells of 64 indices} -> packet entries for the import"""
+    chr_u = bytes(eg.nintendo_decompress(us, REPORT_CHR)[0])
+    maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS)
+    refs = {}
+    for words in maps.values():
+        for e in words:
+            refs[e & 0x3ff] = refs.get(e & 0x3ff, 0) + 1
+    blank = lambda t: len(set(chr_u[t * 16:t * 16 + 16])) <= 1
+    tiles = len(chr_u) // 16
+    unsafe = set(t // 16 for t in range(tiles) if t not in refs and not blank(t))
+    free = [t for t in range(tiles) if t not in refs and blank(t)
+            and t not in REPORT_RUNTIME_TILES and t // 16 not in unsafe]
+    attrs = attrs or {}
+    # pass 1: cells whose own tile can simply be redrawn
+    work, claimed = {}, {}
+    for name, _ in REPORTS:
+        if name not in painted:
+            continue
+        for i, e in enumerate(maps[name]):
+            want = painted[name][i]
+            attr = attrs[name][i] if name in attrs else e & REPORT_ATTR
+            if want == _cell_px(chr_u, e):
+                if attr != e & REPORT_ATTR:
+                    work.setdefault(name, []).append((i, "attr", attr, None))
+                continue
+            t = e & 0x3ff
+            if (refs[t] == 1 and t not in REPORT_RUNTIME_TILES
+                    and not e & 0xC000):
+                claimed[t] = want
+                work.setdefault(name, []).append((i, "place", attr, t))
+            else:
+                work.setdefault(name, []).append((i, "new", attr, None))
+    # pass 2: everything else reuses an untouched identical tile or takes a free one
+    have = {}
+    for t in range(tiles):
+        if t not in claimed:
+            have.setdefault(_cell_px(chr_u, t), t)
+    for t, px in claimed.items():
+        have.setdefault(px, t)
+    new_chr = bytearray(chr_u)
+    for t, px in claimed.items():
+        new_chr[t * 16:t * 16 + 16] = _tile_2bpp(px)
+    taken, entries = 0, []
+    for name, off in REPORTS:
+        if name not in work:
+            continue
+        words = list(maps[name])
+        n_place = n_reuse = n_new = n_attr = 0
+        for i, how, attr, t in work[name]:
+            if how == "attr":
+                words[i] = (words[i] & ~REPORT_ATTR) | attr
+                n_attr += 1
+                continue
+            if how == "place":
+                n_place += 1
+            else:
+                want = painted[name][i]
+                t = have.get(want)
+                if t is None:
+                    if taken == len(free):
+                        sys.exit("the report screens need more than the %d free "
+                                 "tiles" % len(free))
+                    t = free[taken]
+                    taken += 1
+                    new_chr[t * 16:t * 16 + 16] = _tile_2bpp(want)
+                    have[want] = t
+                    n_new += 1
+                else:
+                    n_reuse += 1
+            words[i] = t | attr
+        print("  %-10s %3d redrawn in place, %3d reuse a tile, %3d new tiles, "
+              "%3d colour only" % (name, n_place, n_reuse, n_new, n_attr))
+        entries.append((off, 2048, [(0, b"".join(
+            bytes([w & 0xff, w >> 8]) for w in words))], (REPORT_SCREEN,)))
+    spans = [(t * 16, bytes(new_chr[t * 16:t * 16 + 16]))
+             for t in range(tiles) if new_chr[t * 16:t * 16 + 16] != chr_u[t * 16:t * 16 + 16]]
+    print("  report tile set: %d tiles changed, %d of %d free tiles used"
+          % (len(spans), taken, len(free)))
+    if spans:
+        entries.insert(0, (REPORT_CHR, len(chr_u), spans, (REPORT_SCREEN,)))
+    return entries
+
+
+def _reports_for(a, us, eg):
+    """the report screen entries a packets run asks for, if any"""
+    folder = getattr(a, "reports_from", None)
+    if getattr(a, "reports", False):
+        if not a.donor:
+            sys.exit("--reports takes the donor's report screens and needs --donor")
+        chrb, maps = report_sources(a.donor, eg)
+        painted = dict((n, [_cell_px(chrb, e) for e in w]) for n, w in maps)
+        attrs = dict((n, [e & REPORT_ATTR for e in w]) for n, w in maps)
+        print("report screens from the donor:")
+        return report_spans(us, eg, painted, attrs)
+    if not folder:
+        return []
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    painted = {}
+    for name, _ in REPORTS:
+        path = os.path.join(folder, name + ".png")
+        if not os.path.exists(path):
+            continue
+        img = PIL.Image.open(path).convert("RGB")
+        if img.size != (256, 256):
+            sys.exit("%s is %dx%d; a report screen is 256x256" % ((path,) + img.size))
+        px = img.load()
+        near = lambda c: min(range(4), key=lambda k: sum((c[j] - REPORT_RAMP[k][j]) ** 2 for j in range(3)))
+        painted[name] = [tuple(near(px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8])
+                               for k in range(64)) for i in range(1024)]
+    if not painted:
+        sys.exit("no budget/evaluation/overview/events .png in %s" % folder)
+    print("report screens from %s:" % folder)
+    return report_spans(us, eg, painted)
+
+
+# ── map window titles ─────────────────────────────────────────────────────
+# The map analysis window ("COMPREHENSIVE", "POWER GRID", ...) draws its title
+# as four 32x32 sprites over tiles $100-$13F, and the game copies the strip
+# for the current map into those tiles when the window opens. The strips are
+# pre-rendered in the window's graphics packet $0A:D381, fourteen of them, each
+# 16 tiles wide and 2 rows tall, at packet tiles 512-959.
+#
+# The German and French cartridges keep all fourteen at exactly the same tiles
+# -- GESAMTUEBERBLICK where COMPREHENSIVE is, FEUERSCHUTZ where FIRE RADIUS
+# is -- and every tile the German packet changes lies inside that range. So a
+# title is translated tile for tile: no copy table, no layout.
+MAPTITLE_PACKET = 0x055381         # $0A:D381, 4bpp, 1024 tiles
+MAPTITLE_TILES = (512, 960)
+MAPTITLE_SCREEN = 0x00
+
+
+def _maptitle_source(path, eg):
+    rom = open(path, "rb").read()
+    us = open(US_ROM_DEFAULT, "rb").read()
+    upk = bytes(eg.nintendo_decompress(us, MAPTITLE_PACKET)[0])
+    if rom == us:
+        return upk
+    tw = find_twin(scan_packets(rom, eg, 512), upk)
+    if not tw:
+        sys.exit("no map window graphics found in %s" % os.path.basename(path))
+    return tw[2]
+
+
+def cmd_maptitles(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    pk = _maptitle_source(getattr(a, "from") or a.rom, eg)
+    lo, hi = MAPTITLE_TILES
+    img = PIL.Image.new("P", (16 * 8, (hi - lo) // 16 * 8), 0)
+    pal = []
+    for c in LABEL_PAL:
+        pal += list(c)
+    img.putpalette(pal + [0] * (768 - len(pal)))
+    px = img.load()
+    for t in range(lo, hi):
+        rows = _tile_pixels(pk[t * 32:t * 32 + 32])
+        for y in range(8):
+            for x in range(8):
+                px[(t - lo) % 16 * 8 + x, (t - lo) // 16 * 8 + y] = rows[y][x]
+    img.save(a.out)
+    print("map window titles -> %s: fourteen strips, 16 tiles wide and 2 rows "
+          "tall each. Keep every title inside its own strip." % a.out)
+
+
+def maptitle_spans(us, eg, pk):
+    """a painted or donor title sheet -> the packet entry for what changed"""
+    upk = bytes(eg.nintendo_decompress(us, MAPTITLE_PACKET)[0])
+    lo, hi = MAPTITLE_TILES
+    spans = [(t * 32, bytes(pk[t * 32:t * 32 + 32])) for t in range(lo, hi)
+             if pk[t * 32:t * 32 + 32] != upk[t * 32:t * 32 + 32]]
+    print("map window titles: %d tiles changed" % len(spans))
+    return [(MAPTITLE_PACKET, len(upk), spans, (MAPTITLE_SCREEN,))] if spans else []
+
+
+def _maptitles_for(a, us, eg):
+    if getattr(a, "maptitles", False):
+        if not a.donor:
+            sys.exit("--maptitles takes the donor's map titles and needs --donor")
+        return maptitle_spans(us, eg, _maptitle_source(a.donor, eg))
+    path = getattr(a, "maptitles_from", None)
+    if not path:
+        return []
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    lo, hi = MAPTITLE_TILES
+    img = PIL.Image.open(path).convert("RGB")
+    if img.size != (16 * 8, (hi - lo) // 16 * 8):
+        sys.exit("%s is %dx%d; the title sheet is %dx%d"
+                 % ((path,) + img.size + (16 * 8, (hi - lo) // 16 * 8)))
+    px = img.load()
+    near = lambda c: min(range(16), key=lambda k: sum((c[j] - LABEL_PAL[k][j]) ** 2 for j in range(3)))
+    pk = bytearray(eg.nintendo_decompress(us, MAPTITLE_PACKET)[0])
+    for t in range(lo, hi):
+        rows = [[near(px[(t - lo) % 16 * 8 + x, (t - lo) // 16 * 8 + y])
+                 for x in range(8)] for y in range(8)]
+        pk[t * 32:t * 32 + 32] = _tile_bytes(rows)
+    return maptitle_spans(us, eg, bytes(pk))
 
 
 def write_packets(path, entries):
@@ -1688,9 +2191,11 @@ def _packets_menu_only(a, us, eg):
         art_spans += sa
         cart += sc
     cart += _msg_cols_spans(a)
+    ncart, nfont = _notices_for(a, us)
+    nfont = nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
     write_packets(a.out, [(MENU_ART, len(art),
                            [(t * 32, d) for t, d in art_spans], MENU_SCREENS),
-                          (ROM_SPAN_PSEUDO, 0, cart)])
+                          (ROM_SPAN_PSEUDO, 0, cart + ncart)] + nfont)
 
 
 def _msg_cols_spans(a):
@@ -1709,7 +2214,7 @@ def cmd_packets(a):
         # No cartridge to lift artwork from. The menu is composed from the
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
-        for opt in ("hud", "menu", "rom_copy", "swap"):
+        for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -1912,6 +2417,9 @@ def cmd_packets(a):
                       [(t * 32, d) for t, d in art_spans], MENU_SCREENS))
         rom_spans += cart
 
+    ncart, nfont = _notices_for(a, us)
+    rom_spans += ncart
+    extra += nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                (SELECTOR_CHR, len(uchr), spans),
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
@@ -2145,6 +2653,11 @@ def cmd_template(a):
             % BRIEF_TITLE_MAX,
             "each body line %d." % BRIEF_BODY_MAX,
             "",
+            "notices: the two-line boxes over the city (\"More Residential",
+            "zones needed.\"). Each line holds \"width\" characters, and width",
+            "is 12, 15, 19 or 23 -- a wider one gives the box a wider frame.",
+            "Leading spaces are layout.",
+            "",
             "Build it with:",
             "  python tools/text_tool.py translate --in FILE --out-prefix NAME",
             "Add --donor ROM for the accented glyphs of the message font, the",
@@ -2155,6 +2668,7 @@ def cmd_template(a):
         "menu": list(MENU_US),
         "menu_saved": "",
         "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
+        "notices": read_notices(open(src, "rb").read()),
         "briefings": [{"page": p["page"], "title": p["title"],
                        "body": p["body"], "row": p["row"], "col": p["col"]}
                       for p in _briefs_doc(src)["pages"]],
@@ -2253,7 +2767,10 @@ def cmd_translate(a):
         rom=a.us_rom, donor=a.donor, out=a.out_prefix + "_selector.scpk",
         labels_from=a.labels_from, menu_text="|".join(menu), menu=False,
         hud=a.hud, rom_copy=None, swap=None, columns=cols,
-        menu_saved=doc.get("menu_saved") or None)
+        menu_saved=doc.get("menu_saved") or None, notices=False,
+        notices_doc=doc.get("notices"), reports=False,
+        reports_from=a.reports_from, maptitles=False,
+        maptitles_from=a.maptitles_from)
     cmd_packets(ns)
 
 def main():
@@ -2336,6 +2853,18 @@ def main():
                          "field empty to keep the US wording. 36 characters "
                          "in all, and any three splits of that; accented "
                          "letters are built on the fly")
+    pc.add_argument("--maptitles", action="store_true",
+                    help="take the map window titles from the donor")
+    pc.add_argument("--maptitles-from", metavar="PNG",
+                    help="an edited title sheet from text_tool.py maptitles")
+    pc.add_argument("--reports", action="store_true",
+                    help="take the budget, evaluation, overview and events "
+                         "screens from the donor")
+    pc.add_argument("--reports-from", metavar="DIR",
+                    help="painted report screens from text_tool.py reports")
+    pc.add_argument("--notices", action="store_true",
+                    help="take the in-city notices from the donor: text, box "
+                         "widths and accented letters")
     pc.add_argument("--menu-saved", metavar="TEXT",
                     help="the saved-game line above the three options, shown "
                          "only while a save exists, for example GESPEICHERTE "
@@ -2356,6 +2885,21 @@ def main():
     pc.add_argument("--swap", action="append", metavar="ADDR",
                     help="take this whole US packet from the donor "
                          "(a file offset, e.g. 0x04A571); repeatable")
+    mt = sub.add_parser("maptitles", help="the map window titles as a PNG to paint")
+    mt.set_defaults(fn=cmd_maptitles)
+    mt.add_argument("--out", required=True)
+    mt.add_argument("--rom", default="Sim City (U) [!].sfc")
+    mt.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's titles instead")
+
+    rp = sub.add_parser("reports", help="budget/evaluation/overview/events "
+                        "screens as PNGs to paint")
+    rp.set_defaults(fn=cmd_reports)
+    rp.add_argument("--out", required=True)
+    rp.add_argument("--rom", default="Sim City (U) [!].sfc")
+    rp.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's screens instead (German, French)")
+
     tp = sub.add_parser("template", help="one JSON holding every string")
     tp.set_defaults(fn=cmd_template)
     tp.add_argument("--out", required=True)
@@ -2374,6 +2918,10 @@ def main():
                     "and the scenario card names from this cartridge")
     tr.add_argument("--hud", action="store_true",
                     help="also take the building labels from the donor")
+    tr.add_argument("--maptitles-from", metavar="PNG",
+                    help="an edited map title sheet (text_tool.py maptitles)")
+    tr.add_argument("--reports-from", metavar="DIR",
+                    help="painted report screens (text_tool.py reports)")
     tr.add_argument("--labels-from", metavar="PNG",
                     help="an edited building-label image (text_tool.py labels)")
 
