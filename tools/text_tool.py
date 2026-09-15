@@ -1867,7 +1867,23 @@ REPORT_RUNTIME_TILES = frozenset(
     [0x000, 0x004, 0x009, 0x00D, 0x01F, 0x030, 0x032, 0x033, 0x034, 0x03B,
      0x03C, 0x03E, 0x041, 0x042, 0x043, 0x046, 0x048, 0x051, 0x052, 0x056,
      0x059, 0x061, 0x062, 0x066, 0x069, 0x3FF]
-    + list(range(0x020, 0x02A)) + list(range(0x197, 0x19E)))
+    + list(range(0x020, 0x02A)) + list(range(0x197, 0x19E))
+    # The whole small font: the event lines, the month names and every number
+    # the game prints are drawn from it at runtime, so a static label that
+    # happens to use a letter once must still never redraw that tile. The first
+    # event import showed why -- the report import had redrawn R ($11), and
+    # "Reaktorunfall" and "APR" lost it.
+    + list(range(0x000, 0x060)))
+# Slots written into this tile set every time it unpacks -- not by the game,
+# by our own translation runtime: they are BRIEF_EXTRA_COPY's destinations,
+# the accented briefing glyphs (ae oe ue ss and friends), and the set is shared
+# with the briefing screen. The first report import took them as free, and
+# play showed its letters replaced: the "($)" after Wert der Stadt,
+# Kategorie, Schwierigkeitsgrad, one tile each in Feuerwehrstationen and
+# Wasserflaechen. Their whole sheet rows are kept out, not just the nine slots.
+REPORT_DYNAMIC_TILES = frozenset([0x2EC, 0x2ED, 0x2EE, 0x2EF, 0x2F0, 0x2F1,
+                                  0x2F4, 0x304, 0x30B])
+REPORT_DYNAMIC_ROWS = frozenset(t // 16 for t in REPORT_DYNAMIC_TILES)
 
 
 def _map_words(b):
@@ -1959,8 +1975,11 @@ def report_spans(us, eg, painted, attrs=None):
     blank = lambda t: len(set(chr_u[t * 16:t * 16 + 16])) <= 1
     tiles = len(chr_u) // 16
     unsafe = set(t // 16 for t in range(tiles) if t not in refs and not blank(t))
+    unsafe |= REPORT_DYNAMIC_ROWS
     free = [t for t in range(tiles) if t not in refs and blank(t)
             and t not in REPORT_RUNTIME_TILES and t // 16 not in unsafe]
+    reserved = set(event_glyph_slots(us, eg))
+    free = [t for t in free if t not in reserved]
     attrs = attrs or {}
     # pass 1: cells whose own tile can simply be redrawn
     work, claimed = {}, {}
@@ -1976,6 +1995,7 @@ def report_spans(us, eg, painted, attrs=None):
                 continue
             t = e & 0x3ff
             if (refs[t] == 1 and t not in REPORT_RUNTIME_TILES
+                    and t // 16 not in REPORT_DYNAMIC_ROWS
                     and not e & 0xC000):
                 claimed[t] = want
                 work.setdefault(name, []).append((i, "place", attr, t))
@@ -1984,7 +2004,7 @@ def report_spans(us, eg, painted, attrs=None):
     # pass 2: everything else reuses an untouched identical tile or takes a free one
     have = {}
     for t in range(tiles):
-        if t not in claimed:
+        if t not in claimed and t // 16 not in REPORT_DYNAMIC_ROWS:
             have.setdefault(_cell_px(chr_u, t), t)
     for t, px in claimed.items():
         have.setdefault(px, t)
@@ -2156,6 +2176,320 @@ def _maptitles_for(a, us, eg):
     return maptitle_spans(us, eg, bytes(pk))
 
 
+# ── the map select screen ─────────────────────────────────────────────────
+# The new-city map picker (screen $04) has two English words, both pictures:
+# "MAP SELECT" in its header, on BG3 from the 2bpp set $08:C4DB, and "Please
+# wait..." in the preview window, on BG1 from the 4bpp set $08:DEA2. Its
+# tilemaps ($0B:9BA4, $0B:A10B) are identical in the German cartridge; only
+# the artwork of the tiles they use differs -- 22 tiles give LANDKARTEN and 21
+# give "Bitte warten...". NEXT, OK and No. are the same in both cartridges.
+#
+# $08:C4DB is also the scenario selector's set, so the entries are scoped to
+# the screen that unpacks them for the picker, $04.
+MAPSELECT_SCREEN = 0x04
+MAPSELECT_SETS = (
+    # (tile set, bytes a tile, tilemap packet, tilemap pages used)
+    (0x0444DB, 16, 0x05A10B, 1),      # BG3: MAP SELECT
+    (0x045EA2, 32, 0x059BA4, 1),      # BG1: Please wait...
+)
+
+
+def mapselect_spans(us, eg, donor):
+    """the donor's artwork for the tiles the map select tilemaps use"""
+    pk = scan_packets(open(donor, "rb").read(), eg, 512)
+    entries = []
+    for chr_off, bpt, map_off, pages in MAPSELECT_SETS:
+        uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
+        umap = bytes(eg.nintendo_decompress(us, map_off)[0])
+        tw_chr = find_twin(pk, uchr)
+        tw_map = find_twin(pk, umap)
+        if not tw_chr or not tw_map:
+            sys.exit("no map select graphics found in %s" % os.path.basename(donor))
+        if tw_map[2][:2048 * pages] != umap[:2048 * pages]:
+            sys.exit("the donor's map select tilemap $%06X differs from the US "
+                     "one; a tile-for-tile import would misplace it" % tw_map[0])
+        dchr = tw_chr[2]
+        used = set(w & 0x3ff for w in _map_words(umap[:2048 * pages]))
+        spans = [(t * bpt, bytes(dchr[t * bpt:(t + 1) * bpt])) for t in sorted(used)
+                 if dchr[t * bpt:(t + 1) * bpt] != uchr[t * bpt:(t + 1) * bpt]]
+        print("map select: %d tiles of $%06X from the donor" % (len(spans), chr_off))
+        if spans:
+            entries.append((chr_off, len(uchr), spans, (MAPSELECT_SCREEN,)))
+    return entries
+
+
+def _mapselect_for(a, us, eg):
+    if not getattr(a, "mapselect", False):
+        return []
+    if not a.donor:
+        sys.exit("--mapselect takes the donor's map select words and needs --donor")
+    return mapselect_spans(us, eg, a.donor)
+
+
+# ── event lines and month names ──────────────────────────────────────────
+# The events screen ("LAST 10 EVENTS") writes its lines at runtime. Decompiled:
+#
+#   02:b2ec  string N at the position of event type T:
+#            position = $02:BAB9[T], offset = $02:BAD9[N] & $0FFF
+#   02:b328  from $02:B8B4 + offset: each byte is a TILE, $FE ends the line
+#            (the caller then draws one more line a row down), $FF the string;
+#            offsets below $5E get $100 added -- those are the large-font
+#            word strips, entries 0-12
+#   02:b6d0  month names from $02:B708: 12 x (three tile words, $0FFF)
+#
+# Entries 13-15 are Easy/Medium/Hard, 16-36 the events. The small font is
+# A-Z $00-$19, a-z $30-$49, digits $20-$29, space $1F, `,.'` $1C-$1E,
+# `$?!"+-` $2A-$2F, `%` $4A.
+#
+# The German cartridge runs a different drawer: its bytes are ASCII and CP437
+# drawn from a second copy of the face at tile $270 + code, and $FD breaks a
+# line nine cells further left. Its strings are therefore decoded as text and
+# re-encoded for the US drawer, which starts every line at column 12 of a paper
+# that ends at column 28: 17 cells, two lines. 21 of the 24 German entries fit
+# once re-wrapped; the three that do not are shortened below and reported.
+#
+# The German list is longer than the US one, so it moves to the $FF filler at
+# $02:FCEC and the base operand at $02:B336 is repointed. The first $60 bytes
+# -- the strips, whose offsets must stay under $5E -- are copied across as they
+# are. Accented letters get glyphs from the donor's own $270 face, which draws
+# them as the US letters with dots, in free report tiles below $100, because a
+# string byte can only name a tile below $100.
+EVENT_BASE_OPERAND = 0x013336       # $02:B336, operand of LDA $B8B4,Y
+EVENT_LIST = 0x0138B4               # $02:B8B4
+EVENT_TABLE = 0x013AD9              # $02:BAD9
+EVENT_COUNT = 37
+EVENT_STRIP_BYTES = 0x60
+EVENT_FIRST_TEXT = 13
+EVENT_FREE = (0x017CEC, 0x018000)   # $02:FCEC to the end of bank 02
+EVENT_MONTHS = 0x013708             # $02:B708
+EVENT_WIDTH = 17
+EVENT_LEVEL_WIDTH = 6               # entries 13-15 sit in the evaluation's level field
+EVENT_SLOT_COUNT = 8
+EVENT_DONOR_FACE = 0x270
+EVENT_PUNCT = {" ": 0x1F, ",": 0x1C, ".": 0x1D, "'": 0x1E, "$": 0x2A, "?": 0x2B,
+               "!": 0x2C, '"': 0x2D, "+": 0x2E, "-": 0x2F, "%": 0x4A}
+# German lines that do not fit two lines of 17 cells, shortened. Keyed by the
+# donor's text with its line breaks collapsed.
+EVENT_SHORTER = {
+    "Bev\u00f6lkerung erreicht die 30,000-Marke": ["Bev\u00f6lkerung", "30,000 erreicht"],
+    "Bev\u00f6lkerung erreicht die 600,000-Marke": ["Bev\u00f6lkerung", "600,000 erreicht"],
+    "Hohe Luftverschmutzung!": ["Hohe", "Luftverschmutzung"],
+}
+
+
+def _event_code(ch):
+    if "A" <= ch <= "Z":
+        return ord(ch) - 65
+    if "a" <= ch <= "z":
+        return 0x30 + ord(ch) - 97
+    if "0" <= ch <= "9":
+        return 0x20 + ord(ch) - 48
+    return EVENT_PUNCT.get(ch)
+
+
+def _event_char(t):
+    if t <= 0x19:
+        return chr(65 + t)
+    if 0x30 <= t <= 0x49:
+        return chr(97 + t - 0x30)
+    if 0x20 <= t <= 0x29:
+        return chr(48 + t - 0x20)
+    back = dict((v, k) for k, v in EVENT_PUNCT.items())
+    return back.get(t, "?")
+
+
+def _bank02(addr):
+    return 0x010000 + addr - 0x8000
+
+
+def _event_tables(rom):
+    """(list base, offset table, month table, donor face?) for a cartridge"""
+    import re
+    b2 = rom[0x010000:0x018000]
+    us_like = re.search(rb"\x85\x79\xb9(..)\x29\xff\x00\xc9\xff\x00", b2, re.S)
+    de_like = re.search(rb"\xa9\x70\x02\x85\x79\xb9(..)\x29\xff\x00\xc9\xfd\x00", b2, re.S)
+    m = us_like or de_like
+    tab = re.search(rb"\xb9(..)\x29\xff\x0f\xa8", b2, re.S)
+    mon = re.search(rb"\xb9(..)\xc9\xff\x0f", b2, re.S)
+    if not m or not tab or not mon:
+        sys.exit("no event drawer found")
+    w = lambda g: g[0] | (g[1] << 8)
+    return (_bank02(w(m.group(1))), _bank02(w(tab.group(1))),
+            _bank02(w(mon.group(1))), de_like is not None and not us_like)
+
+
+def read_events(rom):
+    """({id: [lines]} for entries 13-36, [12 month names]) from a cartridge"""
+    base, table, months, face = _event_tables(rom)
+    out = {}
+    for i in range(EVENT_FIRST_TEXT, EVENT_COUNT):
+        off = (rom[table + 2 * i] | (rom[table + 2 * i + 1] << 8)) & 0x0FFF
+        a, text = base + off, []
+        while rom[a] != 0xFF and len(text) < 120:
+            b = rom[a]
+            a += 1
+            if b in (0xFD, 0xFE):
+                text.append("\n")
+            elif face:
+                text.append(bytes([b]).decode(CODEC))
+            else:
+                text.append(_event_char(b))
+        out[i] = "".join(text).split("\n")
+    names, cur, a = [], "", months
+    while len(names) < 12:
+        wd = rom[a] | (rom[a + 1] << 8)
+        a += 2
+        if wd == 0x0FFF:
+            names.append(cur)
+            cur = ""
+            continue
+        t = wd & 0x3FF
+        cur += (_event_char(t) if t < EVENT_DONOR_FACE
+                else bytes([t - EVENT_DONOR_FACE]).decode(CODEC))
+    return out, names
+
+
+def _event_fit(i, lines):
+    """re-wrap to the US layout, or None if it cannot fit"""
+    width = EVENT_LEVEL_WIDTH if i < 16 else EVENT_WIDTH
+    most = 1 if i < 16 else 2
+    words = " ".join(lines).split()
+    wrapped = [""]
+    for wd in words:
+        cand = (wrapped[-1] + " " + wd).strip()
+        if len(cand) <= width:
+            wrapped[-1] = cand
+        else:
+            wrapped.append(wd)
+    if len(wrapped) <= most and all(len(x) <= width for x in wrapped):
+        return wrapped
+    return None
+
+
+def report_free_tiles(us, eg):
+    """free report tiles, by the same rule report_spans uses"""
+    chr_u = bytes(eg.nintendo_decompress(us, REPORT_CHR)[0])
+    refs = set()
+    for _, o in REPORTS:
+        refs |= set(w & 0x3ff for w in _map_words(eg.nintendo_decompress(us, o)[0]))
+    blank = lambda t: len(set(chr_u[t * 16:t * 16 + 16])) <= 1
+    tiles = len(chr_u) // 16
+    unsafe = set(t // 16 for t in range(tiles) if t not in refs and not blank(t))
+    unsafe |= REPORT_DYNAMIC_ROWS
+    return [t for t in range(tiles) if t not in refs and blank(t)
+            and t not in REPORT_RUNTIME_TILES and t // 16 not in unsafe]
+
+
+def event_glyph_slots(us, eg):
+    low = [t for t in report_free_tiles(us, eg) if t < 0x100 and t not in (0xFE, 0xFF)]
+    return low[:EVENT_SLOT_COUNT]
+
+
+def event_spans(us, eg, events, months, donor):
+    """entries 13-36 and the month names -> (cart spans, report tile spans)"""
+    slots = event_glyph_slots(us, eg)
+    donor_chr = report_sources(donor, eg)[0] if donor else None
+    slot_of, glyphs = {}, []
+
+    def tile(ch, where):
+        code = _event_code(ch)
+        if code is not None:
+            return code
+        if ch not in slot_of:
+            if donor_chr is None:
+                sys.exit("%s uses %r: accented letters need --donor" % (where, ch))
+            try:
+                c = ch.encode(CODEC)[0]
+            except UnicodeEncodeError:
+                sys.exit("%s: %r has no code in the game's character set" % (where, ch))
+            t = EVENT_DONOR_FACE + c
+            g = donor_chr[t * 16:t * 16 + 16]
+            if len(g) != 16 or len(set(g)) <= 1:
+                sys.exit("%s uses %r, which the donor has no glyph for" % (where, ch))
+            if len(slot_of) == len(slots):
+                sys.exit("the event lines use more than %d accented letters"
+                         % len(slots))
+            slot_of[ch] = slots[len(slot_of)]
+            glyphs.append((slot_of[ch] * 16, bytes(g)))
+        return slot_of[ch]
+
+    blob = bytearray(us[EVENT_LIST:EVENT_LIST + EVENT_STRIP_BYTES])
+    table = bytearray(us[EVENT_TABLE:EVENT_TABLE + 2 * EVENT_COUNT])
+    for i in range(EVENT_FIRST_TEXT, EVENT_COUNT):
+        lines = events[i]
+        width = EVENT_LEVEL_WIDTH if i < 16 else EVENT_WIDTH
+        most = 1 if i < 16 else 2
+        if len(lines) > most or any(len(x) > width for x in lines):
+            sys.exit("event entry %d %r: at most %d line%s of %d characters"
+                     % (i, lines, most, "" if most == 1 else "s", width))
+        off = len(blob)
+        for n, line in enumerate(lines):
+            if n:
+                blob.append(0xFE)
+            blob += bytes(tile(ch, "event entry %d" % i) for ch in line)
+        blob.append(0xFF)
+        old = table[2 * i] | (table[2 * i + 1] << 8)
+        new = (old & 0xF000) | off
+        table[2 * i:2 * i + 2] = bytes([new & 0xFF, new >> 8])
+    if EVENT_FREE[0] + len(blob) > EVENT_FREE[1]:
+        sys.exit("the event list needs %d bytes and bank 02 has %d free"
+                 % (len(blob), EVENT_FREE[1] - EVENT_FREE[0]))
+    words = bytearray()
+    for n, name in enumerate(months):
+        if len(name) > 3:
+            sys.exit("month %d %r: three letters" % (n + 1, name))
+        for ch in name:
+            t = tile(ch, "month %d" % (n + 1)) | 0x0400
+            words += bytes([t & 0xFF, t >> 8])
+        words += b"\xff\x0f"
+    if len(words) != 96:
+        sys.exit("the month names take %d bytes; the table holds 96" % len(words))
+    base = 0x8000 + EVENT_FREE[0] % 0x8000
+    print("event lines: %d bytes at $02:%04X, %d accented letter%s in tiles %s"
+          % (len(blob), base, len(slot_of), "" if len(slot_of) == 1 else "s",
+             " ".join("$%02X" % slot_of[c] for c in slot_of)))
+    cart = [(EVENT_FREE[0], bytes(blob)),
+            (EVENT_BASE_OPERAND, bytes([base & 0xFF, base >> 8])),
+            (EVENT_TABLE, bytes(table)), (EVENT_MONTHS, bytes(words))]
+    return cart, glyphs
+
+
+def _events_for(a, us, eg):
+    doc = getattr(a, "events_doc", None)
+    months = getattr(a, "months_doc", None)
+    if doc is None and getattr(a, "events", False):
+        if not a.donor:
+            sys.exit("--events takes the donor's event lines and needs --donor")
+        ev, months = read_events(open(a.donor, "rb").read())
+        doc, bad = {}, []
+        for i, lines in ev.items():
+            fit = _event_fit(i, lines)
+            if fit is None:
+                key = " ".join(" ".join(lines).split())
+                fit = EVENT_SHORTER.get(key)
+                if fit is None:
+                    bad.append("  entry %d %r needs %s" % (
+                        i, key, "one line of %d" % EVENT_LEVEL_WIDTH if i < 16
+                        else "two lines of %d" % EVENT_WIDTH))
+                    continue
+                print("  event entry %d shortened: %s -> %s" % (i, key, " | ".join(fit)))
+            doc[i] = fit
+        if bad:
+            print("these donor event lines do not fit and have no shorter form "
+                  "in EVENT_SHORTER:")
+            for line in bad:
+                print(line)
+            sys.exit(1)
+    elif doc is not None:
+        doc = dict((int(e["id"]), e["lines"]) for e in doc)
+        if months is None:
+            months = read_events(us)[1]
+    if doc is None:
+        return [], []
+    cart, glyphs = event_spans(us, eg, doc, months, a.donor)
+    return cart, ([(REPORT_CHR, 16384, glyphs, (REPORT_SCREEN,))] if glyphs else [])
+
+
 def write_packets(path, entries):
     """serialise the packet list and write it"""
     blob = bytearray(PACKET_MAGIC + bytes([2, 0]))
@@ -2192,7 +2526,9 @@ def _packets_menu_only(a, us, eg):
         cart += sc
     cart += _msg_cols_spans(a)
     ncart, nfont = _notices_for(a, us)
-    nfont = nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
+    ecart, echr = _events_for(a, us, eg)
+    ncart = ncart + ecart
+    nfont = nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
     write_packets(a.out, [(MENU_ART, len(art),
                            [(t * 32, d) for t, d in art_spans], MENU_SCREENS),
                           (ROM_SPAN_PSEUDO, 0, cart + ncart)] + nfont)
@@ -2214,7 +2550,8 @@ def cmd_packets(a):
         # No cartridge to lift artwork from. The menu is composed from the
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
-        for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles"):
+        for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles",
+                    "mapselect", "events"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -2419,7 +2756,10 @@ def cmd_packets(a):
 
     ncart, nfont = _notices_for(a, us)
     rom_spans += ncart
-    extra += nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
+    ecart, echr = _events_for(a, us, eg)
+    rom_spans += ecart
+    extra += (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
+              + _mapselect_for(a, us, eg) + echr)
     entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                (SELECTOR_CHR, len(uchr), spans),
                (SYLT_CARD_PSEUDO, 0, sylt)] + extra
@@ -2658,6 +2998,10 @@ def cmd_template(a):
             "is 12, 15, 19 or 23 -- a wider one gives the box a wider frame.",
             "Leading spaces are layout.",
             "",
+            "events: the lines of the LAST 10 EVENTS screen, ids 16-36, at most",
+            "two lines of 17 characters; ids 13-15 are the evaluation's game",
+            "level, one line of 6. months: twelve three-letter names.",
+            "",
             "Build it with:",
             "  python tools/text_tool.py translate --in FILE --out-prefix NAME",
             "Add --donor ROM for the accented glyphs of the message font, the",
@@ -2669,6 +3013,9 @@ def cmd_template(a):
         "menu_saved": "",
         "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
         "notices": read_notices(open(src, "rb").read()),
+        "events": [{"id": i, "lines": l} for i, l in
+                   sorted(read_events(open(src, "rb").read())[0].items())],
+        "months": read_events(open(src, "rb").read())[1],
         "briefings": [{"page": p["page"], "title": p["title"],
                        "body": p["body"], "row": p["row"], "col": p["col"]}
                       for p in _briefs_doc(src)["pages"]],
@@ -2770,7 +3117,8 @@ def cmd_translate(a):
         menu_saved=doc.get("menu_saved") or None, notices=False,
         notices_doc=doc.get("notices"), reports=False,
         reports_from=a.reports_from, maptitles=False,
-        maptitles_from=a.maptitles_from)
+        maptitles_from=a.maptitles_from, events=False,
+        events_doc=doc.get("events"), months_doc=doc.get("months"))
     cmd_packets(ns)
 
 def main():
@@ -2853,6 +3201,11 @@ def main():
                          "field empty to keep the US wording. 36 characters "
                          "in all, and any three splits of that; accented "
                          "letters are built on the fly")
+    pc.add_argument("--events", action="store_true",
+                    help="take the event lines and month names from the donor")
+    pc.add_argument("--mapselect", action="store_true",
+                    help="take the map select header and \"Please wait...\" "
+                         "from the donor")
     pc.add_argument("--maptitles", action="store_true",
                     help="take the map window titles from the donor")
     pc.add_argument("--maptitles-from", metavar="PNG",

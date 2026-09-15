@@ -4849,7 +4849,7 @@ found at all; at 512 it is. Scans now use 512 and filter afterwards.
 Reported after the report screens, notices and map titles went in. Listed
 with the lead each one has, where there is one; none is investigated yet.
 
-- **Map select and PLEASE WAIT are English.** Not located yet.
+- **Map select and PLEASE WAIT are English.** Fixed, see "The map select screen" below.
 - **Evaluation title misaligned.** The US screen has the year in its title
   and the US code writes it into the title cells; the German title has no
   year, so the digits land on STATISTISCHE. The earlier cell check already
@@ -4857,12 +4857,75 @@ with the lead each one has, where there is one; none is investigated yet.
 - **Evaluation: Kategorie and Schwierigkeitsgrad come out misspelled.** The
   US code draws the category and level words ("Village", "Easy") at US
   cell positions, and the longer German labels run into those cells.
-- **Evaluation: the "($)" after Wert der Stadt shows wrong tiles.**
-- **Overview: one wrong tile each in Feuerwehrstationen and Wasserflaechen.**
-  The title is correct. Lead for this and the one above: a tile redrawn in
-  place or reused by the import is also drawn at runtime, and was missing from
-  the runtime set measured from one capture per screen.
-- **Events: title correct, event lines English.** The lines are text written
-  at runtime from bank 02, and the German cartridge has them as strings
-  ("Wahl des neuen Buergermeisters"), so they need a string import like the
-  notices.
+- **Evaluation: the "($)" after Wert der Stadt shows wrong tiles; overview:
+  one wrong tile each in Feuerwehrstationen and Wasserflaechen; Kategorie and
+  Schwierigkeitsgrad misspelled.** Fixed: the import had allocated new tiles in
+  rows 46-48, and nine slots there (`$2EC`..`$2F1`, `$2F4`, `$304`, `$30B`) are
+  where our translation runtime writes the accented briefing glyphs whenever
+  this shared set unpacks. Those rows are now excluded.
+- **Events: title correct, event lines English.** Fixed for German, see "Event lines and month names" below.
+
+## The map select screen
+
+The new-city map picker (unpacked on `$14 = $04`) has two English words, both
+pictures: "MAP SELECT" in the header, on BG3 from the 2bpp set `$08:C4DB`, and
+"Please wait..." in the preview, on BG1 from the 4bpp set `$08:DEA2`. Its
+tilemaps `$0B:A10B` and `$0B:9BA4` are identical in the German cartridge; only
+the artwork of the tiles they use differs: 22 tiles give LANDKARTEN, 21 give
+"Bitte warten...". NEXT, OK and No. are the same in both cartridges.
+
+`packets --mapselect` takes those tiles from the donor, scoped to `$04`,
+because `$08:C4DB` is also the scenario selector's set. Checked offline: every
+tile the two tilemaps use then matches the German cartridge, 155 of 155 and
+27 of 27.
+
+## Event lines and month names
+
+Decompiled:
+
+```
+02:b2ec  string N at the position of event type T:
+         position = $02:BAB9[T], offset = $02:BAD9[N] & $0FFF
+02:b328  bytes from $02:B8B4 + offset are TILES; $FE ends the line (the
+         caller draws one more a row down), $FF the string; offsets under
+         $5E get $100 added -- the large-font word strips, entries 0-12
+02:b6d0  month names from $02:B708: 12 x (three tile words, $0FFF), 96 bytes
+02:b66a  the events loop: position types 6-15 are the ten rows, string =
+         event id + 16
+```
+
+Entries 13-15 are Easy/Medium/Hard (the evaluation's level field, 6 cells),
+16-36 the events. The small font is A-Z `$00`-`$19`, a-z `$30`-`$49`, digits
+`$20`-`$29`, space `$1F`, `, . '` at `$1C`-`$1E`, `$ ? ! " + -` at `$2A`-`$2F`,
+`%` at `$4A`. Position types 0-5 are the evaluation's runtime fields (problems,
+category, level).
+
+The German cartridge runs a different drawer (`$02:B2F7`): its bytes are ASCII
+and CP437 drawn from a second copy of the face at tile `$270` + code, and `$FD`
+breaks a line nine cells further left. So its strings are decoded as text and
+re-encoded for the US drawer, which starts every line at column 12 of a paper
+ending at column 28: 17 cells, two lines. 21 of 24 German entries fit once
+re-wrapped; three are shortened (`EVENT_SHORTER`): the two "Bevoelkerung
+erreicht die ...-Marke" lines become "Bevoelkerung / 30,000 erreicht", and
+"Hohe Luftverschmutzung!" loses its exclamation mark.
+
+The German list is 590 bytes against the US 523, so it moves to the `$FF`
+filler at `$02:FCEC` and the base operand at `$02:B336` is repointed; the first
+`$60` bytes (the strips) are copied across unchanged. Accented letters get
+glyphs from the donor's `$270` face -- the US letter with dots -- in free
+report tiles below `$100`, because a string byte can only name a tile below
+`$100`. `packets --events` takes the donor's; `template` exports `events` and
+`months` and `translate` imports them.
+
+Checked offline: all 24 entries decode to the intended text, the months read
+JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ, the strips and their offsets
+are unchanged. French does not fit yet: "Difficile" (6 cells) and "Taux de
+criminalite eleve!" need shorter forms.
+
+### Correction: the report import must never redraw the small font
+
+The event lines, the month names and every number are drawn at runtime from
+the small font `$00`-`$5F`. The report import redrew a tile in place whenever a
+single map cell used it, and R (`$11`) is used once by a label -- so
+"Reaktorunfall" and "APR" lost their R. `$00`-`$5F` are now protected; the
+report screens still match the German cartridge on every cell.
