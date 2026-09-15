@@ -1744,18 +1744,18 @@ def read_notices(rom):
     return out
 
 
-def notice_spans(us, entries, donor=None):
+def notice_spans(us, entries, glyphs=None):
     """notices -> (cart spans, font packet spans)
 
     Strings are laid end to end in the bank-01 filler, and the pointer and
     class tables rewritten to match. Accented letters take slots from $F0 in
-    the order they first appear, with glyphs from the donor's notice bank.
+    the order they first appear, with glyphs from the glyph source (a donor's
+    notice bank, or a painted accents picture).
     """
     widths = notice_widths(us)
     by_id = dict((e["id"], e) for e in entries)
     if sorted(by_id) != list(range(NOTICE_COUNT)):
         sys.exit("notices need ids 0..%d, each exactly once" % (NOTICE_COUNT - 1))
-    donor_font = font_raw(donor, detect_region(donor))[0] if donor else None
     slot_of, font_spans = {}, []
     blob, ptrs, classes = bytearray(), bytearray(), bytearray()
     at = NOTICE_FREE[0]
@@ -1784,15 +1784,13 @@ def notice_spans(us, entries, donor=None):
                 body.append(code + NOTICE_BIAS)
                 continue
             if code not in slot_of:
-                src = code + NOTICE_BIAS
-                if donor_font is None:
-                    sys.exit("notice %d uses %r: accented letters need --donor, "
-                             "whose font supplies the glyph" % (i, ch))
-                glyph = (donor_font[src * FONT_RAW_TILE:(src + 1) * FONT_RAW_TILE]
-                         if src < FONT_TILES else b"")
-                if len(glyph) != FONT_RAW_TILE or glyph == bytes(FONT_RAW_TILE):
-                    sys.exit("notice %d uses %r, which the donor's notices have "
-                             "no glyph for" % (i, ch))
+                if glyphs is None:
+                    sys.exit("notice %d uses %r: accented letters need --donor or "
+                             "--accents-from, which supply the glyph" % (i, ch))
+                glyph = glyphs.notice(code)
+                if glyph is None:
+                    sys.exit("notice %d uses %r, which the glyph source has no "
+                             "notice glyph for" % (i, ch))
                 if len(slot_of) == len(NOTICE_GLYPH_SLOTS):
                     sys.exit("the notices use more than %d different accented "
                              "letters" % len(NOTICE_GLYPH_SLOTS))
@@ -1823,7 +1821,7 @@ def _notices_for(a, us):
         doc = read_notices(open(a.donor, "rb").read())
     if doc is None:
         return [], []
-    cart, glyphs = notice_spans(us, doc, a.donor)
+    cart, glyphs = notice_spans(us, doc, _glyph_source(a))
     return cart, ([(FONT_PACKET, FONT_TILES * FONT_RAW_TILE, glyphs)]
                   if glyphs else [])
 
@@ -1943,6 +1941,51 @@ def report_sources(path, eg):
     return chr_tw[2], [(n, _map_words(d)) for (n, _), (_, d) in zip(REPORTS, picked)]
 
 
+# Colour attributes in a tilemap picture. A cell shows in the screen's plain
+# ramp when it keeps the palette and priority it has in the US tilemap, and in
+# a ramp of its own when it has others: one hue per palette, paler for the
+# priority bit. So a US export is plain as it always was, a donor's shows its
+# recoloured cells in colour, and an import reads the pixels and the attribute
+# back -- the German evaluation alone recolours 198 cells. Plain pictures from
+# before import exactly as they did.
+ATTR_HUES = ((255, 64, 64), (64, 200, 64), (72, 112, 255), (232, 200, 40),
+             (224, 72, 224), (40, 200, 200), (255, 144, 32), (152, 96, 255))
+
+
+def _attr_ramp(attr):
+    """four colours for cells with the palette/priority bits `attr` ($3C00)"""
+    hue = ATTR_HUES[(attr >> 10) & 7]
+    if attr & 0x2000:
+        hue = tuple((x + 255) // 2 for x in hue)
+    return [tuple(x * (k + 1) // 4 for x in hue) for k in range(4)]
+
+
+def _attr_decoder(plain):
+    """a nearest-colour lookup: RGB -> (attr, or None for the plain ramp; index)"""
+    table = [(c, None, k) for k, c in enumerate(plain)]
+    for pal in range(8):
+        for prio in (0, 0x2000):
+            at = (pal << 10) | prio
+            table += [(c, at, k) for k, c in enumerate(_attr_ramp(at))]
+    memo = {}
+
+    def decode(c):
+        if c not in memo:
+            memo[c] = min(table, key=lambda t: sum((c[j] - t[0][j]) ** 2
+                                                   for j in range(3)))[1:]
+        return memo[c]
+    return decode
+
+
+def _decode_cell(decode, pts, where):
+    """64 RGB pixels -> (64 indices, attr or None); a cell is one ramp"""
+    got = [decode(q) for q in pts]
+    ramps = set(at for at, _ in got)
+    if len(ramps) > 1:
+        sys.exit("%s is painted in more than one colour ramp" % where)
+    return tuple(k for _, k in got), ramps.pop()
+
+
 def cmd_reports(a):
     try:
         import PIL.Image
@@ -1950,23 +1993,23 @@ def cmd_reports(a):
         sys.exit("this needs Pillow: pip install Pillow")
     eg = _lz5()
     chrb, maps = report_sources(getattr(a, "from") or a.rom, eg)
+    us = open(a.rom, "rb").read()
+    us_maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS)
     os.makedirs(a.out, exist_ok=True)
-    pal = []
-    for c in REPORT_RAMP:
-        pal += list(c)
     for name, words in maps:
-        img = PIL.Image.new("P", (256, 256), 0)
-        img.putpalette(pal + [0] * (768 - len(pal)))
+        img = PIL.Image.new("RGB", (256, 256))
         px = img.load()
         for i, e in enumerate(words):
-            cell = _cell_px(chrb, e)
-            for k, v in enumerate(cell):
-                px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8] = v
+            at = e & REPORT_ATTR
+            ramp = REPORT_RAMP if at == us_maps[name][i] & REPORT_ATTR else _attr_ramp(at)
+            for k, v in enumerate(_cell_px(chrb, e)):
+                px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8] = ramp[v]
         img.save(os.path.join(a.out, name + ".png"))
         print("  %s.png" % name)
     print("report screens -> %s. Paint in the four colours only, keep text on "
           "the 8-pixel grid, and leave the areas the game fills in (numbers, "
-          "the year, the problem list) empty." % a.out)
+          "the year, the problem list) empty. A cell in colour has a palette or "
+          "priority of its own; keep a cell within one ramp." % a.out)
 
 
 def report_spans(us, eg, painted, attrs=None):
@@ -2132,8 +2175,9 @@ def _reports_for(a, us, eg):
         import PIL.Image
     except ImportError:
         sys.exit("this needs Pillow: pip install Pillow")
-    painted = {}
-    for name, _ in REPORTS:
+    painted, attrs = {}, {}
+    decode = _attr_decoder(REPORT_RAMP)
+    for name, off in REPORTS:
         path = os.path.join(folder, name + ".png")
         if not os.path.exists(path):
             continue
@@ -2141,13 +2185,17 @@ def _reports_for(a, us, eg):
         if img.size != (256, 256):
             sys.exit("%s is %dx%d; a report screen is 256x256" % ((path,) + img.size))
         px = img.load()
-        near = lambda c: min(range(4), key=lambda k: sum((c[j] - REPORT_RAMP[k][j]) ** 2 for j in range(3)))
-        painted[name] = [tuple(near(px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8])
-                               for k in range(64)) for i in range(1024)]
+        uw = _map_words(eg.nintendo_decompress(us, off)[0])
+        painted[name], attrs[name] = [], []
+        for i in range(1024):
+            pts = [px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8] for k in range(64)]
+            idx, at = _decode_cell(decode, pts, "%s cell %d,%d" % (path, i % 32, i // 32))
+            painted[name].append(idx)
+            attrs[name].append(uw[i] & REPORT_ATTR if at is None else at)
     if not painted:
         sys.exit("no budget/evaluation/overview/events .png in %s" % folder)
     print("report screens from %s:" % folder)
-    return report_spans(us, eg, painted)
+    return report_spans(us, eg, painted, attrs)
 
 
 # ── map window titles ─────────────────────────────────────────────────────
@@ -2257,36 +2305,305 @@ MAPSELECT_SETS = (
 )
 
 
-def mapselect_spans(us, eg, donor):
-    """the donor's artwork for the tiles the map select tilemaps use"""
-    pk = scan_packets(open(donor, "rb").read(), eg, 512)
-    entries = []
+#
+# text_tool.py mapselect exports both layers as one picture, BG3 on the left
+# and BG1 on the right, each the full 32x32-cell tilemap. An import redraws
+# tiles in place, so a tile the tilemap uses in several cells must be painted
+# the same in all of them; the import names the cells when it is not.
+MAPSELECT_CELLS = 32
+
+
+def _cell_any(chrb, bpt, e):
+    """64 colour indices for a cell of a 2bpp (16) or 4bpp (32) set, flips applied"""
+    t = e & 0x3ff
+    g = bytes(chrb[t * bpt:(t + 1) * bpt]).ljust(bpt, b"\0")
+    if bpt == 16:
+        rows = [[(1 if g[y * 2] & (0x80 >> x) else 0)
+                 | (2 if g[y * 2 + 1] & (0x80 >> x) else 0) for x in range(8)]
+                for y in range(8)]
+    else:
+        rows = _tile_pixels(g)
+    if e & 0x4000:
+        rows = [r[::-1] for r in rows]
+    if e & 0x8000:
+        rows = rows[::-1]
+    return tuple(v for r in rows for v in r)
+
+
+def _cell_pack(px, bpt, e):
+    """the inverse of _cell_any: undo the cell's flips and pack the tile"""
+    rows = [list(px[y * 8:(y + 1) * 8]) for y in range(8)]
+    if e & 0x8000:
+        rows = rows[::-1]
+    if e & 0x4000:
+        rows = [r[::-1] for r in rows]
+    if bpt == 32:
+        return _tile_bytes(rows)
+    b = bytearray(16)
+    for y in range(8):
+        for x in range(8):
+            if rows[y][x] > 3:
+                return None
+            if rows[y][x] & 1:
+                b[y * 2] |= 0x80 >> x
+            if rows[y][x] & 2:
+                b[y * 2 + 1] |= 0x80 >> x
+    return bytes(b)
+
+
+def _nearest_pal(c, n=16, memo={}):
+    key = (c, n)
+    if key not in memo:
+        memo[key] = min(range(n), key=lambda k: sum((c[j] - LABEL_PAL[k][j]) ** 2
+                                                    for j in range(3)))
+    return memo[key]
+
+
+def mapselect_pictures(path, eg, us):
+    """[cells per layer, 64 indices each] as a cartridge draws the map select"""
+    rom = open(path, "rb").read()
+    pk = None if rom == us else scan_packets(rom, eg, 512)
+    out = []
     for chr_off, bpt, map_off, pages in MAPSELECT_SETS:
         uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
         umap = bytes(eg.nintendo_decompress(us, map_off)[0])
-        tw_chr = find_twin(pk, uchr)
-        tw_map = find_twin(pk, umap)
-        if not tw_chr or not tw_map:
-            sys.exit("no map select graphics found in %s" % os.path.basename(donor))
-        if tw_map[2][:2048 * pages] != umap[:2048 * pages]:
-            sys.exit("the donor's map select tilemap $%06X differs from the US "
-                     "one; a tile-for-tile import would misplace it" % tw_map[0])
-        dchr = tw_chr[2]
-        used = set(w & 0x3ff for w in _map_words(umap[:2048 * pages]))
-        spans = [(t * bpt, bytes(dchr[t * bpt:(t + 1) * bpt])) for t in sorted(used)
-                 if dchr[t * bpt:(t + 1) * bpt] != uchr[t * bpt:(t + 1) * bpt]]
-        print("map select: %d tiles of $%06X from the donor" % (len(spans), chr_off))
+        chrb = uchr
+        if pk is not None:
+            tw_chr = find_twin(pk, uchr)
+            tw_map = find_twin(pk, umap)
+            if not tw_chr or not tw_map:
+                sys.exit("no map select graphics found in %s" % os.path.basename(path))
+            if tw_map[2][:2048 * pages] != umap[:2048 * pages]:
+                sys.exit("the donor's map select tilemap $%06X differs from the US "
+                         "one; a tile-for-tile import would misplace it" % tw_map[0])
+            chrb = tw_chr[2]
+        out.append([_cell_any(chrb, bpt, e) for e in _map_words(umap[:2048 * pages])])
+    return out
+
+
+def cmd_mapselect(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    us = open(a.rom, "rb").read()
+    layers = mapselect_pictures(getattr(a, "from") or a.rom, eg, us)
+    n = MAPSELECT_CELLS
+    img = PIL.Image.new("RGB", (n * 8 * len(layers), n * 8))
+    px = img.load()
+    for k, cells in enumerate(layers):
+        for i, cell in enumerate(cells):
+            for j, v in enumerate(cell):
+                px[k * n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8] = LABEL_PAL[v]
+    img.save(a.out)
+    print("map select -> %s: BG3 (MAP SELECT, four colours) on the left, BG1 "
+          "(Please wait..., sixteen) on the right. Tiles are redrawn in place, so "
+          "a tile used in several cells must look the same in all of them." % a.out)
+
+
+def _mapselect_from_png(path):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    n = MAPSELECT_CELLS
+    img = PIL.Image.open(path).convert("RGB")
+    if img.size != (n * 8 * len(MAPSELECT_SETS), n * 8):
+        sys.exit("%s is %dx%d; the map select picture is %dx%d"
+                 % ((path,) + img.size + (n * 8 * len(MAPSELECT_SETS), n * 8)))
+    px = img.load()
+    return [[tuple(_nearest_pal(px[k * n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8])
+                   for j in range(64)) for i in range(n * n)]
+            for k in range(len(MAPSELECT_SETS))]
+
+
+def mapselect_spans(us, eg, pictures):
+    """the map select layers as pictures -> packet entries for the tiles that change"""
+    entries = []
+    for (chr_off, bpt, map_off, pages), cells in zip(MAPSELECT_SETS, pictures):
+        uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
+        umap = bytes(eg.nintendo_decompress(us, map_off)[0])
+        want, first = {}, {}
+        for i, e in enumerate(_map_words(umap[:2048 * pages])):
+            t = e & 0x3ff
+            g = _cell_pack(cells[i], bpt, e)
+            if g is None:
+                sys.exit("map select $%06X, cell %d,%d: a four-colour layer painted "
+                         "with more than four colours" % (chr_off, i % 32, i // 32))
+            if want.setdefault(t, g) != g:
+                j = first[t]
+                sys.exit("map select $%06X: cells %d,%d and %d,%d share tile $%03X "
+                         "but are painted differently" % (chr_off, j % 32, j // 32,
+                                                          i % 32, i // 32, t))
+            first.setdefault(t, i)
+        spans = [(t * bpt, g) for t, g in sorted(want.items())
+                 if g != uchr[t * bpt:(t + 1) * bpt]]
+        print("map select: %d tiles of $%06X changed" % (len(spans), chr_off))
         if spans:
             entries.append((chr_off, len(uchr), spans, (MAPSELECT_SCREEN,)))
     return entries
 
 
 def _mapselect_for(a, us, eg):
-    if not getattr(a, "mapselect", False):
-        return []
-    if not a.donor:
-        sys.exit("--mapselect takes the donor's map select words and needs --donor")
-    return mapselect_spans(us, eg, a.donor)
+    if getattr(a, "mapselect", False):
+        if not a.donor:
+            sys.exit("--mapselect takes the donor's map select words and needs --donor")
+        return mapselect_spans(us, eg, mapselect_pictures(a.donor, eg, us))
+    if getattr(a, "mapselect_from", None):
+        return mapselect_spans(us, eg, _mapselect_from_png(a.mapselect_from))
+    return []
+
+
+# ── accented glyphs ──────────────────────────────────────────────────────
+# Four glyph sets come from a donor whenever text uses letters the US fonts
+# lack: the message font's sixteen accents (ACCENT_CODES), the notices' copies
+# in the in-city font (code + $60), the report screens' small face that the
+# event lines borrow ($270 + code), and the nine briefing tiles
+# BRIEF_EXTRA_COPY names. text_tool.py accents puts all four in one picture so
+# a language with no donor cartridge can paint them: three 16x8 grids of the
+# codes $80-$FF, then one row of the nine briefing tiles, 2bpp in the first
+# four LABEL_PAL colours. A blank cell means no glyph; orange cells are codes
+# that set does not use.
+ACCENT_BANDS = ("message", "notice", "report")
+ACCENT_ROWS = 3 * 8 + 1
+
+
+class DonorGlyphs:
+    """glyphs as a donor cartridge draws them"""
+
+    def __init__(self, path, eg):
+        self.path, self.eg = path, eg
+        self.ver = detect_region(path)
+        self.font, self.off = font_raw(path, self.ver)
+        self._report = None
+
+    def message(self, code):
+        i = code - self.off
+        g = bytes(self.font[i * FONT_RAW_TILE:(i + 1) * FONT_RAW_TILE]) if i >= 0 else b""
+        return g if len(g) == FONT_RAW_TILE and g != bytes(FONT_RAW_TILE) else None
+
+    def notice(self, code):
+        i = code + NOTICE_BIAS
+        g = bytes(self.font[i * FONT_RAW_TILE:(i + 1) * FONT_RAW_TILE]) if i < FONT_TILES else b""
+        return g if len(g) == FONT_RAW_TILE and g != bytes(FONT_RAW_TILE) else None
+
+    def report(self, code):
+        if self._report is None:
+            self._report = report_sources(self.path, self.eg)[0]
+        t = EVENT_DONOR_FACE + code
+        g = bytes(self._report[t * 16:t * 16 + 16])
+        return g if len(g) == 16 and len(set(g)) > 1 else None
+
+    def message_pairs(self):
+        return _accent_pairs(self.path, self.ver)
+
+    def briefing(self):
+        return scen_glyphs(self.path, self.ver)
+
+
+class PictureGlyphs:
+    """glyphs painted into a text_tool.py accents picture"""
+
+    def __init__(self, path, us_path):
+        try:
+            import PIL.Image
+        except ImportError:
+            sys.exit("this needs Pillow: pip install Pillow")
+        img = PIL.Image.open(path).convert("RGB")
+        if img.size != (16 * 8, ACCENT_ROWS * 8):
+            sys.exit("%s is %dx%d; the accents picture is %dx%d"
+                     % ((path,) + img.size + (16 * 8, ACCENT_ROWS * 8)))
+        px = img.load()
+
+        def cell(row, col):
+            pts = [px[col * 8 + x, row * 8 + y] for y in range(8) for x in range(8)]
+            if all(p == PANEL_MARK for p in pts):
+                return None
+            flat = [_nearest_pal(p, 4) for p in pts]
+            if not any(flat):
+                return None
+            b = bytearray(16)
+            for k, v in enumerate(flat):
+                if v & 1:
+                    b[k // 8 * 2] |= 0x80 >> (k % 8)
+                if v & 2:
+                    b[k // 8 * 2 + 1] |= 0x80 >> (k % 8)
+            return bytes(b)
+        self.bands = [dict((c, cell(n * 8 + (c - 0x80) // 16, (c - 0x80) % 16))
+                           for c in range(0x80, 0x100)) for n in range(len(ACCENT_BANDS))]
+        us_raw = scen_tiles(us_path, detect_region(us_path))[0]
+        self.brief = []
+        for k, dst in enumerate(BRIEF_EXTRA_COPY.values()):
+            g = cell(len(ACCENT_BANDS) * 8, k)
+            t = dst & 0x3ff
+            if g is not None and g != bytes(us_raw[t * 16:t * 16 + 16]):
+                self.brief.append((t, g))
+
+    def message(self, code):
+        return self.bands[0].get(code)
+
+    def notice(self, code):
+        return self.bands[1].get(code)
+
+    def report(self, code):
+        return self.bands[2].get(code)
+
+    def message_pairs(self):
+        return [(c, self.message(c)) for c in ACCENT_CODES if self.message(c)]
+
+    def briefing(self):
+        return list(self.brief)
+
+
+def _glyph_source(a, eg=None):
+    """where accented glyphs come from for this run: a painted picture, the
+    donor, or nowhere"""
+    if getattr(a, "accents_from", None):
+        return PictureGlyphs(a.accents_from, getattr(a, "us_rom", None) or
+                             getattr(a, "rom", None) or US_ROM_DEFAULT)
+    if getattr(a, "donor", None):
+        return DonorGlyphs(a.donor, eg or _lz5())
+    return None
+
+
+def cmd_accents(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    src = getattr(a, "from") or a.rom
+    donor = None if open(src, "rb").read() == open(a.rom, "rb").read() else DonorGlyphs(src, eg)
+    img = PIL.Image.new("RGB", (16 * 8, ACCENT_ROWS * 8), PANEL_MARK)
+    px = img.load()
+
+    def put(row, col, g):
+        for y in range(8):
+            for x in range(8):
+                m = 0x80 >> x
+                v = ((1 if g and g[y * 2] & m else 0) | (2 if g and g[y * 2 + 1] & m else 0))
+                px[col * 8 + x, row * 8 + y] = LABEL_PAL[v]
+    for n, band in enumerate(ACCENT_BANDS):
+        for c in range(0x80, 0x100):
+            if band == "message" and c not in ACCENT_CODES:
+                continue
+            if band == "notice" and c + NOTICE_BIAS >= 0x160:
+                continue
+            g = getattr(donor, band)(c) if donor else None
+            put(n * 8 + (c - 0x80) // 16, (c - 0x80) % 16, g)
+    us_raw = scen_tiles(a.rom, detect_region(a.rom))[0]
+    given = dict(donor.briefing()) if donor else {}
+    for k, dst in enumerate(BRIEF_EXTRA_COPY.values()):
+        t = dst & 0x3ff
+        put(len(ACCENT_BANDS) * 8, k, given.get(t, bytes(us_raw[t * 16:t * 16 + 16])))
+    img.save(a.out)
+    print("accents -> %s: the message font's accents, the notices' copies and the "
+          "report face as grids of codes $80-$FF (row = high nibble - 8, column = "
+          "low nibble), then the nine briefing tiles. Four colours; blank = none."
+          % a.out)
+
+
 
 
 # ── event lines and month names ──────────────────────────────────────────
@@ -2307,9 +2624,11 @@ def _mapselect_for(a, us, eg):
 # The German cartridge runs a different drawer: its bytes are ASCII and CP437
 # drawn from a second copy of the face at tile $270 + code, and $FD breaks a
 # line nine cells further left. Its strings are therefore decoded as text and
-# re-encoded for the US drawer, which starts every line at column 12 of a paper
-# that ends at column 28: 17 cells, two lines. 21 of the 24 German entries fit
-# once re-wrapped; the three that do not are shortened below and reported.
+# re-encoded for the US drawer, which starts every line at column 12: 18 cells
+# to column 29, two lines. (First taken as 17. The US itself writes "A deluge
+# occurred!" in 18, and column 29 is paper on the US, German and French events
+# screens alike.) 22 of the 24 German entries fit once re-wrapped; the two that
+# do not are shortened below and reported.
 #
 # The German list is longer than the US one, so it moves to the $FF filler at
 # $02:FCEC and the base operand at $02:B336 is repointed. Accented letters get
@@ -2341,20 +2660,17 @@ EVENT_STRIP_BYTES = 0x60
 EVENT_FIRST_TEXT = 13
 EVENT_FREE = (0x017CEC, 0x018000)   # $02:FCEC to the end of bank 02
 EVENT_MONTHS = 0x013708             # $02:B708
-EVENT_WIDTH = 17
+EVENT_WIDTH = 18
 EVENT_LEVEL_WIDTH = 6               # entries 13-15 sit in the evaluation's level field
 EVENT_SLOT_COUNT = 8
 EVENT_DONOR_FACE = 0x270
 EVENT_PUNCT = {" ": 0x1F, ",": 0x1C, ".": 0x1D, "'": 0x1E, "$": 0x2A, "?": 0x2B,
                "!": 0x2C, '"': 0x2D, "+": 0x2E, "-": 0x2F, "%": 0x4A}
-# German lines that do not fit two lines of 17 cells, shortened. Keyed by the
+# Donor lines that do not fit two lines of 18 cells, shortened. Keyed by the
 # donor's text with its line breaks collapsed.
 EVENT_SHORTER = {
     "Bev\u00f6lkerung erreicht die 30,000-Marke": ["Bev\u00f6lkerung", "30,000 erreicht"],
     "Bev\u00f6lkerung erreicht die 600,000-Marke": ["Bev\u00f6lkerung", "600,000 erreicht"],
-    "Hohe Luftverschmutzung!": ["Hohe", "Luftverschmutzung"],
-    # French: "Taux de" / "criminalité élevé!" is 18 cells on the second line
-    "Taux de criminalité élevé!": ["Criminalité", "élevée!"],
 }
 
 
@@ -2516,10 +2832,149 @@ def strip_art_tiles(us, eg):
     return [t for t in range(0x400) if t // 16 in REPORT_STRIP_ROWS and t not in refs]
 
 
-def event_spans(us, eg, events, months, donor):
-    """entries 13-36 and the month names -> (cart spans, report tile spans)"""
+# The word strips as a picture. text_tool.py strips draws the thirteen entries
+# on a 32-cell row each, starting at the column the game starts them at: the
+# problems (0-6) at the problem list's, the categories (7-12) at the category
+# field's; cells a strip does not use are orange. An import makes every row
+# art, pads a row that starts right of the leftmost row of its group with
+# blank cells -- right alignment, as the German category does it -- and moves
+# the group's column to that leftmost start.
+STRIP_THRESHOLD = rb"\xc0(..)\xb0\x03\xa9\x00\x01"     # CPY #$005E at $02:B32B
+
+
+def _strip_cells(rom, chrb):
+    """(13 lists of 16-byte glyphs, problem column, category column) as an
+    image's word drawer draws its strips"""
+    import re
+    base, table, _, face = _event_tables(rom)
+    thr = 0
+    if not face:
+        m = re.search(STRIP_THRESHOLD, rom[0x010000:0x018000], re.S)
+        if not m:
+            sys.exit("no word drawer threshold found")
+        thr = _w(m.group(1), 0)
+    strips = []
+    for i in range(EVENT_STRIPS):
+        off = _w(rom, table + 2 * i) & 0x0FFF
+        a, tiles = base + off, []
+        while rom[a] < (0xFD if face else 0xFE) and len(tiles) < 32:
+            tiles.append(rom[a] + (EVENT_DONOR_FACE if face else
+                                   (0x100 if off < thr else 0)))
+            a += 1
+        strips.append([bytes(chrb[t * 16:t * 16 + 16]) for t in tiles])
+    pos = _event_positions(rom)
+    return strips, _w(rom, pos) % 32, _w(rom, pos + 8) % 32
+
+
+def donor_strip_set(path, eg):
+    """(strips, first-cell table, level width) for a German-style donor;
+    None for a US-style one, whose strips stay"""
+    rom = open(path, "rb").read()
+    strips = read_strips(rom)
+    if strips is None:
+        return None
+    chrb = report_sources(path, eg)[0]
+    art = lambda tiles: [bytes(chrb[t * 16:t * 16 + 16]) for t in tiles]
+    pos = _event_positions(rom)
+    return ([(k, art(v) if k == "art" else v) for k, v in strips],
+            bytes(rom[pos:pos + 32]), _event_level_width(rom))
+
+
+def cmd_strips(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    path = getattr(a, "from") or a.rom
+    strips, pcol, ccol = _strip_cells(open(path, "rb").read(), report_sources(path, eg)[0])
+    img = PIL.Image.new("RGB", (32 * 8, EVENT_STRIPS * 8), PANEL_MARK)
+    px = img.load()
+    for i, glyphs in enumerate(strips):
+        col = pcol if i < 7 else ccol
+        for k, g in enumerate(glyphs):
+            if col + k >= 32:
+                break
+            for y in range(8):
+                for x in range(8):
+                    m = 0x80 >> x
+                    v = (1 if g[y * 2] & m else 0) | (2 if g[y * 2 + 1] & m else 0)
+                    px[(col + k) * 8 + x, i * 8 + y] = LABEL_PAL[v]
+    img.save(a.out)
+    print("word strips -> %s: the evaluation's problems (rows 0-6) from column %d "
+          "and city categories (rows 7-12) from column %d, four colours. A row "
+          "must be one unbroken run; the leftmost row of a group sets its column."
+          % (a.out, pcol, ccol))
+
+
+def _strips_from_png(path, us, eg, donor=None):
+    """a painted strips picture -> a strip set, or None if it shows the US strips
+
+    Only the problem and category columns come from the picture. The rest of
+    the first-cell table, and the level field's width, are the donor's when a
+    German-style donor is given -- its level names are laid out for its own
+    field -- and the US ones otherwise."""
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    img = PIL.Image.open(path).convert("RGB")
+    if img.size != (32 * 8, EVENT_STRIPS * 8):
+        sys.exit("%s is %dx%d; the word strip picture is %dx%d"
+                 % ((path,) + img.size + (32 * 8, EVENT_STRIPS * 8)))
+    px = img.load()
+
+    def cell(row, col):
+        pts = [px[col * 8 + x, row * 8 + y] for y in range(8) for x in range(8)]
+        if all(q == PANEL_MARK for q in pts):
+            return None
+        b = bytearray(16)
+        for k, q in enumerate(pts):
+            v = _nearest_pal(q, 4)
+            if v & 1:
+                b[k // 8 * 2] |= 0x80 >> (k % 8)
+            if v & 2:
+                b[k // 8 * 2 + 1] |= 0x80 >> (k % 8)
+        return bytes(b)
+    rows = []
+    for i in range(EVENT_STRIPS):
+        cells = [cell(i, c) for c in range(32)]
+        used = [c for c in range(32) if cells[c] is not None]
+        if not used:
+            sys.exit("%s: word strip %d is empty" % (path, i))
+        if used != list(range(used[0], used[-1] + 1)):
+            sys.exit("%s: word strip %d is not one unbroken run of cells" % (path, i))
+        rows.append((used[0], cells[used[0]:used[-1] + 1]))
+    pcol = min(c for c, _ in rows[:7])
+    ccol = min(c for c, _ in rows[7:])
+    strips = [[bytes(16)] * (c - (pcol if i < 7 else ccol)) + g
+              for i, (c, g) in enumerate(rows)]
+    ustrips, upcol, uccol = _strip_cells(us, bytes(eg.nintendo_decompress(us, REPORT_CHR)[0]))
+    drom = open(donor, "rb").read() if donor else None
+    styled = drom is not None and _event_tables(drom)[3]
+    if not styled and (pcol, ccol) == (upcol, uccol) and strips == ustrips:
+        print("word strips: as in the US")
+        return None
+    if styled:
+        pos = _event_positions(drom)
+        cells_tab, level_width = bytearray(drom[pos:pos + 32]), _event_level_width(drom)
+    else:
+        cells_tab, level_width = bytearray(us[EVENT_POSITIONS:EVENT_POSITIONS + 32]), EVENT_LEVEL_WIDTH
+    for t, col in ((0, pcol), (1, pcol), (2, pcol), (3, pcol), (4, ccol)):
+        v = _w(cells_tab, 2 * t)
+        v = v - v % 32 + col
+        cells_tab[2 * t:2 * t + 2] = bytes([v & 0xFF, v >> 8])
+    return [("art", g) for g in strips], bytes(cells_tab), level_width
+
+
+def event_spans(us, eg, events, months, strip_set=None, glyph_source=None):
+    """entries 13-36 and the month names -> (cart spans, report tile spans)
+
+    strip_set is (strips, first-cell table, level width) from donor_strip_set()
+    or _strips_from_png(): strips as ("art", [16-byte glyphs]) or ("text", str).
+    None keeps the US strips. events and months None keep the US lines and
+    month names byte for byte, for a build that changes only the strips."""
     slots = event_glyph_slots(us, eg)
-    donor_chr = report_sources(donor, eg)[0] if donor else None
     slot_of, glyphs = {}, []
 
     def tile(ch, where):
@@ -2527,16 +2982,16 @@ def event_spans(us, eg, events, months, donor):
         if code is not None:
             return code
         if ch not in slot_of:
-            if donor_chr is None:
-                sys.exit("%s uses %r: accented letters need --donor" % (where, ch))
+            if glyph_source is None:
+                sys.exit("%s uses %r: accented letters need --donor or "
+                         "--accents-from" % (where, ch))
             try:
                 c = ch.encode(CODEC)[0]
             except UnicodeEncodeError:
                 sys.exit("%s: %r has no code in the game's character set" % (where, ch))
-            t = EVENT_DONOR_FACE + c
-            g = donor_chr[t * 16:t * 16 + 16]
-            if len(g) != 16 or len(set(g)) <= 1:
-                sys.exit("%s uses %r, which the donor has no glyph for" % (where, ch))
+            g = glyph_source.report(c)
+            if g is None:
+                sys.exit("%s uses %r, which the glyph source has no glyph for" % (where, ch))
             if len(slot_of) == len(slots):
                 sys.exit("the event lines use more than %d accented letters"
                          % len(slots))
@@ -2551,26 +3006,23 @@ def event_spans(us, eg, events, months, donor):
         new = (old & 0xF000) | off
         table[2 * i:2 * i + 2] = bytes([new & 0xFF, new >> 8])
 
-    donor_rom = open(donor, "rb").read() if donor else None
-    strips = read_strips(donor_rom) if donor_rom else None
     level_width, art, threshold = EVENT_LEVEL_WIDTH, [], None
-    if strips is None:
+    if strip_set is None:
         blob = bytearray(us[EVENT_LIST:EVENT_LIST + EVENT_STRIP_BYTES])
     else:
+        strips, cells_tab, level_width = strip_set
         if us[EVENT_THRESHOLD_OPERAND - 1:EVENT_THRESHOLD_OPERAND + 2] != b"\xc0\x5e\x00":
             sys.exit("$02:B32B is not CPY #$005E; this is not the US word drawer")
-        level_width = _event_level_width(donor_rom)
         blob, room, art_of = bytearray(), strip_art_tiles(us, eg), {}
         for i, (kind, items) in enumerate(strips):
             if kind != "art":
                 continue
             point(i, len(blob))
-            for t in items:
-                g = bytes(donor_chr[t * 16:t * 16 + 16])
+            for g in items:
                 if g not in art_of:
                     if len(art_of) == len(room):
-                        sys.exit("the donor's word strips need more than the %d "
-                                 "strip tiles" % len(room))
+                        sys.exit("the word strips need more than the %d strip "
+                                 "tiles" % len(room))
                     art_of[g] = room[len(art_of)]
                     art.append((art_of[g] * 16, g))
                 blob.append(art_of[g] - 0x100)
@@ -2585,6 +3037,14 @@ def event_spans(us, eg, events, months, donor):
               % (sum(k == "art" for k, _ in strips), len(art_of),
                  sum(k == "text" for k, _ in strips), threshold))
     for i in range(EVENT_FIRST_TEXT, EVENT_COUNT):
+        if events is None:
+            point(i, len(blob))
+            a = EVENT_LIST + (_w(us, EVENT_TABLE + 2 * i) & 0x0FFF)
+            while us[a] != 0xFF:
+                blob.append(us[a])
+                a += 1
+            blob.append(0xFF)
+            continue
         lines = events[i]
         width = level_width if i < 16 else EVENT_WIDTH
         most = 1 if i < 16 else 2
@@ -2600,8 +3060,8 @@ def event_spans(us, eg, events, months, donor):
     if EVENT_FREE[0] + len(blob) > EVENT_FREE[1]:
         sys.exit("the event list needs %d bytes and bank 02 has %d free"
                  % (len(blob), EVENT_FREE[1] - EVENT_FREE[0]))
-    words = bytearray()
-    for n, name in enumerate(months):
+    words = bytearray(us[EVENT_MONTHS:EVENT_MONTHS + 96] if months is None else b"")
+    for n, name in enumerate(months or ()):
         if len(name) > 3:
             sys.exit("month %d %r: three letters" % (n + 1, name))
         for ch in name:
@@ -2618,9 +3078,8 @@ def event_spans(us, eg, events, months, donor):
             (EVENT_BASE_OPERAND, bytes([base & 0xFF, base >> 8])),
             (EVENT_TABLE, bytes(table)), (EVENT_MONTHS, bytes(words))]
     if threshold is not None:
-        pos = _event_positions(donor_rom)
         cart += [(EVENT_THRESHOLD_OPERAND, bytes([threshold & 0xFF, threshold >> 8])),
-                 (EVENT_POSITIONS, bytes(donor_rom[pos:pos + 32]))]
+                 (EVENT_POSITIONS, bytes(cells_tab))]
     return cart, glyphs + art
 
 
@@ -2656,10 +3115,478 @@ def _events_for(a, us, eg):
         doc = dict((int(e["id"]), e["lines"]) for e in doc)
         if months is None:
             months = read_events(us)[1]
-    if doc is None:
+    painted = getattr(a, "strips_from", None)
+    strip_set = (_strips_from_png(painted, us, eg, getattr(a, "donor", None))
+                 if painted else None)
+    if doc is None and strip_set is None:
         return [], []
-    cart, glyphs = event_spans(us, eg, doc, months, a.donor)
+    if not painted and getattr(a, "donor", None):
+        strip_set = donor_strip_set(a.donor, eg)
+    cart, glyphs = event_spans(us, eg, doc, months, strip_set, _glyph_source(a, eg))
     return cart, ([(REPORT_CHR, 16384, glyphs, (REPORT_SCREEN,))] if glyphs else [])
+
+
+# ── in-city panels ───────────────────────────────────────────────────────
+# The panels the icon bar opens -- GAME SPEED, OPTION, DISASTERS, INFORMATION,
+# LOAD SAVE -- take their title strip and icon captions from one 4bpp sheet,
+# $0A:A523 (384 tiles, unpacked to $7E8000 on $14 = $00). The window's tilemap
+# is the same in every language; what changes is which sheet tile lands in
+# which of its cells. $01:D729 does the copying: for page $01DF it takes a list
+# through the pointer table $03:E5CF -- (cell, sheet tile) word pairs up to
+# $FFFF -- and moves each tile to $7EC000 + cell * 32. On page 3 it then adds
+# two 3x3 groups, cells from $01:D6F3 and nine sheet tiles from $01:D717,
+# depending on $01E7.
+#
+# The German cartridge keeps the window and the code, redraws 175 sheet tiles
+# and uses longer lists: its titles fill all twelve cells of the strip where
+# the US leaves the ends of a short title undrawn. Its lists take 1426 bytes
+# against the US 1362, and bank 03 has 190 free, so an import writes the table
+# and the lists into the free run at $0F:9B97 and repoints the two operands
+# that name them -- LDA $03E5CF,X and the LDA #$03 before PLB. Those are code,
+# so recomp/bank01.cfg keeps $01:D729 on the interpreter.
+#
+# A page is edited as a picture. text_tool.py panels exports the five pages,
+# 16x12 cells each, and page 3's nine extra tiles; cells a page leaves undrawn
+# are PANEL_MARK. An import rebuilds the sheet and the lists from what the
+# picture shows. $01:D729 is the only code that copies out of the unpacked
+# sheet (the ASL x5 / ADC #$8000 idiom occurs twice in each cartridge, both
+# there), so every sheet tile but page 3's nine extras is free to redraw; the
+# 41 no US list reads are blank. Tiles that already hold a wanted glyph are
+# kept as they are.
+PANEL_SHEET = 0x052523
+PANEL_SCREEN = 0x00
+PANEL_PAGES = 5                       # $01DF 5-7 point at page 0's list
+PANEL_GRID = (16, 12)
+PANEL_EXTRAS = 9
+PANEL_HOME = (0x079C00, 0x07A800)     # $0F:9C00, inside the $FF run $0F:9B97-$0F:A80F
+PANEL_MARK = (255, 128, 0)
+PANEL_READER = rb"\xc2\x30\xad\xdf\x01\x0a\xaa\xbf(..)(.)\x48\xa0\x00\x00\xe2\x20\xa9(.)\x48\xab"
+PANEL_EXTRA_READS = (rb"\xbf(..)\x01\xe8\xe8\xda",                  # LDA $01D6F3,X
+                     rb"\x0a\xaa\xbf(..)\x01\x0a\x0a\x0a\x0a\x0a")  # LDA $01D717,X
+
+
+def _w(b, off):
+    return b[off] | (b[off + 1] << 8)
+
+
+def panel_layout(rom):
+    """a cartridge's panel copy lists: ([(cell, sheet tile)] per page, page 3's
+    eighteen extra cells, its nine extra sheet tiles, the reader's match)"""
+    import re
+    b1 = rom[0x8000:0x10000]
+    m = re.search(PANEL_READER, b1, re.S)
+    if not m:
+        sys.exit("no panel copy routine found")
+    tbank, lbank = m.group(2)[0], m.group(3)[0]
+    base = tbank * 0x8000 + _w(m.group(1), 0) - 0x8000
+    pages = []
+    for k in range(PANEL_PAGES):
+        a, pairs = lbank * 0x8000 + _w(rom, base + 2 * k) - 0x8000, []
+        while _w(rom, a) != 0xFFFF:
+            pairs.append((_w(rom, a), _w(rom, a + 2)))
+            a += 4
+        pages.append(pairs)
+    tables = []
+    for pat in PANEL_EXTRA_READS:
+        hits = [x for x in re.finditer(pat, b1, re.S)
+                if m.start() < x.start() < m.start() + 0x100]
+        if len(hits) != 1:
+            sys.exit("the panel copy routine's page 3 tables were not found")
+        tables.append(_w(hits[0].group(1), 0))      # bank 01: address = file offset
+    cells = [_w(rom, tables[0] + 2 * k) for k in range(2 * PANEL_EXTRAS)]
+    tiles = [_w(rom, tables[1] + 2 * k) for k in range(PANEL_EXTRAS)]
+    return pages, cells, tiles, m
+
+
+def _panel_sheet(rom, eg, us):
+    upk = bytes(eg.nintendo_decompress(us, PANEL_SHEET)[0])
+    if rom == us:
+        return upk
+    tw = find_twin(scan_packets(rom, eg, 512), upk)
+    if not tw:
+        sys.exit("no panel sheet found in the donor")
+    return bytes(tw[2])
+
+
+def panel_pictures(path, eg, us):
+    """(five pages as {cell: 32 bytes}, page 3's nine extra tiles) as a
+    cartridge draws them"""
+    rom = open(path, "rb").read()
+    sheet = _panel_sheet(rom, eg, us)
+    pages, _, extra, _ = panel_layout(rom)
+    tile = lambda t: bytes(sheet[t * 32:t * 32 + 32])
+    return [dict((c, tile(t)) for c, t in pg) for pg in pages], [tile(t) for t in extra]
+
+
+def cmd_panels(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    us = open(a.rom, "rb").read()
+    pages, extra = panel_pictures(getattr(a, "from") or a.rom, eg, us)
+    w, h = PANEL_GRID
+    img = PIL.Image.new("RGB", (w * 8, h * 8 * (PANEL_PAGES + 1)), PANEL_MARK)
+    px = img.load()
+
+    def put(band, cell, b):
+        rows = _tile_pixels(b)
+        for y in range(8):
+            for x in range(8):
+                px[cell % w * 8 + x, (band * h + cell // w) * 8 + y] = LABEL_PAL[rows[y][x]]
+    for k, pg in enumerate(pages):
+        for cell, b in pg.items():
+            put(k, cell, b)
+    for k, b in enumerate(extra):
+        put(PANEL_PAGES, k // 3 * w + k % 3, b)
+    img.save(a.out)
+    print("panels -> %s: five pages of %dx%d cells (GAME SPEED, OPTION, "
+          "DISASTERS, INFORMATION, LOAD SAVE) and page 3's nine extra tiles "
+          "below. Paint in the sixteen colours only; a cell left entirely "
+          "orange %s is not drawn." % (a.out, w, h, PANEL_MARK))
+
+
+def _panels_from_png(path):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    w, h = PANEL_GRID
+    img = PIL.Image.open(path).convert("RGB")
+    if img.size != (w * 8, h * 8 * (PANEL_PAGES + 1)):
+        sys.exit("%s is %dx%d; the panel sheet is %dx%d"
+                 % ((path,) + img.size + (w * 8, h * 8 * (PANEL_PAGES + 1))))
+    px = img.load()
+    near = {}
+
+    def index(c):
+        if c not in near:
+            near[c] = min(range(16), key=lambda k: sum((c[j] - LABEL_PAL[k][j]) ** 2
+                                                       for j in range(3)))
+        return near[c]
+
+    def cell(band, c):
+        pts = [px[c % w * 8 + x, (band * h + c // w) * 8 + y]
+               for y in range(8) for x in range(8)]
+        if all(p == PANEL_MARK for p in pts):
+            return None
+        return _tile_bytes([[index(pts[y * 8 + x]) for x in range(8)] for y in range(8)])
+    pages = []
+    for k in range(PANEL_PAGES):
+        pg = {}
+        for c in range(w * h):
+            t = cell(k, c)
+            if t is not None:
+                pg[c] = t
+        pages.append(pg)
+    extra = [cell(PANEL_PAGES, k // 3 * w + k % 3) for k in range(PANEL_EXTRAS)]
+    if None in extra:
+        sys.exit("%s: page 3's nine extra tiles must all be painted" % path)
+    return pages, extra
+
+
+def panel_spans(us, eg, pages, extra):
+    """pictures of the five pages and page 3's extras -> (cart spans, packet entries)"""
+    sheet = bytes(eg.nintendo_decompress(us, PANEL_SHEET)[0])
+    tiles = len(sheet) // 32
+    upages, _, xtiles, m = panel_layout(us)
+    tile = lambda b, t: bytes(b[t * 32:t * 32 + 32])
+    if (all(dict((c, tile(sheet, t)) for c, t in upages[k]) == pages[k]
+            for k in range(PANEL_PAGES))
+            and [tile(sheet, t) for t in xtiles] == list(extra)):
+        print("panels: as in the US")
+        return [], []
+    new = bytearray(sheet)
+    for k, t in enumerate(xtiles):          # page 3's extras keep their tiles
+        new[t * 32:t * 32 + 32] = extra[k]
+    pool = [t for t in range(tiles) if t not in set(xtiles)]
+    in_pool = set(pool)
+    have = {}
+    for t in range(tiles):
+        if t not in in_pool:
+            have.setdefault(tile(new, t), t)
+    wanted, seen = [], set()
+    for pg in pages:
+        for c in sorted(pg):
+            if c >= PANEL_GRID[0] * PANEL_GRID[1]:
+                sys.exit("panel cell %d is outside the %dx%d grid" % ((c,) + PANEL_GRID))
+            if pg[c] not in seen:
+                seen.add(pg[c])
+                wanted.append(pg[c])
+    assign, used = {}, set()
+    for g in wanted:
+        if g in have:
+            assign[g] = have[g]
+    as_is = {}
+    for t in pool:
+        as_is.setdefault(tile(sheet, t), t)
+    for g in wanted:
+        if g not in assign and g in as_is:
+            assign[g] = as_is[g]
+            used.add(as_is[g])
+    free = [t for t in pool if t not in used]
+    redrawn = 0
+    for g in wanted:
+        if g in assign:
+            continue
+        if not free:
+            sys.exit("the panels need more than the %d sheet tiles there are "
+                     "to draw into" % len(pool))
+        t = free.pop(0)
+        new[t * 32:t * 32 + 32] = g
+        assign[g] = t
+        redrawn += 1
+    home, end = PANEL_HOME
+    addr = lambda off: 0x8000 + off % 0x8000
+    word = lambda v: bytes([v & 0xFF, v >> 8])
+    body, at, ptrs = bytearray(), {}, []
+    for pg in pages:
+        lst = b"".join(word(c) + word(assign[pg[c]]) for c in sorted(pg)) + b"\xff\xff"
+        if lst not in at:
+            at[lst] = addr(home + 2 * 8 + len(body))
+            body += lst
+        ptrs.append(at[lst])
+    ptrs += [ptrs[0]] * 3                   # pages 5-7, as in the US
+    blob = b"".join(word(v) for v in ptrs) + bytes(body)
+    if home + len(blob) > end:
+        sys.exit("the panel lists need %d bytes and $0F:%04X has %d"
+                 % (len(blob), addr(home), end - home))
+    cart = [(home, blob),
+            (0x8000 + m.start(1), word(addr(home))),
+            (0x8000 + m.start(2), bytes([home // 0x8000])),
+            (0x8000 + m.start(3), bytes([home // 0x8000]))]
+    spans = [(t * 32, tile(new, t)) for t in range(tiles) if tile(new, t) != tile(sheet, t)]
+    print("panels: %d cells on five pages, %d distinct tiles (%d redrawn); lists "
+          "%d bytes at $0F:%04X" % (sum(len(pg) for pg in pages), len(wanted),
+                                     redrawn, len(blob), addr(home)))
+    return cart, ([(PANEL_SHEET, len(sheet), spans, (PANEL_SCREEN,))] if spans else [])
+
+
+def _panels_for(a, us, eg):
+    """(cart spans, packet entries) for the panels a run asks for"""
+    if getattr(a, "panels", False):
+        if not a.donor:
+            sys.exit("--panels takes the donor's panels and needs --donor")
+        pages, extra = panel_pictures(a.donor, eg, us)
+    elif getattr(a, "panels_from", None):
+        pages, extra = _panels_from_png(a.panels_from)
+    else:
+        return [], []
+    return panel_spans(us, eg, pages, extra)
+
+
+# ── the scenario selector as a picture ───────────────────────────────────
+# The selector's words -- card names, disaster lines, the heading -- are 2bpp
+# tiles of $08:C4DB laid out by the 64x32 tilemap $0B:A5A1. The donor route in
+# cmd_packets copies a donor's layout. text_tool.py selector exports the whole
+# layer as a picture instead, with one more row below it holding the six tiles
+# of Sylt's disaster line: the host draws that card, and the donor route takes
+# its line from Rio's strip at row 11, columns 23-28.
+#
+# An import keeps every cell that still looks as it did. A changed cell takes
+# an identical tile if the set has one, otherwise a redrawn tile: one whose
+# cells have all changed, or a blank tile that neither this tilemap nor the
+# map select screen uses ($08:C4DB is that screen's BG3 set too). A cell keeps
+# its palette and priority and loses its flips. Sylt's line is written only if
+# it differs from Rio's US strip -- an entry at all makes the host blank the
+# card's own two lines.
+SELECTOR_W = 64
+MAPSELECT_BG3_MAP = 0x05A10B
+
+
+def selector_pictures(path, eg, us):
+    """(2048 cells of 64 indices, six Sylt tiles) as a cartridge draws the selector"""
+    rom = open(path, "rb").read()
+    umap = bytes(eg.nintendo_decompress(us, SELECTOR_MAP)[0])
+    uchr = bytes(eg.nintendo_decompress(us, SELECTOR_CHR)[0])
+    m, c = umap, uchr
+    if rom != us:
+        pk = scan_packets(rom, eg, 4096)
+        tm, tc = find_twin(pk, umap), find_twin(pk, uchr)
+        if not tm or not tc:
+            sys.exit("no selector packets found in %s" % os.path.basename(path))
+        m, c = tm[2], tc[2]
+    words = _map_words(m)
+    line = [words[SYLT_SRC_ROW * SELECTOR_W + SYLT_SRC_COL + k] & 0x3ff
+            for k in range(SYLT_STRIP_LEN)]
+    return ([_cell_any(c, 16, e) for e in words], [_cell_any(c, 16, t) for t in line],
+            [e & 0x3C00 for e in words])
+
+
+def cmd_selector(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    us = open(a.rom, "rb").read()
+    cells, sylt, attrs = selector_pictures(getattr(a, "from") or a.rom, eg, us)
+    us_words = _map_words(eg.nintendo_decompress(us, SELECTOR_MAP)[0])
+    rows = len(cells) // SELECTOR_W
+    img = PIL.Image.new("RGB", (SELECTOR_W * 8, (rows + 1) * 8), PANEL_MARK)
+    px = img.load()
+    for i, cell in enumerate(cells):
+        ramp = LABEL_PAL[:4] if attrs[i] == us_words[i] & 0x3C00 else _attr_ramp(attrs[i])
+        for j, v in enumerate(cell):
+            px[i % SELECTOR_W * 8 + j % 8, i // SELECTOR_W * 8 + j // 8] = ramp[v]
+    for k, cell in enumerate(sylt):
+        for j, v in enumerate(cell):
+            px[k * 8 + j % 8, rows * 8 + j // 8] = LABEL_PAL[v]
+    img.save(a.out)
+    print("scenario selector -> %s: the 64x32 word layer in four colours, and "
+          "below it the six tiles of Sylt's disaster line. The screen scrolls, "
+          "so cards sit where the tilemap has them, not where they look." % a.out)
+
+
+def selector_import(us, eg, path):
+    """a painted selector picture -> (tilemap bytes, tile spans, Sylt spans)"""
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    umap = bytes(eg.nintendo_decompress(us, SELECTOR_MAP)[0])
+    uchr = bytes(eg.nintendo_decompress(us, SELECTOR_CHR)[0])
+    words = _map_words(umap)
+    rows = len(words) // SELECTOR_W
+    img = PIL.Image.open(path).convert("RGB")
+    if img.size != (SELECTOR_W * 8, (rows + 1) * 8):
+        sys.exit("%s is %dx%d; the selector picture is %dx%d"
+                 % ((path,) + img.size + (SELECTOR_W * 8, (rows + 1) * 8)))
+    px = img.load()
+    decode = _attr_decoder(LABEL_PAL[:4])
+
+    def cell(col, row):
+        pts = [px[col * 8 + j % 8, row * 8 + j // 8] for j in range(64)]
+        return _decode_cell(decode, pts, "%s cell %d,%d" % (path, col, row))
+    decoded = [cell(i % SELECTOR_W, i // SELECTOR_W) for i in range(len(words))]
+    cells = [d[0] for d in decoded]
+    attrs = [words[i] & 0x3C00 if d[1] is None else d[1] for i, d in enumerate(decoded)]
+    tiles = len(uchr) // 16
+    tile = lambda b, t: bytes(b[t * 16:t * 16 + 16])
+    msel = set(w & 0x3ff for w in _map_words(
+        bytes(eg.nintendo_decompress(us, MAPSELECT_BG3_MAP)[0])[:2048]))
+    changed = [i for i, e in enumerate(words) if cells[i] != _cell_any(uchr, 16, e)]
+    chg = set(changed)
+    refs = {}
+    for i, e in enumerate(words):
+        refs.setdefault(e & 0x3ff, set()).add(i)
+    freed = sorted(t for t, cs in refs.items() if cs <= chg and t not in msel)
+    blank = [t for t in range(tiles)
+             if t not in refs and t not in msel and not any(tile(uchr, t))]
+    pool = freed + blank
+    in_pool = set(pool)
+    have, as_is = {}, {}
+    for t in range(tiles):
+        (as_is if t in in_pool else have).setdefault(tile(uchr, t), t)
+    wants = []
+    for i in changed:
+        g = _cell_pack(cells[i], 16, 0)
+        if g is None:
+            sys.exit("%s: selector cell %d,%d uses more than four colours"
+                     % (path, i % SELECTOR_W, i // SELECTOR_W))
+        wants.append((i, g))
+    assign, used = {}, set()
+    for _, g in wants:
+        if g in assign:
+            continue
+        if g in have:
+            assign[g] = have[g]
+        elif g in as_is and as_is[g] not in used:
+            assign[g] = as_is[g]
+            used.add(as_is[g])
+    free = [t for t in pool if t not in used]
+    new_chr, out_map = bytearray(uchr), bytearray(umap)
+    for _, g in wants:
+        if g in assign:
+            continue
+        if not free:
+            sys.exit("the selector picture needs more tiles than the %d it can "
+                     "redraw" % len(pool))
+        t = free.pop(0)
+        new_chr[t * 16:t * 16 + 16] = g
+        assign[g] = t
+    for i, g in wants:
+        w = attrs[i] | assign[g]
+        out_map[2 * i:2 * i + 2] = bytes([w & 0xFF, w >> 8])
+    recoloured = [i for i, e in enumerate(words) if i not in chg and attrs[i] != e & 0x3C00]
+    for i in recoloured:                    # same picture, other palette: keep the tile
+        w = (words[i] & 0xC3FF) | attrs[i]
+        out_map[2 * i:2 * i + 2] = bytes([w & 0xFF, w >> 8])
+    spans = [(t * 16, tile(new_chr, t)) for t in range(tiles)
+             if tile(new_chr, t) != tile(uchr, t)]
+    line = []
+    for k in range(SYLT_STRIP_LEN):
+        g = _cell_pack(cell(k, rows)[0], 16, 0)
+        if g is None:
+            sys.exit("%s: Sylt's line uses more than four colours" % path)
+        line.append(g)
+    us_line = [tile(uchr, words[SYLT_SRC_ROW * SELECTOR_W + SYLT_SRC_COL + k] & 0x3ff)
+               for k in range(SYLT_STRIP_LEN)]
+    sylt = [] if line == us_line else [
+        ((SYLT_CARD_ROW * SYLT_CARD_W + SYLT_CARD_COL + k) * CHR_BYTES_PER_TILE, g)
+        for k, g in enumerate(line)]
+    print("scenario selector from %s: %d cells changed, %d recoloured, %d tiles "
+          "redrawn, Sylt's line %s" % (os.path.basename(path), len(changed),
+                                        len(recoloured), len(spans),
+                                        "painted" if sylt else "as in the US"))
+    return bytes(out_map), spans, sylt
+
+
+# ── every picture at once ────────────────────────────────────────────────
+# text_tool.py graphics --out DIR [--from ROM] writes each exporter's picture
+# into one folder; packets and translate take --graphics-from DIR and import
+# whichever of those files are present. A donor flag given as well (--reports,
+# --panels, ...) still wins for its own set.
+GRAPHICS = (
+    # (name in the folder, exporter, the option it fills, what it is)
+    ("reports", "cmd_reports", "reports_from",
+     "budget, evaluation, overview and events screens, four PNGs"),
+    ("maptitles.png", "cmd_maptitles", "maptitles_from", "map window titles"),
+    ("labels.png", "cmd_labels", "labels_from", "the toolbar's building labels"),
+    ("panels.png", "cmd_panels", "panels_from", "the in-city panels"),
+    ("mapselect.png", "cmd_mapselect", "mapselect_from", "MAP SELECT and Please wait..."),
+    ("strips.png", "cmd_strips", "strips_from", "the evaluation's problems and categories"),
+    ("accents.png", "cmd_accents", "accents_from", "accented glyphs of four fonts"),
+    ("selector.png", "cmd_selector", "selector_from",
+     "scenario card names, disaster lines and Sylt's line"),
+)
+
+
+def cmd_graphics(a):
+    os.makedirs(a.out, exist_ok=True)
+    src = getattr(a, "from") or a.rom
+    notes = ["Pictures exported from %s by text_tool.py graphics." % os.path.basename(src),
+             "Edit any of them and build with --graphics-from %s; files you" % a.out,
+             "delete are simply not imported. Palette colours only, 8-pixel grid;",
+             "orange cells mean 'not drawn' wherever a picture has them.", ""]
+    for name, fn, _, what in GRAPHICS:
+        ns = argparse.Namespace(out=os.path.join(a.out, name), rom=a.rom)
+        setattr(ns, "from", getattr(a, "from"))
+        if fn == "cmd_labels":
+            ns.rom = src
+        print("%s:" % name)
+        globals()[fn](ns)
+        notes.append("%-15s %s" % (name, what))
+    with open(os.path.join(a.out, "README.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(notes) + "\n")
+    print("all pictures -> %s" % a.out)
+
+
+def _graphics_dir(a):
+    """fill each *_from option from a --graphics-from folder, where a file is there"""
+    folder = getattr(a, "graphics_from", None)
+    if not folder:
+        return
+    if not os.path.isdir(folder):
+        sys.exit("--graphics-from %s is not a folder" % folder)
+    found = []
+    for name, _, opt, _ in GRAPHICS:
+        path = os.path.join(folder, name)
+        if os.path.exists(path) and not getattr(a, opt, None):
+            setattr(a, opt, path)
+            found.append(name)
+    print("graphics from %s: %s" % (folder, ", ".join(found) or "nothing"))
 
 
 def write_packets(path, entries):
@@ -2697,13 +3624,28 @@ def _packets_menu_only(a, us, eg):
         art_spans += sa
         cart += sc
     cart += _msg_cols_spans(a)
+    if getattr(a, "labels_from", None):
+        sp = label_spans(a.labels_from, us)
+        cart += sp
+        print("building labels from %s: %d tiles changed"
+              % (os.path.basename(a.labels_from), len(sp)))
     ncart, nfont = _notices_for(a, us)
     ecart, echr = _events_for(a, us, eg)
-    ncart = ncart + ecart
-    nfont = nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
+    pcart, pchr = _panels_for(a, us, eg)
+    ncart = ncart + ecart + pcart
+    nfont = (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
+             + pchr + _mapselect_for(a, us, eg))
+    sel = []
+    if getattr(a, "selector_from", None):
+        smap, sspans, sylt = selector_import(us, eg, a.selector_from)
+        if smap != bytes(eg.nintendo_decompress(us, SELECTOR_MAP)[0]) or sspans:
+            sel += [(SELECTOR_MAP, len(smap), [(0, smap)]),
+                    (SELECTOR_CHR, 16384, sspans)]
+        if sylt:
+            sel.append((SYLT_CARD_PSEUDO, 0, sylt))
     write_packets(a.out, [(MENU_ART, len(art),
                            [(t * 32, d) for t, d in art_spans], MENU_SCREENS),
-                          (ROM_SPAN_PSEUDO, 0, cart + ncart)] + nfont)
+                          (ROM_SPAN_PSEUDO, 0, cart + ncart)] + sel + nfont)
 
 
 def _msg_cols_spans(a):
@@ -2717,13 +3659,14 @@ def _msg_cols_spans(a):
 
 def cmd_packets(a):
     eg = _lz5()
+    _graphics_dir(a)
     us = open(a.rom, "rb").read()
     if not a.donor:
         # No cartridge to lift artwork from. The menu is composed from the
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
         for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles",
-                    "mapselect", "events"):
+                    "mapselect", "events", "panels"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -2845,6 +3788,8 @@ def cmd_packets(a):
         sylt.append((slot * CHR_BYTES_PER_TILE, art(dchr, t)))
     print("  Sylt's disaster line: %d tiles from the donor's own strip"
           % len(sylt))
+    if getattr(a, "selector_from", None):
+        out_map, spans, sylt = selector_import(us, eg, a.selector_from)
 
     # --swap takes a whole packet from the donor rather than reasoning about
     # its cells. The menus need this: their tilemaps are byte-identical
@@ -2930,11 +3875,13 @@ def cmd_packets(a):
     rom_spans += ncart
     ecart, echr = _events_for(a, us, eg)
     rom_spans += ecart
+    pcart, pchr = _panels_for(a, us, eg)
+    rom_spans += pcart
     extra += (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
-              + _mapselect_for(a, us, eg) + echr)
-    entries = [(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
-               (SELECTOR_CHR, len(uchr), spans),
-               (SYLT_CARD_PSEUDO, 0, sylt)] + extra
+              + _mapselect_for(a, us, eg) + echr + pchr)
+    entries = ([(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
+                (SELECTOR_CHR, len(uchr), spans)]
+               + ([(SYLT_CARD_PSEUDO, 0, sylt)] if sylt else []) + extra)
     rom_spans += _msg_cols_spans(a)
     if rom_spans:
         entries.append((ROM_SPAN_PSEUDO, 0, rom_spans))
@@ -3171,13 +4118,15 @@ def cmd_template(a):
             "Leading spaces are layout.",
             "",
             "events: the lines of the LAST 10 EVENTS screen, ids 16-36, at most",
-            "two lines of 17 characters; ids 13-15 are the evaluation's game",
+            "two lines of 18 characters; ids 13-15 are the evaluation's game",
             "level, one line of 6. months: twelve three-letter names.",
             "",
             "Build it with:",
             "  python tools/text_tool.py translate --in FILE --out-prefix NAME",
             "Add --donor ROM for the accented glyphs of the message font, the",
-            "scenario card names and (with --hud) the building labels.",
+            "scenario card names and (with --hud) the building labels. Without",
+            "a donor, paint the pictures instead: text_tool.py graphics --out DIR",
+            "exports every one of them, and --graphics-from DIR imports them.",
         ],
         "language": ver,
         "columns": detect_msg_cols([to_text(r) for r in recs]),
@@ -3241,6 +4190,7 @@ def _translate_briefs(doc, us_rom):
 
 
 def cmd_translate(a):
+    _graphics_dir(a)
     doc = json.load(open(getattr(a, "in"), encoding="utf-8"))
     lang = doc.get("language", "xx")
     print("translating %s (%s)" % (os.path.basename(getattr(a, "in")), lang))
@@ -3264,13 +4214,16 @@ def cmd_translate(a):
 
     strings, npages = _translate_briefs(doc, a.us_rom)
     glyphs, sglyphs = [], []
-    if a.donor:
-        dv = detect_region(a.donor)
-        glyphs = accent_glyphs(a.donor, dv, a.us_rom)
-        recs = remap_accents(recs, a.donor, dv)
-        sglyphs = scen_glyphs(a.donor, dv)
+    source = _glyph_source(a)
+    if source:
+        pairs = source.message_pairs()
+        glyphs = [(ACCENT_SLOT_BASE + k, g) for k, (_, g) in enumerate(pairs)]
+        table = dict((code, ACCENT_SLOT_BASE + k) for k, (code, _) in enumerate(pairs))
+        recs = [bytes(table.get(b, b) for b in r) for r in recs]
+        sglyphs = source.briefing()
     elif any(ord(c) > 126 for e in entries for c in e["text"]):
-        print("  note: no --donor, so the message font keeps the US glyphs")
+        print("  note: no --donor or --accents-from, so the message font keeps "
+              "the US glyphs")
 
     blob = make_blob(recs, (), None, glyphs, strings, sglyphs, None, None)
     open(a.out_prefix + ".bin", "wb").write(blob)
@@ -3289,7 +4242,11 @@ def cmd_translate(a):
         menu_saved=doc.get("menu_saved") or None, notices=False,
         notices_doc=doc.get("notices"), reports=False,
         reports_from=a.reports_from, maptitles=False,
-        maptitles_from=a.maptitles_from, events=False,
+        maptitles_from=a.maptitles_from, panels=False,
+        panels_from=a.panels_from, mapselect=False,
+        mapselect_from=a.mapselect_from, accents_from=a.accents_from,
+        strips_from=a.strips_from, selector_from=a.selector_from,
+        events=False,
         events_doc=doc.get("events"), months_doc=doc.get("months"))
     cmd_packets(ns)
 
@@ -3375,9 +4332,26 @@ def main():
                          "letters are built on the fly")
     pc.add_argument("--events", action="store_true",
                     help="take the event lines and month names from the donor")
+    pc.add_argument("--graphics-from", metavar="DIR",
+                    help="a folder from text_tool.py graphics: every picture in "
+                         "it is imported")
+    pc.add_argument("--selector-from", metavar="PNG",
+                    help="a painted scenario selector from text_tool.py selector")
+    pc.add_argument("--strips-from", metavar="PNG",
+                    help="painted evaluation word strips from text_tool.py strips")
+    pc.add_argument("--mapselect-from", metavar="PNG",
+                    help="an edited map select picture from text_tool.py mapselect")
+    pc.add_argument("--accents-from", metavar="PNG",
+                    help="painted accented glyphs from text_tool.py accents, "
+                         "instead of the donor's")
     pc.add_argument("--mapselect", action="store_true",
                     help="take the map select header and \"Please wait...\" "
                          "from the donor")
+    pc.add_argument("--panels", action="store_true",
+                    help="take the in-city panels (titles and icon captions) "
+                         "from the donor")
+    pc.add_argument("--panels-from", metavar="PNG",
+                    help="an edited panel sheet from text_tool.py panels")
     pc.add_argument("--maptitles", action="store_true",
                     help="take the map window titles from the donor")
     pc.add_argument("--maptitles-from", metavar="PNG",
@@ -3417,6 +4391,48 @@ def main():
     mt.add_argument("--from", metavar="ROM",
                     help="export this cartridge's titles instead")
 
+    gx = sub.add_parser("graphics", help="every translatable picture into one folder")
+    gx.set_defaults(fn=cmd_graphics)
+    gx.add_argument("--out", required=True, metavar="DIR")
+    gx.add_argument("--rom", default="Sim City (U) [!].sfc")
+    gx.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's pictures instead")
+
+    sl = sub.add_parser("selector", help="the scenario selector's words as a PNG to paint")
+    sl.set_defaults(fn=cmd_selector)
+    sl.add_argument("--out", required=True)
+    sl.add_argument("--rom", default="Sim City (U) [!].sfc")
+    sl.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's selector instead")
+
+    st = sub.add_parser("strips", help="the evaluation's word strips as a PNG to paint")
+    st.set_defaults(fn=cmd_strips)
+    st.add_argument("--out", required=True)
+    st.add_argument("--rom", default="Sim City (U) [!].sfc")
+    st.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's strips instead")
+
+    ms = sub.add_parser("mapselect", help="the map select words as a PNG to paint")
+    ms.set_defaults(fn=cmd_mapselect)
+    ms.add_argument("--out", required=True)
+    ms.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ms.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's map select instead")
+
+    ac = sub.add_parser("accents", help="the accented glyph sets as a PNG to paint")
+    ac.set_defaults(fn=cmd_accents)
+    ac.add_argument("--out", required=True)
+    ac.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ac.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's glyphs instead")
+
+    pn = sub.add_parser("panels", help="the in-city panels as a PNG to paint")
+    pn.set_defaults(fn=cmd_panels)
+    pn.add_argument("--out", required=True)
+    pn.add_argument("--rom", default="Sim City (U) [!].sfc")
+    pn.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's panels instead")
+
     rp = sub.add_parser("reports", help="budget/evaluation/overview/events "
                         "screens as PNGs to paint")
     rp.set_defaults(fn=cmd_reports)
@@ -3445,6 +4461,20 @@ def main():
                     help="also take the building labels from the donor")
     tr.add_argument("--maptitles-from", metavar="PNG",
                     help="an edited map title sheet (text_tool.py maptitles)")
+    tr.add_argument("--graphics-from", metavar="DIR",
+                    help="a folder from text_tool.py graphics: every picture in "
+                         "it is imported")
+    tr.add_argument("--selector-from", metavar="PNG",
+                    help="a painted scenario selector (text_tool.py selector)")
+    tr.add_argument("--strips-from", metavar="PNG",
+                    help="painted evaluation word strips (text_tool.py strips)")
+    tr.add_argument("--mapselect-from", metavar="PNG",
+                    help="an edited map select picture (text_tool.py mapselect)")
+    tr.add_argument("--accents-from", metavar="PNG",
+                    help="painted accented glyphs (text_tool.py accents), instead "
+                         "of --donor's")
+    tr.add_argument("--panels-from", metavar="PNG",
+                    help="an edited panel sheet (text_tool.py panels)")
     tr.add_argument("--reports-from", metavar="DIR",
                     help="painted report screens (text_tool.py reports)")
     tr.add_argument("--labels-from", metavar="PNG",

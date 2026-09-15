@@ -4906,11 +4906,16 @@ category, level).
 The German cartridge runs a different drawer (`$02:B2F7`): its bytes are ASCII
 and CP437 drawn from a second copy of the face at tile `$270` + code, and `$FD`
 breaks a line nine cells further left. So its strings are decoded as text and
-re-encoded for the US drawer, which starts every line at column 12 of a paper
-ending at column 28: 17 cells, two lines. 21 of 24 German entries fit once
-re-wrapped; three are shortened (`EVENT_SHORTER`): the two "Bevoelkerung
-erreicht die ...-Marke" lines become "Bevoelkerung / 30,000 erreicht", and
-"Hohe Luftverschmutzung!" loses its exclamation mark.
+re-encoded for the US drawer, which starts every line at column 12: 18 cells,
+to column 29, two lines. 22 of 24 German entries fit once re-wrapped; two are
+shortened (`EVENT_SHORTER`): the "Bevoelkerung erreicht die ...-Marke" lines
+become "Bevoelkerung / 30,000 erreicht".
+
+Correction: the width was first taken as 17, which cost "Hohe
+Luftverschmutzung!" its exclamation mark and French a short form. The US
+itself writes "A deluge occurred!" in 18 cells, and column 29 is paper on the
+US, German and French events screens alike (compared cell by cell against
+column 28), so the lines now run to column 29.
 
 The German list, word strips included, is 630 bytes against the US 523, so it
 moves to the `$FF` filler at `$02:FCEC` and the base operand at `$02:B336` is
@@ -4921,9 +4926,9 @@ a tile below `$100`. `packets --events` takes the donor's; `template` exports
 `events` and `months` and `translate` imports them.
 
 Checked offline: all 24 entries decode to the intended text, and the months
-read JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ. French fits too, with one
-short form: "Taux de criminalite eleve!" becomes "Criminalite / elevee!". Its
-level names fit as they are, one right-aligned field of the donor's own width.
+read JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ. French fits too, with no
+short form at 18 cells. Its level names fit as they are, one right-aligned
+field of the donor's own width.
 
 ### Correction: the report import must never redraw the small font
 
@@ -5014,3 +5019,106 @@ no packet patch, does exactly the same, and so does `SC_FIBER=0`. These fixes
 are therefore checked by opening the screens fresh in play. Any test run from
 a save state also needs `SC_REPLAY_MENU=0`, or the replay automation takes the
 pad within a few seconds.
+
+## In-city panels
+
+The panels the icon bar opens -- GAME SPEED, OPTION, DISASTERS, INFORMATION,
+LOAD SAVE -- draw their title strip and icon captions from one 4bpp sheet,
+`$0A:A523` (384 tiles, unpacked to `$7E8000` on `$14 = $00`). The window around
+them is the same in the German cartridge (its bank 01 row tables, such as the
+ones `01:d94f` blits, differ only in pointers); what changes is which sheet
+tile lands in which cell.
+
+```
+01:d729  REP #$30 ; LDA $01df ; ASL ; TAX
+         LDA $03e5cf,X             ; list for page $01df (5-7 reuse page 0's)
+         LDA #$03 ; PHA ; PLB      ; the list is read in bank 03
+         (cell, sheet tile) word pairs until $FFFF, each
+         MVN 32 bytes $7E8000 + tile*32 -> $7EC000 + cell*32
+01:d77d  page 3 only: two 3x3 groups, cells from $01:d6f3, the nine sheet
+         tiles $15A-$162 from $01:d717, a group copied when its $01e7 bit is clear
+```
+
+German keeps the code and the window, redraws 175 sheet tiles and uses longer
+lists. Its titles fill all twelve cells of the strip (SPIELGESCHWINDIGKEIT,
+AUTO-FUNKTIONEN, KATASTROPHEN, INFORMATIONEN, LADEN SPEICHERN) where the US
+leaves the ends of a short title undrawn, and the captions change in their own
+cells (KARTE, KURVEN, STEUERN, UMFRAG, GESAMT, MODELL, MUSIK, ZUM MENU, ENDE).
+Its lists take 1426 bytes against the US 1362, and bank 03 has 190 free.
+
+So an import writes the table and the lists to bank 0F, into the `$FF` run at
+`$0F:9B97`-`$A80F` just before the message block at `$0F:A868`, and repoints the
+reader's two operands: the long table address and the `LDA #$03` before `PLB`.
+`recomp/bank01.cfg` keeps `$01:D729` on the interpreter for that, with
+`exit_mx_at 01d729 0 0`; exactly its two variants leave AOT.
+
+`text_tool.py panels --out PNG [--from ROM]` exports the five pages, 16x12
+cells each and stacked, with page 3's nine extra tiles in a band below, in the
+sixteen `LABEL_PAL` colours; a cell a page does not draw is solid orange.
+`packets --panels-from PNG` (and `translate --panels-from`) imports a painted
+sheet, `packets --panels` the donor's. The import rebuilds the lists and the
+sheet from the pictures. `$01:D729` is the only code that copies out of the
+unpacked sheet -- the `ASL x5 / ADC #$8000` idiom occurs twice in each
+cartridge, both inside it -- so every tile but page 3's extras may be
+redrawn (the 41 no US list reads are blank), and tiles already holding a
+wanted glyph are kept.
+
+Checked offline: the US export imports to no change; the German donor and the
+German PNG produce identical patches (344 distinct tiles, 161 redrawn, lists
+1442 bytes at `$0F:9C00`), and reading the patched image back through the
+relocated reader reproduces every German page and extra exactly. French does
+the same with 322 tiles, 123 redrawn, 1394 bytes.
+
+## Graphics: one folder out, one folder in
+
+Every translatable picture has an exporter and an importer, so a language
+without a donor cartridge can be painted, and a donor's pictures can be
+touched up before they go in:
+
+```
+python tools/text_tool.py graphics --out DIR [--from ROM]
+python tools/text_tool.py packets   ... --graphics-from DIR
+python tools/text_tool.py translate ... --graphics-from DIR
+```
+
+`graphics` writes each exporter's file into `DIR` with a `README.txt`; an
+import takes whichever files are present. Each also works alone, as
+`text_tool.py NAME --out ...` and `--NAME-from`:
+
+| file | what | how it imports |
+|---|---|---|
+| `reports/` | budget, evaluation, overview, events | redraw, reuse or allocate per cell, with colour attributes |
+| `maptitles.png` | map window titles | tile for tile |
+| `labels.png` | toolbar building labels | tile for tile, slices fixed |
+| `panels.png` | in-city panels, five pages + page 3's extras | lists and sheet rebuilt, lists in bank 0F |
+| `mapselect.png` | MAP SELECT, Please wait... | tiles redrawn in place |
+| `strips.png` | evaluation problems and categories | art in report rows `$18`-`$1D`, columns from the picture |
+| `accents.png` | accented glyphs: message font, notices, report face, briefing | glyph source instead of a donor |
+| `selector.png` | card names, disaster lines, Sylt's line | per cell, with colour attributes |
+
+Two conventions run through all of them. Colours are palette indices: the
+sixteen `LABEL_PAL` colours for 4bpp sets, the first four for 2bpp, and the
+grey `REPORT_RAMP` on the report screens; orange means a cell that is not
+drawn. And in the two tilemap pictures, reports and selector, a cell whose
+palette or priority differs from the US tilemap is shown in a ramp of its
+own (one hue per palette, paler for priority), which the import reads back
+as that cell's attribute -- plain pictures from before still import as they
+did.
+
+A donor flag (`--reports`, `--panels`, `--mapselect`, `--events`) still wins
+over the folder for its own set. What a picture cannot carry stays with the
+donor or the US: the report screens' number cells and title year column, and
+the text of every string, which lives in the translate JSON.
+
+Checked offline, per set and as a whole:
+
+- A US folder imports to nothing: the packet it builds is byte-identical to
+  the plain packet without it.
+- German and French donor builds were byte-identical before and after the
+  pictures went in, and the reports and selector pictures of both import to
+  exactly what the donor routes produce, colour attributes included.
+- A German folder reproduces the German cartridge: map select, accents and
+  panels identically to the donor routes; the strips drawn through the US
+  drawer match every German cell and both columns (as art in 79 tiles, where
+  the donor route uses 72 plus text); the selector on all 2048 cells, pixels
+  and attributes, with Sylt's line equal to the donor route's.
