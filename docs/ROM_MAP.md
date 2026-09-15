@@ -5096,6 +5096,7 @@ import takes whichever files are present. Each also works alone, as
 | `accents.png` | accented glyphs: message font, notices, report face, briefing | glyph source instead of a donor |
 | `selector.png` | card names, disaster lines, Sylt's line | per cell, with colour attributes |
 | `tilesets/` | city zone letters, bank window, graph title, gift signs, RCI meters | tile for tile |
+| `saveload/` | save/load dialog: sheet, prompt runs, month names | sheet up to 176 tiles, runs and months repointed |
 
 Two conventions run through all of them. Colours are palette indices: the
 sixteen `LABEL_PAL` colours for 4bpp sets, the first four for 2bpp, and the
@@ -5150,14 +5151,10 @@ donor route.
 
 Not taken, and why:
 
-- `$0B:86F7`, the save/load dialog sheet (4bpp, 162 tiles; German `$0B:951D`,
-  176). Its 4x4 city-category houses are built by `01:CEBC` from lists at
-  `$01:CD8A` that are identical in both cartridges, on tiles 0-143. But the
-  prompts -- "Where to save?", "Which to load?", CANCEL, YES/NO -- are copied
-  by table-driven routines in bank 00 (`00:CB13` through `$00:CAFA`,
-  `00:CB45` through `$00:CB32`), German's layout of them differs, it adds
-  "Welche Position?" on tiles 160-175, and it calls the loader from one more
-  site (`01:E110`). That is code, not art; it needs its own pass.
+- `$0B:86F7`, the save/load dialog sheet: taken separately, see "The save/load
+  dialog" below. (An earlier note here said German calls the sheet's loader
+  from one more site, `01:E110`. It does not: that is the clear routine
+  `00:CADD`, the German twin of `00:CA9D`, which the US calls at `01:E10D`.)
 - `$0B:BCAD` (loaded by `02:B58C` with the tiles `$0B:B5F3`): 94% of its bytes
   differ from German `$0B:CBE6`, but drawn with each cartridge's own tiles the
   two screens are the same picture. Nothing to translate.
@@ -5166,3 +5163,55 @@ Not taken, and why:
   not tiles.
 - The many small "differences" in banks 00-03 and 0F are false streams --
   code and message text that happen to decode as LZ5.
+
+## The save/load dialog
+
+The dialog's sheet `$0B:86F7` (4bpp, 162 tiles, unpacked to `$7E9000` by
+`00:CAE0`) holds the city-category houses of the save list, the name
+keyboard's letters, the CANCEL/YES/NO buttons and the prompts. Houses,
+keyboard and buttons sit at the same tiles in the German and French sheets:
+the houses are built by `01:CEBC` from 4x4 lists at `$01:CD8A` that are
+identical in all three cartridges, and the copy routines and their slot
+tables in bank 00 (`00:CB12` with `$00:CAFA`, `00:CB44` with `$00:CB32`) are
+the same code shifted.
+
+What differs are six operands and one table. Six sites in four dialog
+functions copy a prompt as a run of sheet tiles:
+
+```
+LDA #$9000 + tile*32 ; LDX #count ; JSR $CB12      (at most 12 tiles)
+
+site      US                          German                       French
+00:c7e0   Which to load?   85 x11     Welches Spiel laden?  80 x12  85 x10
+00:c8e0   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+00:c947   save?           155 x5      Speichern?            72 x8  155 x6
+00:c987   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+00:c9f5   save?           155 x5      Speichern?            72 x8  155 x6
+00:ca35   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+```
+
+And the save list's month names are a 36-byte table after `00:cd36`, three
+sheet codes a month (tile = code + 96: digits, then A-Z). German writes MAER,
+MAI, OKT and DEZ, its A-umlaut being tile 162; French FEV, AVR, AOU, DEC.
+Both donors' sheets are 176 tiles long, and German's last run is the
+"Welche Position?" prompt and the umlaut. (German also inserts a character
+remap into the name drawer, `CMP #$0028 / LDA #$0041` at `00:CDE1`; that is
+new code, not taken.)
+
+A packet patch may write past the US length -- the spans land in WRAM, and a
+donor's own sheet reaches just as far -- so the import takes the sheet whole,
+repoints the six (tile, count) operands and copies the month table.
+`recomp/bank00.cfg` keeps the four dialog functions (`00:C7DA`, `00:C8DA`,
+`00:C941`, `00:C9EF`) on the interpreter, with their exit widths: `00:c7da`
+returns in m0x0 from `00:c82c` and in m0x1 from `00:c8cd`, the rest in m0x0.
+Declared that way, the `$01DF` menu handlers that call them stay AOT. 34
+variants leave AOT -- the four functions' eight, and the copy routines and
+drawing helpers only these dialogs call -- and one other joins it.
+
+`text_tool.py saveload --out DIR` writes `sheet.png` (16 tiles wide, 11 rows,
+orange past the end) and `prompts.json` (the six runs and the twelve months as
+tile numbers); `packets --saveload` takes the donor's, `--saveload-from DIR`
+(or the graphics folder) painted ones. Checked offline: the US folder imports
+to nothing; the German and French folders import to exactly the donor routes
+(German: 83 tiles differ, six runs, months changed; French: 87), and the runs
+read back from the patched image are the donor's.

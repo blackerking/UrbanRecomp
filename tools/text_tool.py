@@ -3655,6 +3655,190 @@ def _tilesets_for(a, us, eg):
     return []
 
 
+# ── the save/load dialog ────────────────────────────────────────────────
+# The dialog's sheet $0B:86F7 (4bpp, 162 tiles, unpacked to $7E9000) holds the
+# city-category houses the save list shows, the name keyboard's letters, the
+# CANCEL/YES/NO buttons and the prompts. Houses, keyboard and buttons sit at
+# the same tiles in the German and French sheets. The prompts do not: six
+# sites in four dialog functions copy a run of tiles for them,
+#
+#   LDA #$9000 + tile*32 ; LDX #count ; JSR $CB12   (at most 12 tiles)
+#
+#   00:c7e0  "Which to load?"   tile  85 x11   German "Welches Spiel laden?"  80 x12
+#   00:c8e0  "Where to save?"   tile  72 x12   German "Welche Position?"     163 x12
+#   00:c947  "save?"            tile 155 x5    German "Speichern?"            72 x8
+#   00:c987  "Where to save?"   again, and 00:c9f5 "save?" / 00:ca35 "Where to
+#            save?" in the last dialog
+#
+# The save list's month names are the other difference: a 36-byte table of
+# sheet codes after 00:cd36 (tile = code + 96: digits, then A-Z), JAN..DEC.
+# German writes MAER, MAI, OKT, DEZ, its A-umlaut being tile 162 -- which only
+# the longer sheet has.
+#
+# Both donors use a longer sheet, 176 tiles, whose last run is new. A
+# packet entry may write past the US length -- the patch lands in WRAM, and a
+# donor's own sheet reaches just as far -- so the donor's sheet is taken whole
+# and the six (tile, count) operands repointed. Those are code, so
+# recomp/bank00.cfg keeps the four functions on the interpreter.
+#
+# text_tool.py saveload --out DIR writes sheet.png (16 tiles wide, 11 rows;
+# orange past the sheet's end) and prompts.json (the six runs and the twelve
+# months, as tile numbers). An import takes the painted tiles up to the last
+# one that is not orange, at most 176, and the runs and months from
+# prompts.json, or the US ones when the file is absent.
+SAVELOAD_SITE = rb"\xc2\x30\xa9(.)([\x90-\xa7])\xa2([\x01-\x0c])\x00\x20(..)\x20"
+SAVELOAD_MAX_TILES = 176
+SAVELOAD_PROMPTS = ("which to load", "where to save", "save?",
+                    "where to save (2)", "save? (2)", "where to save (3)")
+SAVELOAD_MONTHS = rb"\xc0\x09\x00\x90\xe8\x60"     # the RTS the month table follows
+SAVELOAD_CODE_BASE = 96
+
+
+def saveload_layout(rom):
+    """(sheet packet file offset, [(tile, count)] x6, [site file offsets],
+    month table file offset) of a cartridge"""
+    import re
+    from collections import Counter
+    b = rom[0:0x8000]
+    found = list(re.finditer(SAVELOAD_SITE, b, re.S))
+    if not found:
+        sys.exit("no save/load prompt sites found")
+    target = Counter(m.group(4) for m in found).most_common(1)[0][0]
+    sites = [m for m in found if m.group(4) == target]
+    if len(sites) != len(SAVELOAD_PROMPTS):
+        sys.exit("found %d save/load prompt sites, expected %d" % (len(sites), len(SAVELOAD_PROMPTS)))
+    runs = [((m.group(1)[0] | (m.group(2)[0] << 8)) - 0x9000, m.group(3)[0]) for m in sites]
+    if any(v % 32 for v, _ in runs):
+        sys.exit("a save/load prompt does not start on a tile boundary")
+    lm = re.search(rb"\xa2(..)\x86\x09\xa9(.)\x85\x0b\xa2\x00\x10\x86\x0e", b, re.S)
+    if not lm:
+        sys.exit("no save/load sheet loader found")
+    sheet = lm.group(2)[0] * 0x8000 + (lm.group(1)[0] | (lm.group(1)[1] << 8)) - 0x8000
+    mm = [m for m in re.finditer(SAVELOAD_MONTHS, b) if 0x4000 <= m.start() < 0x6000]
+    if len(mm) != 1:
+        sys.exit("found %d save list month tables, expected 1" % len(mm))
+    return sheet, [(v // 32, n) for v, n in runs], [m.start() for m in sites], mm[0].end()
+
+
+def saveload_pictures(path, eg):
+    """(sheet bytes, runs, twelve months of three tiles) as a cartridge has them"""
+    rom = open(path, "rb").read()
+    sheet_off, runs, _, mon = saveload_layout(rom)
+    months = [[SAVELOAD_CODE_BASE + c for c in rom[mon + 3 * k:mon + 3 * k + 3]] for k in range(12)]
+    return bytes(eg.nintendo_decompress(rom, sheet_off)[0]), runs, months
+
+
+def cmd_saveload(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    sheet, runs, months = saveload_pictures(getattr(a, "from") or a.rom, eg)
+    os.makedirs(a.out, exist_ok=True)
+    rows = SAVELOAD_MAX_TILES // 16
+    img = PIL.Image.new("RGB", (16 * 8, rows * 8), PANEL_MARK)
+    px = img.load()
+    for t in range(len(sheet) // 32):
+        cells = _tile_pixels(sheet[t * 32:t * 32 + 32])
+        for y in range(8):
+            for x in range(8):
+                px[t % 16 * 8 + x, t // 16 * 8 + y] = LABEL_PAL[cells[y][x]]
+    img.save(os.path.join(a.out, "sheet.png"))
+    with open(os.path.join(a.out, "prompts.json"), "w", encoding="utf-8") as f:
+        json.dump({"_readme": "Each prompt is a run of consecutive tiles in sheet.png "
+                              "(tile = row * 16 + column), at most 12 long. "
+                              "months: twelve names of three tiles each, from "
+                              "the font rows (tile 96 is 0, tile 106 is A).",
+                   "prompts": [{"what": w, "tile": t, "count": n}
+                               for w, (t, n) in zip(SAVELOAD_PROMPTS, runs)],
+                   "months": months},
+                  f, ensure_ascii=False, indent=1)
+    print("save/load dialog -> %s: sheet.png (%d tiles) and prompts.json" % (a.out, len(sheet) // 32))
+
+
+def _saveload_from_dir(folder):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    path = os.path.join(folder, "sheet.png")
+    img = PIL.Image.open(path).convert("RGB")
+    rows = SAVELOAD_MAX_TILES // 16
+    if img.size != (16 * 8, rows * 8):
+        sys.exit("%s is %dx%d; the save/load sheet is %dx%d" % ((path,) + img.size + (16 * 8, rows * 8)))
+    px = img.load()
+    tiles = []
+    for t in range(SAVELOAD_MAX_TILES):
+        pts = [px[t % 16 * 8 + x, t // 16 * 8 + y] for y in range(8) for x in range(8)]
+        tiles.append(None if all(q == PANEL_MARK for q in pts) else
+                     _tile_bytes([[_nearest_pal(pts[y * 8 + x]) for x in range(8)] for y in range(8)]))
+    last = max([t for t, g in enumerate(tiles) if g is not None] or [-1])
+    if any(g is None for g in tiles[:last + 1]):
+        sys.exit("%s: every tile up to the last painted one must be painted" % path)
+    runs = months = None
+    jpath = os.path.join(folder, "prompts.json")
+    if os.path.exists(jpath):
+        doc = json.load(open(jpath, encoding="utf-8"))
+        runs = [(int(e["tile"]), int(e["count"])) for e in doc["prompts"]]
+        if len(runs) != len(SAVELOAD_PROMPTS):
+            sys.exit("%s: %d prompts, expected %d" % (jpath, len(runs), len(SAVELOAD_PROMPTS)))
+        if "months" in doc:
+            months = [[int(t) for t in m] for m in doc["months"]]
+            if len(months) != 12 or any(len(m) != 3 for m in months):
+                sys.exit("%s: months must be twelve lists of three tiles" % jpath)
+    return b"".join(tiles[:last + 1]), runs, months
+
+
+def saveload_spans(us, eg, sheet, runs, months=None):
+    """a sheet, six runs and twelve months -> (cart spans, packet entries)"""
+    sheet_off, us_runs, sites, mon = saveload_layout(us)
+    usheet = bytes(eg.nintendo_decompress(us, sheet_off)[0])
+    runs = runs or us_runs
+    us_months = [[SAVELOAD_CODE_BASE + c for c in us[mon + 3 * k:mon + 3 * k + 3]] for k in range(12)]
+    months = months or us_months
+    if len(sheet) % 32 or not 0 < len(sheet) // 32 <= SAVELOAD_MAX_TILES:
+        sys.exit("the save/load sheet must be 1-%d whole tiles" % SAVELOAD_MAX_TILES)
+    for (t, n), what in zip(runs, SAVELOAD_PROMPTS):
+        if not 1 <= n <= 12 or t < 0 or (t + n) * 32 > len(sheet):
+            sys.exit("save/load prompt %r: tiles %d-%d do not fit 12 tiles of a %d-tile sheet"
+                     % (what, t, t + n - 1, len(sheet) // 32))
+    for k, m in enumerate(months):
+        if any(not SAVELOAD_CODE_BASE <= t < len(sheet) // 32 for t in m):
+            sys.exit("save/load month %d uses tiles %s outside %d-%d of the sheet"
+                     % (k + 1, m, SAVELOAD_CODE_BASE, len(sheet) // 32 - 1))
+    if sheet == usheet and runs == us_runs and months == us_months:
+        print("save/load dialog: as in the US")
+        return [], []
+    spans = []
+    for t in range(len(sheet) // 32):
+        g = sheet[t * 32:t * 32 + 32]
+        if g != usheet[t * 32:t * 32 + 32]:
+            spans.append((t * 32, g))
+    cart = []
+    for site, (t, n), (ut, un) in zip(sites, runs, us_runs):
+        v = 0x9000 + t * 32
+        if (t, n) != (ut, un):
+            cart += [(site + 3, bytes([v & 0xFF, v >> 8])), (site + 6, bytes([n]))]
+    table = bytes(t - SAVELOAD_CODE_BASE for m in months for t in m)
+    if table != us[mon:mon + 36]:
+        cart.append((mon, table))
+    print("save/load dialog: %d-tile sheet, %d tiles differ from the US, %d prompt "
+          "runs repointed, months %s" % (len(sheet) // 32, len(spans), sum(1 for c in cart if len(c[1]) == 1),
+                                         "changed" if table != us[mon:mon + 36] else "as in the US"))
+    return cart, ([(sheet_off, len(sheet), spans)] if spans else [])
+
+
+def _saveload_for(a, us, eg):
+    if getattr(a, "saveload", False):
+        if not a.donor:
+            sys.exit("--saveload takes the donor's save/load dialog and needs --donor")
+        return saveload_spans(us, eg, *saveload_pictures(a.donor, eg))
+    if getattr(a, "saveload_from", None):
+        return saveload_spans(us, eg, *_saveload_from_dir(a.saveload_from))
+    return [], []
+
+
 # ── every picture at once ────────────────────────────────────────────────
 # text_tool.py graphics --out DIR [--from ROM] writes each exporter's picture
 # into one folder; packets and translate take --graphics-from DIR and import
@@ -3674,6 +3858,8 @@ GRAPHICS = (
      "scenario card names, disaster lines and Sylt's line"),
     ("tilesets", "cmd_tilesets", "tilesets_from",
      "city tiles, bank window, graph title, gift signs, RCI meters"),
+    ("saveload", "cmd_saveload", "saveload_from",
+     "the save/load dialog: its sheet and where its prompts are"),
 )
 
 
@@ -3756,7 +3942,9 @@ def _packets_menu_only(a, us, eg):
     ncart, nfont = _notices_for(a, us)
     ecart, echr = _events_for(a, us, eg)
     pcart, pchr = _panels_for(a, us, eg)
-    ncart = ncart + ecart + pcart
+    scart, schr = _saveload_for(a, us, eg)
+    ncart = ncart + ecart + pcart + scart
+    nfont = nfont + schr
     nfont = (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
              + pchr + _mapselect_for(a, us, eg) + _tilesets_for(a, us, eg))
     sel = []
@@ -3790,7 +3978,7 @@ def cmd_packets(a):
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
         for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles",
-                    "mapselect", "events", "panels", "tilesets"):
+                    "mapselect", "events", "panels", "tilesets", "saveload"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -4001,6 +4189,9 @@ def cmd_packets(a):
     rom_spans += ecart
     pcart, pchr = _panels_for(a, us, eg)
     rom_spans += pcart
+    scart, schr = _saveload_for(a, us, eg)
+    rom_spans += scart
+    extra += schr
     extra += (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
               + _mapselect_for(a, us, eg) + echr + pchr + _tilesets_for(a, us, eg))
     entries = ([(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
@@ -4371,6 +4562,7 @@ def cmd_translate(a):
         mapselect_from=a.mapselect_from, accents_from=a.accents_from,
         strips_from=a.strips_from, selector_from=a.selector_from,
         tilesets=False, tilesets_from=a.tilesets_from,
+        saveload=False, saveload_from=a.saveload_from,
         events=False,
         events_doc=doc.get("events"), months_doc=doc.get("months"))
     cmd_packets(ns)
@@ -4457,6 +4649,11 @@ def main():
                          "letters are built on the fly")
     pc.add_argument("--events", action="store_true",
                     help="take the event lines and month names from the donor")
+    pc.add_argument("--saveload", action="store_true",
+                    help="take the save/load dialog from the donor: its sheet and "
+                         "prompt runs")
+    pc.add_argument("--saveload-from", metavar="DIR",
+                    help="an edited save/load dialog from text_tool.py saveload")
     pc.add_argument("--tilesets", action="store_true",
                     help="take the tile-for-tile sets from the donor: city zone "
                          "letters, bank window, graph title, gift signs, RCI meters")
@@ -4520,6 +4717,13 @@ def main():
     mt.add_argument("--rom", default="Sim City (U) [!].sfc")
     mt.add_argument("--from", metavar="ROM",
                     help="export this cartridge's titles instead")
+
+    sv = sub.add_parser("saveload", help="the save/load dialog as a PNG and a JSON")
+    sv.set_defaults(fn=cmd_saveload)
+    sv.add_argument("--out", required=True, metavar="DIR")
+    sv.add_argument("--rom", default="Sim City (U) [!].sfc")
+    sv.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's dialog instead")
 
     ts = sub.add_parser("tilesets", help="the tile-for-tile sets as PNGs to paint")
     ts.set_defaults(fn=cmd_tilesets)
@@ -4598,6 +4802,8 @@ def main():
                     help="also take the building labels from the donor")
     tr.add_argument("--maptitles-from", metavar="PNG",
                     help="an edited map title sheet (text_tool.py maptitles)")
+    tr.add_argument("--saveload-from", metavar="DIR",
+                    help="an edited save/load dialog (text_tool.py saveload)")
     tr.add_argument("--tilesets-from", metavar="DIR",
                     help="edited tile set sheets (text_tool.py tilesets)")
     tr.add_argument("--graphics-from", metavar="DIR",
