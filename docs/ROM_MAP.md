@@ -5095,6 +5095,7 @@ import takes whichever files are present. Each also works alone, as
 | `strips.png` | evaluation problems and categories | art in report rows `$18`-`$1D`, columns from the picture |
 | `accents.png` | accented glyphs: message font, notices, report face, briefing | glyph source instead of a donor |
 | `selector.png` | card names, disaster lines, Sylt's line | per cell, with colour attributes |
+| `tilesets/` | city zone letters, bank window, graph title, gift signs, RCI meters | tile for tile |
 
 Two conventions run through all of them. Colours are palette indices: the
 sixteen `LABEL_PAL` colours for 4bpp sets, the first four for 2bpp, and the
@@ -5122,3 +5123,46 @@ Checked offline, per set and as a whole:
   drawer match every German cell and both columns (as art in 79 tiles, where
   the donor route uses 72 plus text); the selector on all 2048 cells, pixels
   and attributes, with Sylt's line equal to the donor route's.
+
+## Tile-for-tile sets, and what the packet inventory still shows
+
+Every LZ5 packet of the US cartridge was paired with its German counterpart
+(same decompressed length, best byte agreement) and the differing tiles
+looked at. Six sets differ only in words drawn at the same tile numbers, and
+each pairing is confirmed by the code that loads it (the `LDX #addr` / `LDA
+#bank` before the unpacking `COP #$00`):
+
+| set | US packet | German | loader US / German | tiles DE / FR |
+|---|---|---|---|---|
+| city map tiles: zone letters R, C -> W, G | `$07:E584` | `$07:E6E1` | `00:96C2` / `00:96B8` | 17 / 20 |
+| report screens BG1: BANK, LOANS, Yes/No, Go With Figures | `$08:E422` | `$08:E630` | `02:A119` / `02:A116` | 68 / 38 |
+| graph window title GRAPHS | `$0A:FCE1` | `$0B:8B11` | `02:98F9` / `02:98F9` | 16 / 24 |
+| gift building signs | `$0A:C4CF` | `$0A:CB37` | `01:CD6C` / `01:CD6F` | 54 / 64 |
+| RCI demand meter, city sprites | `$0A:81E9` | `$0A:8522` | `01:E45C` / `01:E45F` | 3 / 0 |
+| RCI demand meter, menu sprites | `$0A:8F68` | `$0A:92A2` | `01:E477` / `01:E47A` | 4 / 0 |
+
+`text_tool.py tilesets --out DIR [--from ROM]` writes each as a 16-tile-wide
+sheet; `packets --tilesets` takes the donor's differing tiles and
+`--tilesets-from DIR` (or the graphics folder) painted ones. No screen scope:
+the German art is what the German game shows wherever these unpack. Checked
+offline: the US sheets import to nothing, the German sheets to exactly the
+donor route.
+
+Not taken, and why:
+
+- `$0B:86F7`, the save/load dialog sheet (4bpp, 162 tiles; German `$0B:951D`,
+  176). Its 4x4 city-category houses are built by `01:CEBC` from lists at
+  `$01:CD8A` that are identical in both cartridges, on tiles 0-143. But the
+  prompts -- "Where to save?", "Which to load?", CANCEL, YES/NO -- are copied
+  by table-driven routines in bank 00 (`00:CB13` through `$00:CAFA`,
+  `00:CB45` through `$00:CB32`), German's layout of them differs, it adds
+  "Welche Position?" on tiles 160-175, and it calls the loader from one more
+  site (`01:E110`). That is code, not art; it needs its own pass.
+- `$0B:BCAD` (loaded by `02:B58C` with the tiles `$0B:B5F3`): 94% of its bytes
+  differ from German `$0B:CBE6`, but drawn with each cartridge's own tiles the
+  two screens are the same picture. Nothing to translate.
+- `$0C:87CB` is a 2048-byte tilemap page of the briefing screen, which the
+  translation runtime composes from strings; six differing words there are
+  not tiles.
+- The many small "differences" in banks 00-03 and 0F are false streams --
+  code and message text that happen to decode as LZ5.

@@ -3533,6 +3533,128 @@ def selector_import(us, eg, path):
     return bytes(out_map), spans, sylt
 
 
+# ── tile-for-tile sets ───────────────────────────────────────────────────
+# Graphics packets whose German copy has the same length and keeps every
+# word at the same tile numbers, drawn by tilemaps and code that are the same
+# in both cartridges. A translation is then only the tiles that differ, as
+# with the map titles. Found by pairing every US packet with its German twin
+# and looking at the tiles that differ:
+#
+#   $07:E584  city map tiles       zone letters R and C become W and G
+#   $08:E422  report screens BG1   BANK / LOANS signs, Yes/No, Go With Figures
+#   $0A:FCE1  graph window         the GRAPHS title (KURVEN)
+#   $0A:C4CF  gift buildings       their signs (Zoo, Casino, Stadium, Expo...)
+#   $0A:81E9  city sprites         the RCI demand meter (WGI)
+#   $0A:8F68  menu sprites         the RCI demand meter, second copy
+#
+# No screen scope: the German art is what the German game shows wherever the
+# packet unpacks. text_tool.py tilesets exports each as a 16-tile-wide sheet;
+# an import takes the tiles that differ from the US packet.
+TILESETS = (
+    # (picture, US packet, bytes a tile)
+    ("citytiles.png", 0x03E584, 32),
+    ("bank.png", 0x046422, 32),
+    ("graphs.png", 0x057CE1, 32),
+    ("gifts.png", 0x0544CF, 32),
+    ("rci.png", 0x0501E9, 32),
+    ("rci_menu.png", 0x050F68, 32),
+)
+
+
+def tileset_sheets(path, eg, us):
+    """{US packet offset: that set's bytes as a cartridge has them}"""
+    rom = open(path, "rb").read()
+    out = {}
+    for name, off, bpt in TILESETS:
+        u = bytes(eg.nintendo_decompress(us, off)[0])
+        if rom == us:
+            out[off] = u
+            continue
+        tw = find_twin(scan_packets(rom, eg, 512), u)
+        if not tw:
+            sys.exit("no counterpart of $%06X (%s) in %s" % (off, name, os.path.basename(path)))
+        out[off] = bytes(tw[2])
+    return out
+
+
+def cmd_tilesets(a):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    eg = _lz5()
+    us = open(a.rom, "rb").read()
+    sheets = tileset_sheets(getattr(a, "from") or a.rom, eg, us)
+    os.makedirs(a.out, exist_ok=True)
+    for name, off, bpt in TILESETS:
+        pk = sheets[off]
+        n = len(pk) // bpt
+        img = PIL.Image.new("RGB", (16 * 8, (n + 15) // 16 * 8), PANEL_MARK)
+        px = img.load()
+        for t in range(n):
+            rows = _tile_pixels(pk[t * bpt:(t + 1) * bpt])
+            for y in range(8):
+                for x in range(8):
+                    px[t % 16 * 8 + x, t // 16 * 8 + y] = LABEL_PAL[rows[y][x]]
+        img.save(os.path.join(a.out, name))
+        print("  %s  $%06X, %d tiles" % (name, off, n))
+    print("tile sets -> %s. Sixteen colours; keep every word on the tiles it "
+          "already uses, since the game places them by tile number." % a.out)
+
+
+def _tilesets_from_dir(folder, eg, us):
+    try:
+        import PIL.Image
+    except ImportError:
+        sys.exit("this needs Pillow: pip install Pillow")
+    out = {}
+    for name, off, bpt in TILESETS:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        u = bytes(eg.nintendo_decompress(us, off)[0])
+        n = len(u) // bpt
+        img = PIL.Image.open(path).convert("RGB")
+        if img.size != (16 * 8, (n + 15) // 16 * 8):
+            sys.exit("%s is %dx%d; that sheet is %dx%d"
+                     % ((path,) + img.size + (16 * 8, (n + 15) // 16 * 8)))
+        px = img.load()
+        pk = bytearray()
+        for t in range(n):
+            pk += _tile_bytes([[_nearest_pal(px[t % 16 * 8 + x, t // 16 * 8 + y])
+                                for x in range(8)] for y in range(8)])
+        out[off] = bytes(pk)
+    if not out:
+        sys.exit("no tile set pictures in %s" % folder)
+    return out
+
+
+def tileset_spans(us, eg, sheets):
+    """{US packet offset: wanted bytes} -> packet entries for the tiles that change"""
+    entries = []
+    for name, off, bpt in TILESETS:
+        if off not in sheets:
+            continue
+        u = bytes(eg.nintendo_decompress(us, off)[0])
+        pk = sheets[off]
+        spans = [(t * bpt, bytes(pk[t * bpt:(t + 1) * bpt])) for t in range(len(u) // bpt)
+                 if pk[t * bpt:(t + 1) * bpt] != u[t * bpt:(t + 1) * bpt]]
+        print("tile set %s: %d tiles changed" % (name, len(spans)))
+        if spans:
+            entries.append((off, len(u), spans))
+    return entries
+
+
+def _tilesets_for(a, us, eg):
+    if getattr(a, "tilesets", False):
+        if not a.donor:
+            sys.exit("--tilesets takes the donor's tile sets and needs --donor")
+        return tileset_spans(us, eg, tileset_sheets(a.donor, eg, us))
+    if getattr(a, "tilesets_from", None):
+        return tileset_spans(us, eg, _tilesets_from_dir(a.tilesets_from, eg, us))
+    return []
+
+
 # ── every picture at once ────────────────────────────────────────────────
 # text_tool.py graphics --out DIR [--from ROM] writes each exporter's picture
 # into one folder; packets and translate take --graphics-from DIR and import
@@ -3550,6 +3672,8 @@ GRAPHICS = (
     ("accents.png", "cmd_accents", "accents_from", "accented glyphs of four fonts"),
     ("selector.png", "cmd_selector", "selector_from",
      "scenario card names, disaster lines and Sylt's line"),
+    ("tilesets", "cmd_tilesets", "tilesets_from",
+     "city tiles, bank window, graph title, gift signs, RCI meters"),
 )
 
 
@@ -3634,7 +3758,7 @@ def _packets_menu_only(a, us, eg):
     pcart, pchr = _panels_for(a, us, eg)
     ncart = ncart + ecart + pcart
     nfont = (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
-             + pchr + _mapselect_for(a, us, eg))
+             + pchr + _mapselect_for(a, us, eg) + _tilesets_for(a, us, eg))
     sel = []
     if getattr(a, "selector_from", None):
         smap, sspans, sylt = selector_import(us, eg, a.selector_from)
@@ -3666,7 +3790,7 @@ def cmd_packets(a):
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
         for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles",
-                    "mapselect", "events", "panels"):
+                    "mapselect", "events", "panels", "tilesets"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -3878,7 +4002,7 @@ def cmd_packets(a):
     pcart, pchr = _panels_for(a, us, eg)
     rom_spans += pcart
     extra += (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
-              + _mapselect_for(a, us, eg) + echr + pchr)
+              + _mapselect_for(a, us, eg) + echr + pchr + _tilesets_for(a, us, eg))
     entries = ([(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                 (SELECTOR_CHR, len(uchr), spans)]
                + ([(SYLT_CARD_PSEUDO, 0, sylt)] if sylt else []) + extra)
@@ -4246,6 +4370,7 @@ def cmd_translate(a):
         panels_from=a.panels_from, mapselect=False,
         mapselect_from=a.mapselect_from, accents_from=a.accents_from,
         strips_from=a.strips_from, selector_from=a.selector_from,
+        tilesets=False, tilesets_from=a.tilesets_from,
         events=False,
         events_doc=doc.get("events"), months_doc=doc.get("months"))
     cmd_packets(ns)
@@ -4332,6 +4457,11 @@ def main():
                          "letters are built on the fly")
     pc.add_argument("--events", action="store_true",
                     help="take the event lines and month names from the donor")
+    pc.add_argument("--tilesets", action="store_true",
+                    help="take the tile-for-tile sets from the donor: city zone "
+                         "letters, bank window, graph title, gift signs, RCI meters")
+    pc.add_argument("--tilesets-from", metavar="DIR",
+                    help="edited tile set sheets from text_tool.py tilesets")
     pc.add_argument("--graphics-from", metavar="DIR",
                     help="a folder from text_tool.py graphics: every picture in "
                          "it is imported")
@@ -4390,6 +4520,13 @@ def main():
     mt.add_argument("--rom", default="Sim City (U) [!].sfc")
     mt.add_argument("--from", metavar="ROM",
                     help="export this cartridge's titles instead")
+
+    ts = sub.add_parser("tilesets", help="the tile-for-tile sets as PNGs to paint")
+    ts.set_defaults(fn=cmd_tilesets)
+    ts.add_argument("--out", required=True, metavar="DIR")
+    ts.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ts.add_argument("--from", metavar="ROM",
+                    help="export this cartridge's sets instead")
 
     gx = sub.add_parser("graphics", help="every translatable picture into one folder")
     gx.set_defaults(fn=cmd_graphics)
@@ -4461,6 +4598,8 @@ def main():
                     help="also take the building labels from the donor")
     tr.add_argument("--maptitles-from", metavar="PNG",
                     help="an edited map title sheet (text_tool.py maptitles)")
+    tr.add_argument("--tilesets-from", metavar="DIR",
+                    help="edited tile set sheets (text_tool.py tilesets)")
     tr.add_argument("--graphics-from", metavar="DIR",
                     help="a folder from text_tool.py graphics: every picture in "
                          "it is imported")
