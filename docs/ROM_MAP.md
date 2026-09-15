@@ -4850,13 +4850,16 @@ Reported after the report screens, notices and map titles went in. Listed
 with the lead each one has, where there is one; none is investigated yet.
 
 - **Map select and PLEASE WAIT are English.** Fixed, see "The map select screen" below.
-- **Evaluation title misaligned.** The US screen has the year in its title
-  and the US code writes it into the title cells; the German title has no
-  year, so the digits land on STATISTISCHE. The earlier cell check already
-  flagged German artwork at rows 1-2, col 8, a runtime cell.
+- **Evaluation title misaligned.** Fixed. The year is four big digits drawn by
+  `$02:B51F` at row 1, column 6; the German cartridge draws them at column 2,
+  left of STATISTISCHE, and that operand is now taken. See "Report cells follow
+  the donor" below.
 - **Evaluation: Kategorie and Schwierigkeitsgrad come out misspelled.** The
   US code draws the category and level words ("Village", "Easy") at US
-  cell positions, and the longer German labels run into those cells.
+  cell positions, and the longer German labels run into those cells. Fixed
+  with the word strips and the donor's cells, same section.
+- **Evaluation: the runtime digit lands on the % of "% JA" / "% NEIN".** Fixed:
+  the German number layout puts those digits one column left, and it is copied.
 - **Evaluation: the "($)" after Wert der Stadt shows wrong tiles; overview:
   one wrong tile each in Feuerwehrstationen and Wasserflaechen; Kategorie and
   Schwierigkeitsgrad misspelled.** Fixed: the import had allocated new tiles in
@@ -4909,18 +4912,18 @@ re-wrapped; three are shortened (`EVENT_SHORTER`): the two "Bevoelkerung
 erreicht die ...-Marke" lines become "Bevoelkerung / 30,000 erreicht", and
 "Hohe Luftverschmutzung!" loses its exclamation mark.
 
-The German list is 590 bytes against the US 523, so it moves to the `$FF`
-filler at `$02:FCEC` and the base operand at `$02:B336` is repointed; the first
-`$60` bytes (the strips) are copied across unchanged. Accented letters get
-glyphs from the donor's `$270` face -- the US letter with dots -- in free
-report tiles below `$100`, because a string byte can only name a tile below
-`$100`. `packets --events` takes the donor's; `template` exports `events` and
-`months` and `translate` imports them.
+The German list, word strips included, is 630 bytes against the US 523, so it
+moves to the `$FF` filler at `$02:FCEC` and the base operand at `$02:B336` is
+repointed (which only works on the interpreter -- see the correction below).
+Accented letters get glyphs from the donor's `$270` face -- the US letter with
+dots -- in free report tiles below `$100`, because a string byte can only name
+a tile below `$100`. `packets --events` takes the donor's; `template` exports
+`events` and `months` and `translate` imports them.
 
-Checked offline: all 24 entries decode to the intended text, the months read
-JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ, the strips and their offsets
-are unchanged. French does not fit yet: "Difficile" (6 cells) and "Taux de
-criminalite eleve!" need shorter forms.
+Checked offline: all 24 entries decode to the intended text, and the months
+read JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ. French fits too, with one
+short form: "Taux de criminalite eleve!" becomes "Criminalite / elevee!". Its
+level names fit as they are, one right-aligned field of the donor's own width.
 
 ### Correction: the report import must never redraw the small font
 
@@ -4929,3 +4932,85 @@ the small font `$00`-`$5F`. The report import redrew a tile in place whenever a
 single map cell used it, and R (`$11`) is used once by a label -- so
 "Reaktorunfall" and "APR" lost their R. `$00`-`$5F` are now protected; the
 report screens still match the German cartridge on every cell.
+
+### Correction: patched code bytes never reached play
+
+The event import above repointed the list base, an operand inside `$02:B328`,
+and was checked offline only. In play it could not have worked: the build
+runs `$02:B328` as recompiled C, and the generator writes every operand into
+that C as a constant, read from the ROM when `src/gen` was generated. A packet
+patch lays its bytes over the cart image at startup, and only the interpreter
+tier reads code from there. Data -- the offset table, the list, the month
+names -- is read through memory at runtime and was never affected.
+
+So a function whose code a translation changes has to run on the interpreter.
+`recomp/bank02.cfg` declares `force_lle` for `$02:B328` (the word drawer: list
+base and art threshold) and `$02:B51F` (the report title year). A forced
+function needs its exit width declared too: the analyzer cannot see how an
+interpreted callee returns, so every caller's continuation goes unproven and
+the callers drop to the interpreter as well. Without `exit_mx_at` the forced
+functions (with `$02:A66E`, tried and dropped) took some forty more variants
+off AOT, as far up as `$00:961C`; with it, exactly the four variants of the
+two functions leave, and nothing else in `src/gen` changes.
+
+`src/gen` is rebuilt by `tools/regen.sh`. On Windows run it with
+`PYTHON=python` set: the script prefers `python3`, which can be the Microsoft
+Store stub, and the failure is easy to miss behind a pipe.
+
+## Report cells follow the donor
+
+What the game prints over the four report screens sits at cells fixed by the
+US layout, and the donor places several of them differently to suit its own
+labels. Three kinds, all taken by `packets --reports` / `--events`:
+
+**Numbers** are placed by data. The number printer `$02:B266` reads a layout
+from `$02:B77C` up to the word list; the German and French cartridges have the
+same table, same length, at `$02:B787`. German differs in 18 words -- JA/NEIN
+one column left (so the digit no longer covers the `%`), the problem
+percentages one left, the overview's right column two right -- French in 9.
+The words that differ are copied.
+
+**The title year** is `$02:B51F`: four big-font digits at `LDX #$004C`, row 1
+column 6 (`#$004E` when `$01FB = 2`). German draws at `#$0044`, French at
+`#$0046`. The operand is found by the code around it in both cartridges and
+copied; being code, it relies on the `force_lle` above.
+
+**The word strips** are entries 0-12 of the word list: the evaluation's
+problems (0-6) and city category (7-12); entries 13-15 are the level names.
+The US draws the strips as artwork at report tiles `$181`..`$1DC` through the
+`$100` rule. The German drawer has no such rule. Its problems are squeezed
+lettering at its tiles `$320`..`$35F`, "Megametropole" is art at `$280`..`$28A`,
+and "Dorf", "Stadt", "Hauptstadt" and "Metropole" are plain text right-aligned
+in eleven cells ("Grossstadt" too, but its sharp s is byte `$9B`, not ASCII, so
+it is copied as art). French draws all thirteen as art.
+
+Art entries go first in the list, their glyphs copied into report tile rows
+`$18`..`$1D` -- the US strips' own rows, which no map uses (German needs 72
+tiles, French 73). Text entries follow in the small font. The threshold
+operand at `$02:B32C` is set to where the art ends (`$58` German, `$65` French),
+and the donor's first cell for each string type (`$02:BAB9`) comes along: the
+German category starts at column 18, four left of the US 22, the problems one
+left. Level names keep their spaces and may be as wide as the donor's widest.
+The report import no longer lets a static label reuse an unreferenced tile on
+those rows, since the strips may be redrawn; that changes nothing for German
+today (469 tiles, all four screens still identical to the donor's).
+
+Checked offline by running the US drawer's logic over the patched image: the
+nine German art strips match the donor pixel for pixel; the four text strips
+and the level names come out in the US small font, the same style as the
+donor's face and a few pixels apart on some capitals and digits; the number
+layout equals the donor's; the year operand reads `$44`.
+
+Not taken: German also moves the budget's tax rate digits (`STA $7E2B28`.. in
+`$02:A66E`) two columns right. Nothing collides there, and it would put one
+more function on the interpreter.
+
+### Save states taken on a report screen cannot check these screens
+
+Loading a state saved while a report screen is open does not redraw it. Frame
+0 is the saved picture; within 40 frames the tiles break up, and pad input at
+60 and 150 frames changes nothing visible. Plain US, with no translation and
+no packet patch, does exactly the same, and so does `SC_FIBER=0`. These fixes
+are therefore checked by opening the screens fresh in play. Any test run from
+a save state also needs `SC_REPLAY_MENU=0`, or the replay automation takes the
+pad within a few seconds.

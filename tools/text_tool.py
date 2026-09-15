@@ -1862,6 +1862,11 @@ REPORTS = (("budget", 0x05BF0E), ("evaluation", 0x05C0C9),
            ("overview", 0x05C29F), ("events", 0x05C488))
 REPORT_RAMP = ((20, 20, 30), (110, 120, 150), (190, 195, 215), (250, 250, 255))
 REPORT_ATTR = 0x3C00            # palette and priority; tile and flips excluded
+# The runtime word strips -- the problem list and the city category -- are
+# unreferenced artwork on rows $18-$1D. The event import may redraw them with
+# the donor's strips, so a static label must never reuse one of their tiles
+# merely because it looks the same today.
+REPORT_STRIP_ROWS = frozenset(range(0x18, 0x1E))
 # Tiles seen written at runtime on the four screens, from captures of each.
 REPORT_RUNTIME_TILES = frozenset(
     [0x000, 0x004, 0x009, 0x00D, 0x01F, 0x030, 0x032, 0x033, 0x034, 0x03B,
@@ -2004,7 +2009,8 @@ def report_spans(us, eg, painted, attrs=None):
     # pass 2: everything else reuses an untouched identical tile or takes a free one
     have = {}
     for t in range(tiles):
-        if t not in claimed and t // 16 not in REPORT_DYNAMIC_ROWS:
+        if (t not in claimed and t // 16 not in REPORT_DYNAMIC_ROWS
+                and (t in refs or t // 16 not in REPORT_STRIP_ROWS)):
             have.setdefault(_cell_px(chr_u, t), t)
     for t, px in claimed.items():
         have.setdefault(px, t)
@@ -2052,6 +2058,61 @@ def report_spans(us, eg, painted, attrs=None):
     return entries
 
 
+# What the game prints over the report screens is placed two ways. The number
+# cells are data: a layout the number printer $02:B266 reads, from $02:B77C up
+# to the word list. The donor moves some of them to suit its own labels --
+# JA/NEIN and the problem percentages one column left, the overview's right
+# column two right -- so the words that differ are copied. The title year's
+# column is an operand in code, LDX #$004C in $02:B51F, found by the code
+# around it in both cartridges; it only takes effect because recomp/bank02.cfg
+# keeps that function on the interpreter, as the recompiled game carries
+# operands as C constants. (The German cartridge also moves the budget's tax
+# rate digits, STA $7E2B28.. in $02:A66E, two columns right. Not taken: nothing
+# collides there, and it would put one more function on the interpreter.)
+REPORT_LAYOUT_OPERAND = rb"\x0a\xaa\xbd(..)\xa8\xa9\xff"     # $02:B275 LDA $B77C,X
+REPORT_CODE = (
+    ("title year column", rb"\xa0\x50\x0c\xa2(.)\x00\xad\xfb\x01\xc9\x02\x00"),
+)
+
+
+def _bank02_once(rom, pattern, what, whose):
+    import re
+    found = list(re.finditer(pattern, rom[0x010000:0x018000], re.S))
+    if len(found) != 1:
+        sys.exit("%s: the %s matches %d times in bank 02" % (whose, what, len(found)))
+    return found[0]
+
+
+def report_layout_spans(us, donor):
+    """the donor's number cells and code operands -> cart spans"""
+    rom, whose = open(donor, "rb").read(), os.path.basename(donor)
+    spans = []
+    for what, pattern in REPORT_CODE:
+        mu = _bank02_once(us, pattern, what, "the US cartridge")
+        md = _bank02_once(rom, pattern, what, whose)
+        moved = [g for g in range(1, mu.re.groups + 1) if mu.group(g) != md.group(g)]
+        spans += [(0x010000 + mu.start(g), md.group(g)) for g in moved]
+        print("  %s: %s" % (what, "%d operand%s from the donor"
+                            % (len(moved), "" if len(moved) == 1 else "s")
+                            if moved else "as in the US"))
+    at = lambda m: _bank02(m.group(1)[0] | (m.group(1)[1] << 8))
+    ulo = at(_bank02_once(us, REPORT_LAYOUT_OPERAND, "number layout", "the US cartridge"))
+    dlo = at(_bank02_once(rom, REPORT_LAYOUT_OPERAND, "number layout", whose))
+    uhi, dhi = _event_tables(us)[0], _event_tables(rom)[0]
+    if uhi - ulo != dhi - dlo or (uhi - ulo) % 2:
+        sys.exit("%s: its number layout is %d bytes, the US one %d"
+                 % (whose, dhi - dlo, uhi - ulo))
+    cells = (uhi - ulo) // 2
+    moved = [k for k in range(0, uhi - ulo, 2)
+             if us[ulo + k:ulo + k + 2] != rom[dlo + k:dlo + k + 2]]
+    if len(moved) * 4 > cells:
+        sys.exit("%s: %d of %d number cells differ; that is not the same layout"
+                 % (whose, len(moved), cells))
+    spans += [(ulo + k, bytes(rom[dlo + k:dlo + k + 2])) for k in moved]
+    print("  number cells: %d of %d placed as the donor has them" % (len(moved), cells))
+    return spans
+
+
 def _reports_for(a, us, eg):
     """the report screen entries a packets run asks for, if any"""
     folder = getattr(a, "reports_from", None)
@@ -2062,7 +2123,9 @@ def _reports_for(a, us, eg):
         painted = dict((n, [_cell_px(chrb, e) for e in w]) for n, w in maps)
         attrs = dict((n, [e & REPORT_ATTR for e in w]) for n, w in maps)
         print("report screens from the donor:")
-        return report_spans(us, eg, painted, attrs)
+        entries = report_spans(us, eg, painted, attrs)
+        cart = report_layout_spans(us, a.donor)
+        return entries + ([(ROM_SPAN_PSEUDO, 0, cart)] if cart else [])
     if not folder:
         return []
     try:
@@ -2249,12 +2312,28 @@ def _mapselect_for(a, us, eg):
 # once re-wrapped; the three that do not are shortened below and reported.
 #
 # The German list is longer than the US one, so it moves to the $FF filler at
-# $02:FCEC and the base operand at $02:B336 is repointed. The first $60 bytes
-# -- the strips, whose offsets must stay under $5E -- are copied across as they
-# are. Accented letters get glyphs from the donor's own $270 face, which draws
-# them as the US letters with dots, in free report tiles below $100, because a
-# string byte can only name a tile below $100.
+# $02:FCEC and the base operand at $02:B336 is repointed. Accented letters get
+# glyphs from the donor's own $270 face, which draws them as the US letters
+# with dots, in free report tiles below $100, because a string byte can only
+# name a tile below $100.
+#
+# Entries 0-12 are the evaluation's word strips: the problems and the city
+# category. A German-style donor draws some as artwork -- squeezed lettering
+# at its tiles $320-$35F, "Megametropole" at $280 -- and the rest ("Dorf",
+# "Stadt", ...) as plain text, right-aligned with spaces. The art is copied
+# into the US strip tiles (report rows $18-$1D, which no map uses) and listed
+# first; the text is re-encoded like the events. The threshold at $02:B32C is
+# set to where the art ends, and the donor's first cell for each string type
+# ($02:BAB9) is taken too -- its category starts four columns further left.
+# A US-style donor keeps the US strips, threshold and cells.
+#
+# The base and the threshold are operands in code, and the recompiled game
+# carries operands as C constants; they take effect only because
+# recomp/bank02.cfg keeps $02:B328 on the interpreter (force_lle).
 EVENT_BASE_OPERAND = 0x013336       # $02:B336, operand of LDA $B8B4,Y
+EVENT_THRESHOLD_OPERAND = 0x01332C  # $02:B32C, operand of CPY #$005E
+EVENT_POSITIONS = 0x013AB9          # $02:BAB9, first cell of each string type
+EVENT_STRIPS = 13                   # entries 0-12
 EVENT_LIST = 0x0138B4               # $02:B8B4
 EVENT_TABLE = 0x013AD9              # $02:BAD9
 EVENT_COUNT = 37
@@ -2274,6 +2353,8 @@ EVENT_SHORTER = {
     "Bev\u00f6lkerung erreicht die 30,000-Marke": ["Bev\u00f6lkerung", "30,000 erreicht"],
     "Bev\u00f6lkerung erreicht die 600,000-Marke": ["Bev\u00f6lkerung", "600,000 erreicht"],
     "Hohe Luftverschmutzung!": ["Hohe", "Luftverschmutzung"],
+    # French: "Taux de" / "criminalité élevé!" is 18 cells on the second line
+    "Taux de criminalité élevé!": ["Criminalité", "élevée!"],
 }
 
 
@@ -2349,10 +2430,13 @@ def read_events(rom):
     return out, names
 
 
-def _event_fit(i, lines):
+def _event_fit(i, lines, level_width=EVENT_LEVEL_WIDTH):
     """re-wrap to the US layout, or None if it cannot fit"""
-    width = EVENT_LEVEL_WIDTH if i < 16 else EVENT_WIDTH
-    most = 1 if i < 16 else 2
+    if i < 16:
+        # a level name is one field, spaces and all: a donor right-aligns it
+        text = "".join(lines)
+        return [text] if len(lines) == 1 and len(text) <= level_width else None
+    width, most = EVENT_WIDTH, 2
     words = " ".join(lines).split()
     wrapped = [""]
     for wd in words:
@@ -2385,6 +2469,53 @@ def event_glyph_slots(us, eg):
     return low[:EVENT_SLOT_COUNT]
 
 
+def _event_positions(rom):
+    """file offset of a cartridge's first-cell table, a word per string type"""
+    import re
+    m = re.search(rb"\xbd(..)\x0a\xaa\x98\x29\xff\x00", rom[0x010000:0x018000], re.S)
+    if not m:
+        sys.exit("no word position table found")
+    return _bank02(m.group(1)[0] | (m.group(1)[1] << 8))
+
+
+def _event_level_width(rom):
+    """the level field a cartridge's own cells give: its widest level name"""
+    if not _event_tables(rom)[3]:
+        return EVENT_LEVEL_WIDTH
+    ev = read_events(rom)[0]
+    return max([EVENT_LEVEL_WIDTH] + [len("".join(ev[i]))
+                                      for i in range(EVENT_FIRST_TEXT, 16)])
+
+
+def read_strips(rom):
+    """entries 0-12 of a German-style cartridge as ("art", its tiles) or
+    ("text", a string); None for a US-style one, whose strips stay"""
+    base, table, _, face = _event_tables(rom)
+    if not face:
+        return None
+    out = []
+    for i in range(EVENT_STRIPS):
+        off = (rom[table + 2 * i] | (rom[table + 2 * i + 1] << 8)) & 0x0FFF
+        a, raw = base + off, []
+        while rom[a] < 0xFD and len(raw) < 32:
+            raw.append(rom[a])
+            a += 1
+        if raw and all(0x20 <= b < 0x7F and _event_code(chr(b)) is not None
+                       for b in raw):
+            out.append(("text", bytes(raw).decode("ascii")))
+        else:
+            out.append(("art", [EVENT_DONOR_FACE + b for b in raw]))
+    return out
+
+
+def strip_art_tiles(us, eg):
+    """report tiles word strip art may take: rows $18-$1D, less any a map uses"""
+    refs = set()
+    for _, o in REPORTS:
+        refs |= set(w & 0x3ff for w in _map_words(eg.nintendo_decompress(us, o)[0]))
+    return [t for t in range(0x400) if t // 16 in REPORT_STRIP_ROWS and t not in refs]
+
+
 def event_spans(us, eg, events, months, donor):
     """entries 13-36 and the month names -> (cart spans, report tile spans)"""
     slots = event_glyph_slots(us, eg)
@@ -2413,24 +2544,59 @@ def event_spans(us, eg, events, months, donor):
             glyphs.append((slot_of[ch] * 16, bytes(g)))
         return slot_of[ch]
 
-    blob = bytearray(us[EVENT_LIST:EVENT_LIST + EVENT_STRIP_BYTES])
     table = bytearray(us[EVENT_TABLE:EVENT_TABLE + 2 * EVENT_COUNT])
+
+    def point(i, off):
+        old = table[2 * i] | (table[2 * i + 1] << 8)
+        new = (old & 0xF000) | off
+        table[2 * i:2 * i + 2] = bytes([new & 0xFF, new >> 8])
+
+    donor_rom = open(donor, "rb").read() if donor else None
+    strips = read_strips(donor_rom) if donor_rom else None
+    level_width, art, threshold = EVENT_LEVEL_WIDTH, [], None
+    if strips is None:
+        blob = bytearray(us[EVENT_LIST:EVENT_LIST + EVENT_STRIP_BYTES])
+    else:
+        if us[EVENT_THRESHOLD_OPERAND - 1:EVENT_THRESHOLD_OPERAND + 2] != b"\xc0\x5e\x00":
+            sys.exit("$02:B32B is not CPY #$005E; this is not the US word drawer")
+        level_width = _event_level_width(donor_rom)
+        blob, room, art_of = bytearray(), strip_art_tiles(us, eg), {}
+        for i, (kind, items) in enumerate(strips):
+            if kind != "art":
+                continue
+            point(i, len(blob))
+            for t in items:
+                g = bytes(donor_chr[t * 16:t * 16 + 16])
+                if g not in art_of:
+                    if len(art_of) == len(room):
+                        sys.exit("the donor's word strips need more than the %d "
+                                 "strip tiles" % len(room))
+                    art_of[g] = room[len(art_of)]
+                    art.append((art_of[g] * 16, g))
+                blob.append(art_of[g] - 0x100)
+            blob.append(0xFF)
+        threshold = len(blob)
+        for i, (kind, items) in enumerate(strips):
+            if kind == "text":
+                point(i, len(blob))
+                blob += bytes(tile(ch, "word strip %d" % i) for ch in items)
+                blob.append(0xFF)
+        print("word strips: %d as art in %d tiles, %d as text; the art ends at $%02X"
+              % (sum(k == "art" for k, _ in strips), len(art_of),
+                 sum(k == "text" for k, _ in strips), threshold))
     for i in range(EVENT_FIRST_TEXT, EVENT_COUNT):
         lines = events[i]
-        width = EVENT_LEVEL_WIDTH if i < 16 else EVENT_WIDTH
+        width = level_width if i < 16 else EVENT_WIDTH
         most = 1 if i < 16 else 2
         if len(lines) > most or any(len(x) > width for x in lines):
             sys.exit("event entry %d %r: at most %d line%s of %d characters"
                      % (i, lines, most, "" if most == 1 else "s", width))
-        off = len(blob)
+        point(i, len(blob))
         for n, line in enumerate(lines):
             if n:
                 blob.append(0xFE)
             blob += bytes(tile(ch, "event entry %d" % i) for ch in line)
         blob.append(0xFF)
-        old = table[2 * i] | (table[2 * i + 1] << 8)
-        new = (old & 0xF000) | off
-        table[2 * i:2 * i + 2] = bytes([new & 0xFF, new >> 8])
     if EVENT_FREE[0] + len(blob) > EVENT_FREE[1]:
         sys.exit("the event list needs %d bytes and bank 02 has %d free"
                  % (len(blob), EVENT_FREE[1] - EVENT_FREE[0]))
@@ -2451,7 +2617,11 @@ def event_spans(us, eg, events, months, donor):
     cart = [(EVENT_FREE[0], bytes(blob)),
             (EVENT_BASE_OPERAND, bytes([base & 0xFF, base >> 8])),
             (EVENT_TABLE, bytes(table)), (EVENT_MONTHS, bytes(words))]
-    return cart, glyphs
+    if threshold is not None:
+        pos = _event_positions(donor_rom)
+        cart += [(EVENT_THRESHOLD_OPERAND, bytes([threshold & 0xFF, threshold >> 8])),
+                 (EVENT_POSITIONS, bytes(donor_rom[pos:pos + 32]))]
+    return cart, glyphs + art
 
 
 def _events_for(a, us, eg):
@@ -2460,16 +2630,18 @@ def _events_for(a, us, eg):
     if doc is None and getattr(a, "events", False):
         if not a.donor:
             sys.exit("--events takes the donor's event lines and needs --donor")
-        ev, months = read_events(open(a.donor, "rb").read())
+        drom = open(a.donor, "rb").read()
+        ev, months = read_events(drom)
+        level_width = _event_level_width(drom)
         doc, bad = {}, []
         for i, lines in ev.items():
-            fit = _event_fit(i, lines)
+            fit = _event_fit(i, lines, level_width)
             if fit is None:
                 key = " ".join(" ".join(lines).split())
                 fit = EVENT_SHORTER.get(key)
                 if fit is None:
                     bad.append("  entry %d %r needs %s" % (
-                        i, key, "one line of %d" % EVENT_LEVEL_WIDTH if i < 16
+                        i, key, "one line of %d" % level_width if i < 16
                         else "two lines of %d" % EVENT_WIDTH))
                     continue
                 print("  event entry %d shortened: %s -> %s" % (i, key, " | ".join(fit)))
