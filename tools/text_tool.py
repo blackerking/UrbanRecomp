@@ -1968,6 +1968,16 @@ REPORT_CHR = 0x04875C
 REPORT_SCREEN = 0x00
 REPORTS = (("budget", 0x05BF0E), ("evaluation", 0x05C0C9),
            ("overview", 0x05C29F), ("events", 0x05C488))
+# The loan screen's letter is the same kind of picture: BG3 over this tile set,
+# three 2048-byte pages in $0B:BCAD -- the offer, then twice "you owe too
+# much" with different buttons -- on $14 = $00. The US writes it in its own
+# arrangement of the small face, the German and French cartridges in ASCII at
+# $270 + code in theirs; so an earlier comparison, drawing each tilemap with
+# the other cartridge's set, called the two the same picture. They are not:
+# the letter stayed English, reported from play. It joins the four screens,
+# and everything that counts their tiles counts its tiles too.
+REPORT_BANK = ("bank", 0x05BCAD)
+REPORT_MAPS = REPORTS + (REPORT_BANK,)
 REPORT_RAMP = ((20, 20, 30), (110, 120, 150), (190, 195, 215), (250, 250, 255))
 REPORT_ATTR = 0x3C00            # palette and priority; tile and flips excluded
 # The runtime word strips -- the problem list and the city category -- are
@@ -2034,7 +2044,7 @@ def report_sources(path, eg):
     rom = open(path, "rb").read()
     us = open(US_ROM_DEFAULT, "rb").read()
     uchr, _ = eg.nintendo_decompress(us, REPORT_CHR)
-    umaps = [(n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS]
+    umaps = [(n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORT_MAPS]
     if rom == us:
         return bytes(uchr), umaps
     pk = scan_packets(rom, eg, 512)
@@ -2045,10 +2055,14 @@ def report_sources(path, eg):
         sys.exit("no report screens found in %s" % os.path.basename(path))
     start = [o for o, _ in maps].index(budget[0])
     picked = maps[start:start + len(REPORTS)]
-    print("report screens from %s: tile set $%06X, maps %s"
+    bank = find_twin(pk, bytes(eg.nintendo_decompress(us, REPORT_BANK[1])[0]))
+    if not bank:
+        sys.exit("no loan letter found in %s" % os.path.basename(path))
+    print("report screens from %s: tile set $%06X, maps %s, loan letter $%06X"
           % (os.path.basename(path), chr_tw[0],
-             " ".join("$%06X" % o for o, _ in picked)))
-    return chr_tw[2], [(n, _map_words(d)) for (n, _), (_, d) in zip(REPORTS, picked)]
+             " ".join("$%06X" % o for o, _ in picked), bank[0]))
+    return chr_tw[2], ([(n, _map_words(d)) for (n, _), (_, d) in zip(REPORTS, picked)]
+                       + [(REPORT_BANK[0], _map_words(bank[2]))])
 
 
 # Colour attributes in a tilemap picture. A cell shows in the screen's plain
@@ -2104,10 +2118,10 @@ def cmd_reports(a):
     eg = _lz5()
     chrb, maps = report_sources(getattr(a, "from") or a.rom, eg)
     us = open(a.rom, "rb").read()
-    us_maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS)
+    us_maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORT_MAPS)
     os.makedirs(a.out, exist_ok=True)
     for name, words in maps:
-        img = PIL.Image.new("RGB", (256, 256))
+        img = PIL.Image.new("RGB", (256, len(words) // 32 * 8))
         px = img.load()
         for i, e in enumerate(words):
             at = e & REPORT_ATTR
@@ -2119,13 +2133,14 @@ def cmd_reports(a):
     print("report screens -> %s. Paint in the four colours only, keep text on "
           "the 8-pixel grid, and leave the areas the game fills in (numbers, "
           "the year, the problem list) empty. A cell in colour has a palette or "
-          "priority of its own; keep a cell within one ramp." % a.out)
+          "priority of its own; keep a cell within one ramp. bank.png is the "
+          "loan screen's letter, three pages one under another." % a.out)
 
 
 def report_spans(us, eg, painted, attrs=None):
     """{screen: 1024 cells of 64 indices} -> packet entries for the import"""
     chr_u = bytes(eg.nintendo_decompress(us, REPORT_CHR)[0])
-    maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORTS)
+    maps = dict((n, _map_words(eg.nintendo_decompress(us, o)[0])) for n, o in REPORT_MAPS)
     refs = {}
     for words in maps.values():
         for e in words:
@@ -2141,7 +2156,7 @@ def report_spans(us, eg, painted, attrs=None):
     attrs = attrs or {}
     # pass 1: cells whose own tile can simply be redrawn
     work, claimed = {}, {}
-    for name, _ in REPORTS:
+    for name, _ in REPORT_MAPS:
         if name not in painted:
             continue
         for i, e in enumerate(maps[name]):
@@ -2171,7 +2186,7 @@ def report_spans(us, eg, painted, attrs=None):
     for t, px in claimed.items():
         new_chr[t * 16:t * 16 + 16] = _tile_2bpp(px)
     taken, entries = 0, []
-    for name, off in REPORTS:
+    for name, off in REPORT_MAPS:
         if name not in work:
             continue
         words = list(maps[name])
@@ -2200,7 +2215,7 @@ def report_spans(us, eg, painted, attrs=None):
             words[i] = t | attr
         print("  %-10s %3d redrawn in place, %3d reuse a tile, %3d new tiles, "
               "%3d colour only" % (name, n_place, n_reuse, n_new, n_attr))
-        entries.append((off, 2048, [(0, b"".join(
+        entries.append((off, 2 * len(words), [(0, b"".join(
             bytes([w & 0xff, w >> 8]) for w in words))], (REPORT_SCREEN,)))
     spans = [(t * 16, bytes(new_chr[t * 16:t * 16 + 16]))
              for t in range(tiles) if new_chr[t * 16:t * 16 + 16] != chr_u[t * 16:t * 16 + 16]]
@@ -2287,23 +2302,24 @@ def _reports_for(a, us, eg):
         sys.exit("this needs Pillow: pip install Pillow")
     painted, attrs = {}, {}
     decode = _attr_decoder(REPORT_RAMP)
-    for name, off in REPORTS:
+    for name, off in REPORT_MAPS:
         path = os.path.join(folder, name + ".png")
         if not os.path.exists(path):
             continue
-        img = PIL.Image.open(path).convert("RGB")
-        if img.size != (256, 256):
-            sys.exit("%s is %dx%d; a report screen is 256x256" % ((path,) + img.size))
-        px = img.load()
         uw = _map_words(eg.nintendo_decompress(us, off)[0])
+        size = (256, len(uw) // 32 * 8)
+        img = PIL.Image.open(path).convert("RGB")
+        if img.size != size:
+            sys.exit("%s is %dx%d; that screen is %dx%d" % ((path,) + img.size + size))
+        px = img.load()
         painted[name], attrs[name] = [], []
-        for i in range(1024):
+        for i in range(len(uw)):
             pts = [px[(i % 32) * 8 + k % 8, (i // 32) * 8 + k // 8] for k in range(64)]
             idx, at = _decode_cell(decode, pts, "%s cell %d,%d" % (path, i % 32, i // 32))
             painted[name].append(idx)
             attrs[name].append(uw[i] & REPORT_ATTR if at is None else at)
     if not painted:
-        sys.exit("no budget/evaluation/overview/events .png in %s" % folder)
+        sys.exit("no budget/evaluation/overview/events/bank .png in %s" % folder)
     print("report screens from %s:" % folder)
     return report_spans(us, eg, painted, attrs)
 
@@ -3136,7 +3152,7 @@ def report_free_tiles(us, eg):
     """free report tiles, by the same rule report_spans uses"""
     chr_u = bytes(eg.nintendo_decompress(us, REPORT_CHR)[0])
     refs = set()
-    for _, o in REPORTS:
+    for _, o in REPORT_MAPS:
         refs |= set(w & 0x3ff for w in _map_words(eg.nintendo_decompress(us, o)[0]))
     blank = lambda t: len(set(chr_u[t * 16:t * 16 + 16])) <= 1
     tiles = len(chr_u) // 16
@@ -3193,7 +3209,7 @@ def read_strips(rom):
 def strip_art_tiles(us, eg):
     """report tiles word strip art may take: rows $18-$1D, less any a map uses"""
     refs = set()
-    for _, o in REPORTS:
+    for _, o in REPORT_MAPS:
         refs |= set(w & 0x3ff for w in _map_words(eg.nintendo_decompress(us, o)[0]))
     return [t for t in range(0x400) if t // 16 in REPORT_STRIP_ROWS and t not in refs]
 
@@ -3931,9 +3947,12 @@ def selector_import(us, eg, path):
 # copyright lines, plus street lights and filler; the menu art's are the menu
 # words, which the menu import composes itself, and the save list's glyphs.
 # The NEXT button is sprite-text record $2C, drawn on the new-city screens
-# and by the in-city screen at 01:9FD1 that shows the city's name, so it is
-# taken wherever the art unpacks, as the German cartridge has it. An
-# unscoped set is taken on every screen that unpacks it.
+# ($04) and by the in-city screen at 01:9FD1 that shows the city's name ($00,
+# the city's screen). It is not taken on the menu's screens $02 and $12: the
+# composed saved-game line's last sprites have their lower halves on $172-
+# $175 there -- taking it everywhere was reported from play as WEITER over the
+# end of GESPEICHERTE STADT. An unscoped set is taken on every screen that
+# unpacks it.
 #
 # Two sets are not packed. The map's animated tiles sit in bank 05 as four
 # frames of 160 tiles, $1400 bytes each; the toolbar's icons, both states of
@@ -3958,7 +3977,7 @@ TILESETS = (
     ("rci.png", 0x0501E9, 32, None, ()),
     ("rci_menu.png", 0x050F68, 32, None, ()),
     ("title.png", 0x03A680, 32, ((0x118, 0x120), (0x138, 0x13A)), ()),
-    ("next.png", 0x04A571, 32, ((0x172, 0x175),), ()),
+    ("next.png", 0x04A571, 32, ((0x172, 0x175),), (0x00, 0x04)),
     ("cityui.png", FONT_PACKET, 16, ((0x100, 0x280),), ()),
     ("stations.png", ((0x02C000, 0x02D400), (0x02D400, 0x02E800),
                       (0x02E800, 0x02FC00), (0x02FC00, 0x031000)), 32, None, ()),
@@ -4342,8 +4361,46 @@ def _graphics_dir(a):
     print("graphics from %s: %s" % (folder, ", ".join(found) or "nothing"))
 
 
+def packet_conflicts(entries):
+    """[(packet, screens, byte offset)] where two entries of one packet write
+    different bytes on a screen both apply to"""
+    out = []
+    groups = {}
+    for ent in entries:
+        if ent[0] in (SYLT_CARD_PSEUDO, ROM_SPAN_PSEUDO):
+            continue
+        groups.setdefault(ent[0], []).append(ent)
+    for src, ents in groups.items():
+        for i in range(len(ents)):
+            for j in range(i + 1, len(ents)):
+                a, b = ents[i], ents[j]
+                sa = set(a[3]) if len(a) > 3 and a[3] else None
+                sb = set(b[3]) if len(b) > 3 and b[3] else None
+                both = sb if sa is None else sa if sb is None else sa & sb
+                if both is not None and not both:
+                    continue
+                wa = {}
+                for off, d in a[2]:
+                    for k, v in enumerate(d):
+                        wa[off + k] = v
+                for off, d in b[2]:
+                    for k, v in enumerate(d):
+                        if wa.get(off + k, v) != v:
+                            out.append((src, tuple(sorted(both)) if both else (), off + k))
+    return out
+
+
 def write_packets(path, entries):
     """serialise the packet list and write it"""
+    clash = packet_conflicts(entries)
+    if clash:
+        seen = sorted(set((src, scr) for src, scr, _ in clash))
+        for src, scr in seen:
+            offs = [o for s_, c, o in clash if (s_, c) == (src, scr)]
+            print("  NOTE: two entries for $%06X write %d bytes differently (from "
+                  "offset %d) on %s; which one shows depends on their order"
+                  % (src, len(offs), min(offs),
+                     " ".join("$%02X" % x for x in scr) or "every screen"))
     blob = bytearray(PACKET_MAGIC + bytes([2, 0]))
     blob += len(entries).to_bytes(2, "little")
     for ent in entries:

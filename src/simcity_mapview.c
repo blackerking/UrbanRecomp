@@ -54,6 +54,40 @@ static uint16_t ram_u16(uint32_t off) {
     return (uint16_t)(g_ram[off] | (g_ram[off + 1] << 8));
 }
 
+/* A copy of the map and palette to draw instead of WRAM, while main.c holds
+ * the margins on the city being replaced (see host_map_compose). */
+static const uint8_t *s_map_src, *s_pal_src;
+
+void ScMapView_SetSource(const uint8_t *map, const uint8_t *pal) {
+    s_map_src = map;
+    s_pal_src = pal;
+}
+
+void ScMapView_Snapshot(uint8_t *map, uint8_t *pal) {
+    memcpy(map, g_ram + SC_MAP_OFF, SC_MAPVIEW_MAP_BYTES);
+    memcpy(pal, g_ram + SC_PAL_OFF, SC_MAPVIEW_PAL_BYTES);
+}
+
+int ScMapView_ChangedCells(const uint8_t *map) {
+    int n = 0;
+    for (unsigned i = 0; i < SC_MAPVIEW_MAP_BYTES; i += 2) {
+        const unsigned a = (unsigned)(map[i] | (map[i + 1] << 8)) & 0x03FFu;
+        const unsigned b = ram_u16(SC_MAP_OFF + i) & 0x03FFu;
+        n += a != b;
+    }
+    return n;
+}
+
+static uint16_t map_u16(uint32_t i) {
+    if (s_map_src) return (uint16_t)(s_map_src[i] | (s_map_src[i + 1] << 8));
+    return ram_u16(SC_MAP_OFF + i);
+}
+
+static uint16_t pal_u16(uint32_t i) {
+    if (s_pal_src) return (uint16_t)(s_pal_src[i] | (s_pal_src[i + 1] << 8));
+    return ram_u16(SC_PAL_OFF + i);
+}
+
 void ScMapView_GetScroll(int *sx, int *sy) {
     if (sx) *sx = (int8_t)g_ram[SC_SCROLL_X];
     if (sy) *sy = (int8_t)g_ram[SC_SCROLL_Y];
@@ -72,7 +106,7 @@ void ScMapView_GetScroll(int *sx, int *sy) {
  *
  * Using the same table the PPU uses keeps both sides on one scale. */
 static uint32_t pal_entry(unsigned index) {
-    uint16_t v = ram_u16(SC_PAL_OFF + (index & 0xFFu) * 2u);
+    uint16_t v = pal_u16((index & 0xFFu) * 2u);
     const uint8_t *bm = g_ppu->brightnessMult;
     uint32_t r = bm[v & 31u];
     uint32_t g = bm[(v >> 5) & 31u];
@@ -159,8 +193,7 @@ bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
             for (int rx = 0; rx < cols; rx++) {
                 int mx = sx + rx;
                 if (mx < 0 || mx >= SC_MAP_W) continue;
-                unsigned v = ram_u16(SC_MAP_OFF +
-                                     (uint32_t)((my * SC_MAP_W + mx) * 2)) & 0x03FFu;
+                unsigned v = map_u16((uint32_t)((my * SC_MAP_W + mx) * 2)) & 0x03FFu;
                 if (pass == 0) {
                     unsigned tp = (unsigned)(rom[SC_TILE_ADDR + v * 2] |
                                              (rom[SC_TILE_ADDR + v * 2 + 1] << 8));

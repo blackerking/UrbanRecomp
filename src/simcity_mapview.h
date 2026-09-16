@@ -21,6 +21,17 @@ void ScMapView_SetRomIsUs(bool is_us);
 bool ScMapView_Render(uint8_t *out, int pitch, int cols, int rows,
                       int sx, int sy);
 
+/* The map ($7F0200, 120x100 words) and palette ($7E2440, 256 words) as
+ * ScMapView_Snapshot copies them. */
+#define SC_MAPVIEW_MAP_BYTES 24000u
+#define SC_MAPVIEW_PAL_BYTES 512u
+
+/* Draw from these copies instead of WRAM; NULL, NULL draws WRAM again. */
+void ScMapView_SetSource(const uint8_t *map, const uint8_t *pal);
+void ScMapView_Snapshot(uint8_t *map, uint8_t *pal);
+/* How many cells' tile numbers differ between `map` and WRAM. */
+int  ScMapView_ChangedCells(const uint8_t *map);
+
 /* Current map scroll in cells, read from $01bd/$01bf. */
 void ScMapView_GetScroll(int *sx, int *sy);
 

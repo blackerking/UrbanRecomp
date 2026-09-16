@@ -447,3 +447,33 @@ dead.
 So centring waits on either getting the new renderer working or implementing
 overlay extraction in the legacy one. It is not fixable at the compositor, and
 the code says so where the next attempt would start.
+
+## Loading a city: the margins showed the new one early
+
+Reported from play (savestate 3): loading a saved city from the in-city
+dialog, "the widescreen renderer is already working and does not wait until
+the fade to black is done". Frame by frame: the game writes the new map into
+WRAM while the dialog and the old city are still on screen, then fades out,
+blanks, and fades the new city in. The host map reads the map from WRAM, so
+the margins showed sand and water of the practice city beside the old one for
+about thirty frames before the fade; and because the load also moves the
+view, the old city then appeared at the new scroll.
+
+The load writes the map in steps of 500 to 3000 cells a frame, where play
+changes fewer than 50 (none above 50 in 6000 frames of a scenario). So:
+
+- a frame changing more than 300 cells raises a suspicion, and the margins
+  draw a copy of the map and palette from before it, at the scroll and fine
+  offset of that frame;
+- once 4000 cells differ from the copy, they are held on it until the screen
+  has been black (force blank or brightness 0) and lights up again -- drawn
+  through the current brightness, so they still fade out with the picture;
+- ten quiet frames short of 4000 drop the suspicion; a frame on which the
+  map screen was not live ends either state, and so do 900 frames.
+
+`ScMapView_SetSource()` points the renderer at the copy. `SC_SWAP_HOLD=0`
+turns it off, `SC_SWAP_DIAG=1` prints the counts. On savestate 3 the hold
+starts on the third write step and ends 64 frames later with the fade-in;
+the margins now show the old city until the fade and the new one only as it
+lights up. Savestates 1, 4, 5, 8 and 9 and a cold-boot practice start are
+pixel-identical with and without it.

@@ -124,3 +124,22 @@ Reported from play on the German image:
 Both US byte-patches decline cleanly (`0/2` and "byte mismatch"), and neither
 omission caused a problem.
 
+## Game logic the European build changes, left as in the US
+
+The translation takes text and pictures from the German and French
+cartridges, not their code. Where the European build behaves differently,
+the US behaviour stays; decided from play, 2026-09-16.
+
+- **When a scenario is judged.** Both builds show the notices "5 years to
+  complete scenario" down to "1 year", counted by calendar year against the
+  end years at `$03:C5B3`. The US routine `03:C500` then judges the scenario
+  itself when the end year arrives (`03:C548`, result in `$0D87`). German and
+  French judge in a routine of their own, `03:C571`, called every frame from
+  `03:80CA`, when `$0B51` -- apparently the time played, 48 to a year --
+  reaches a value per scenario (`$03:C5F7`: 239, 479, 239, 481, 241, 479,
+  479, none). So a European scenario can end a week or so earlier or later
+  than the US one. Porting it would be new code; not done.
+- **The umlaut in a city name.** German names the practice city with an
+  U-umlaut, city-name code `$28`, and adds code to draw it (the save list's
+  remap at `00:CDE1`, longer sprite tables for `01:A312`). The translation
+  writes UEBUNG instead. See "Scenario city names" in `ROM_MAP.md`.

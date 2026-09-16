@@ -4867,6 +4867,14 @@ with the lead each one has, where there is one; none is investigated yet.
   where our translation runtime writes the accented briefing glyphs whenever
   this shared set unpacks. Those rows are now excluded.
 - **Events: title correct, event lines English.** Fixed for German, see "Event lines and month names" below.
+- **Main menu: WEITER over the end of GESPEICHERTE STADT.** Fixed: the NEXT
+  button had been taken on every screen, and its tiles are the lower halves
+  of the saved-game line's last sprites. See "Tile-for-tile sets" below.
+- **Loan screen letter still English** (2026-09-16, savestate 2). Fixed, see
+  "The loan letter" below.
+- **Widescreen showing the new city before the fade** (2026-09-16, savestate
+  3: loading the practice city from the in-city dialog). Fixed in the
+  compositor, see `docs/WIDESCREEN_HOST_MAP.md`, "Loading a city".
 
 ## The map select screen
 
@@ -5150,7 +5158,7 @@ import takes whichever files are present. Each also works alone, as
 
 | file | what | how it imports |
 |---|---|---|
-| `reports/` | budget, evaluation, overview, events | redraw, reuse or allocate per cell, with colour attributes |
+| `reports/` | budget, evaluation, overview, events, the loan letter | redraw, reuse or allocate per cell, with colour attributes |
 | `maptitles.png` | map window titles | tile for tile |
 | `labels.png` | toolbar building labels | tile for tile, slices fixed |
 | `panels.png` | in-city panels, five pages + page 3's extras | lists and sheet rebuilt, lists in bank 0F |
@@ -5206,16 +5214,16 @@ each pairing is confirmed by the code that loads it (the `LDX #addr` / `LDA
 | RCI demand meter, city sprites | `$0A:81E9` | `$0A:8522` | `01:E45C` / `01:E45F` | 3 / 0 |
 | RCI demand meter, menu sprites | `$0A:8F68` | `$0A:92A2` | `01:E477` / `01:E47A` | 4 / 0 |
 | title: PUSH START, tiles `$118`-`$11F`, `$138`-`$139` | `$07:A680` | `$07:A680` | `05:90B5` / `05:90B5` | 10 / 10 |
-| NEXT button, tiles `$172`-`$174` | `$09:A571` | `$09:A65B` | `01:A10E` / `01:A149`, and three more | 3 / 3 |
+| NEXT button, tiles `$172`-`$174`, on `$00` and `$04` | `$09:A571` | `$09:A65B` | `01:A10E` / `01:A149`, and three more | 3 / 3 |
 | in-city BG3 set past its font, tiles `$100`-`$27F` (2bpp) | `$09:C0FB` | `$09:C223` | the notices' font | 30 / 15 |
 | police and fire stations on the map, PD FD -> PH FH | raw `$05:C000`, four `$1400` frames | same address | -- | 16 / 32 |
 | toolbar icons: R C PD FD -> W G PH FH; 10/120 Year | raw `$07:8000`-`$A680` | same address | -- | 21 / 24 |
 
 `text_tool.py tilesets --out DIR [--from ROM]` writes each as a 16-tile-wide
 sheet; `packets --tilesets` takes the donor's differing tiles and
-`--tilesets-from DIR` (or the graphics folder) painted ones. None has a
-screen scope: the German art is what the German game shows wherever these
-unpack.
+`--tilesets-from DIR` (or the graphics folder) painted ones. All but NEXT
+have no screen scope: the German art is what the German game shows wherever
+these unpack.
 
 The last two are taken only in part. The title set differs in 111 tiles
 (French 87), but only "DRUECKE START" ("PRESSE START") is text; the rest is the
@@ -5225,9 +5233,13 @@ tiles, which are the menu's own words (composed by the menu import, see "The
 menu's artwork is shared" above) and the save list's glyphs `$19C` and
 `$1AC`; only WEITER (SUITE) is taken. The button is sprite-text record `$2C`,
 drawn on the new-city screens and by the in-city screen at `01:9FD1` that
-shows the city's name, and it was first scoped to `$04`; it now goes wherever
-the art unpacks, as in the German cartridge -- its tiles are in no other
-record and not in the menu composer's pool. The German title set sits at the
+shows the city's name, and it was first scoped to `$04`. Taking it wherever
+the art unpacks was wrong: reported from play as WEITER over the end of
+GESPEICHERTE STADT, because the menu composer's fourth band is `$160` and its
+sprites' lower halves are `$170`-`$17F`, where the saved-game line's last two
+sprites land. It is scoped to `$04` and `$00` (the city, where `01:9FD1`
+runs) now, and `write_packets` notes any bytes two entries of one packet
+write differently on a screen they share. The German title set sits at the
 US address, hidden from a packet scan by a false stream in front of it, so a
 donor's copy is looked for there first.
 
@@ -5246,9 +5258,13 @@ Not taken, and why:
   dialog" below. (An earlier note here said German calls the sheet's loader
   from one more site, `01:E110`. It does not: that is the clear routine
   `00:CADD`, the German twin of `00:CA9D`, which the US calls at `01:E10D`.)
-- `$0B:BCAD` (loaded by `02:B58C` with the tiles `$0B:B5F3`): 94% of its bytes
-  differ from German `$0B:CBE6`, but drawn with each cartridge's own tiles the
-  two screens are the same picture. Nothing to translate.
+- `$0B:BCAD` (loaded by `02:B58C`): 94% of its bytes differ from German
+  `$0B:CBE6`, and this note said that drawn with each cartridge's own tiles the
+  two were the same picture. Wrong: it is the loan screen's letter, English in
+  the US and German in the German cartridge, which writes it in ASCII at `$270`
+  + code where the US has its own arrangement of the face. Reported from play
+  (savestate 2) and taken now, as a fifth report screen -- see "The loan
+  letter" below.
 - `$0C:87CB` is a 2048-byte tilemap page of the briefing screen, which the
   translation runtime composes from strings; six differing words there are
   not tiles.
@@ -5321,8 +5337,16 @@ event strings and relocated tables already handled:
 
 - `03:D9EB`'s level table, see "The map select screen".
 - `$03:CF32`, the scenario cities' names, see below.
-- `$03:C5C3`/`$03:C5CF`, the scenario reminder thresholds: German keeps five
-  counts where the US has a second table. Game logic, not taken.
+- `03:C500`, the scenario deadline. The in-city notices "5 years to complete
+  scenario" ... "1 year" (notices `$14`-`$16`, `$18`, `$19`) are counted down
+  by calendar year against the end years at `$03:C5B3`, and in the US the
+  same routine judges the scenario when the end year arrives (`03:C548`,
+  result in `$0D87`). German and French keep the countdown but judge in a
+  routine of their own (`03:C571`, called from the frame loop at `03:80CA`)
+  when `$0B51` -- apparently the time played, 48 to a year -- equals a value
+  per scenario (`$03:C5F7`: 239, 479, 239, 481, 241, 479, 479, none). The US
+  carries an unused table of 240, 192, ... 0 at `$03:C5CF`. Game logic,
+  left as in the US by decision (`docs/REGIONS.md`).
 - `$05:C000`-`$FFFF`, four frames of the map's animated tiles: PD and FD on
   the police and fire stations. At the same address in all three, raw.
 
@@ -5390,3 +5414,28 @@ otherwise; in all three cartridges the two read the same. The US wording
 composes nothing. Checked in play: the German and French builds show
 SCHAUPLAETZE (the dots squashed into the A, as in the menu) and CHOISIS
 SCENARIO over the selector.
+
+## The loan letter
+
+The loan screen (savestate 2) is BG1 art -- the bank front, BANK, LOANS, Ja /
+Nein, from `$08:E422` -- with the letter on BG3: the report screens' 2bpp set
+`$09:875C` through a three-page tilemap `$0B:BCAD`. Page 0 is the offer, pages
+1 and 2 the refusal when the city owes too much, with different buttons. The
+US writes the letter in its own arrangement of the small face (A-Z from
+`$290`, a-z from `$2C0`); German (`$0B:CBE6`) and French write ASCII at `$270`
++ code in theirs, accented letters above `$2F0`.
+
+It is imported as a fifth report screen, `reports/bank.png` (256x768, the
+three pages under one another): the same per-cell redraw, reuse or allocate
+into the same set, scoped to `$00` like the others, and the tilemap replaced
+whole. Its tiles now count wherever the four screens' do -- the references a
+cell may redraw in place, the free tiles the reports and event lines take,
+the strip rows -- so no other import can take a letter glyph. German needs 8
+new tiles and redraws 8 in place; the rest are glyphs the US set already has.
+
+Checked offline: the US picture imports to nothing, and the German and French
+pictures import to exactly the donor routes, with all five screens drawing
+every cell as the cartridge does, pixels and attributes. In play the letter
+could not be reopened cleanly from savestate 2: re-entering the bank from
+there garbles the screen, palette included, in the unpatched US game just the
+same (the known trouble with states on report screens).

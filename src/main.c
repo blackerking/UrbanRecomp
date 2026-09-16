@@ -5460,8 +5460,87 @@ static void host_map_compose(void) {
               nf, sx, sy, psx == -9999 ? 0 : sx - psx, fx, fy,
               s_hostmap_adj_x, s_hostmap_adj_y);
       psx = sx; } }
+  int use_sx = sx, use_sy = sy, use_fx = fx, use_fy = fy;
+  /* Hold the margins on the city being replaced.
+   *
+   * Loading a city from the in-city dialog writes the new map into WRAM while
+   * the dialog and the old city are still on screen; the game fades out, and
+   * shows the new city only when it fades back in. This renderer reads the map
+   * from WRAM, so it drew the new city into the margins at once, beside the
+   * old one, for the thirty-odd frames before the fade. Reported from play as
+   * the widescreen not waiting for the fade to black (savestate 3, loading the
+   * practice city).
+   *
+   * The game writes the new map over several frames, 500 to 3000 cells each,
+   * where play changes fewer than 50 (measured over 6000 frames of a
+   * scenario). So a frame changing more than 300 cells raises a suspicion:
+   * from then on the margins draw the map as it was before it, and once 4000
+   * cells differ from that copy they are held on it -- still through the
+   * current brightness, so they fade out with the picture -- until the screen
+   * has been black (force blank or brightness 0) and lights up again. Ten
+   * quiet frames short of 4000 drop the suspicion. A frame on which this
+   * screen was not live ends either state, and so does a time limit.
+   *
+   * SC_SWAP_HOLD=0 turns it off; SC_SWAP_DIAG prints what it sees. */
+  { static int on = -1, diag = 0;
+    if (on < 0) { const char *e = getenv("SC_SWAP_HOLD");
+                  on = (e && *e) ? (*e != '0') : 1;
+                  const char *d = getenv("SC_SWAP_DIAG"); diag = (d && *d) ? 1 : 0; }
+    static uint8_t base_map[SC_MAPVIEW_MAP_BYTES], base_pal[SC_MAPVIEW_PAL_BYTES];
+    static uint8_t prev_map[SC_MAPVIEW_MAP_BYTES], scratch_pal[SC_MAPVIEW_PAL_BYTES];
+    static int base_sx, base_sy, base_fx, base_fy;
+    static bool have, suspect, hold, dark;
+    static int quiet, held;
+    static uint64_t last_frame = ~(uint64_t)0;
+    enum { kSwapFrame = 300, kSwapTotal = 4000, kSwapQuiet = 10, kSwapMaxFrames = 900 };
+    if (s_frames != last_frame + 1) { have = suspect = hold = false; }
+    last_frame = s_frames;
+    const bool black = blanked || PPU_brightness(g_ppu) == 0;
+    if (!on) have = suspect = hold = false;
+    else if (!have) {
+      ScMapView_Snapshot(base_map, base_pal);
+      ScMapView_Snapshot(prev_map, scratch_pal);
+      base_sx = sx; base_sy = sy; base_fx = fx; base_fy = fy;
+      have = true;
+    } else {
+      const int step = ScMapView_ChangedCells(prev_map);
+      ScMapView_Snapshot(prev_map, scratch_pal);
+      if (!hold) {
+        if (step > kSwapFrame && !suspect) { suspect = true; quiet = 0; }
+        if (suspect) {
+          const int total = ScMapView_ChangedCells(base_map);
+          if (diag)
+            fprintf(stderr, "[swap] f=%llu step %d total %d%s\n",
+                    (unsigned long long)s_frames, step, total,
+                    total > kSwapTotal ? " -> hold" : "");
+          if (total > kSwapTotal) { hold = true; suspect = false; dark = false; held = 0; }
+          else if (step > kSwapFrame) quiet = 0;
+          else if (++quiet >= kSwapQuiet) suspect = false;
+        }
+      } else {
+        if (black) dark = true;
+        else if (dark) hold = false;       /* lit again: the new city is showing */
+        if (++held > kSwapMaxFrames) hold = false;
+        if (diag && !hold)
+          fprintf(stderr, "[swap] f=%llu hold released after %d frames\n",
+                  (unsigned long long)s_frames, held);
+      }
+      if (!suspect && !hold) {
+        memcpy(base_map, prev_map, sizeof base_map);
+        memcpy(base_pal, scratch_pal, sizeof base_pal);
+        base_sx = sx; base_sy = sy; base_fx = fx; base_fy = fy;
+      }
+    }
+    /* The load moves the view as well, so the copy is drawn where it was. */
+    const bool frozen = suspect || hold;
+    ScMapView_SetSource(frozen ? base_map : NULL, frozen ? base_pal : NULL);
+    if (frozen) { use_sx = base_sx; use_sy = base_sy; use_fx = base_fx; use_fy = base_fy; }
+  }
   const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
-  if (!ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows, sx - 1, sy)) {
+  const bool drawn = ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows,
+                                      use_sx - 1, use_sy);
+  ScMapView_SetSource(NULL, NULL);
+  if (!drawn) {
     memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
     return;
   }
@@ -5479,9 +5558,9 @@ static void host_map_compose(void) {
         const uint32_t *g =
             (const uint32_t *)(s_guest_pixels + (size_t)yy * s_video_pitch);
         const uint32_t *s = (const uint32_t *)(
-            s_hostmap_px + (size_t)(yy + 1 + fy) * s_hostmap_pitch);
+            s_hostmap_px + (size_t)(yy + 1 + use_fy) * s_hostmap_pitch);
         fprintf(stderr, "x%d g=%06x h=%06x  ", xx,
-                g[xx + s_ws_extra] & 0xffffff, s[xx + fx + 8] & 0xffffff);
+                g[xx + s_ws_extra] & 0xffffff, s[xx + use_fx + 8] & 0xffffff);
       }
       fputc(10, stderr);
     } } }
@@ -5490,27 +5569,27 @@ static void host_map_compose(void) {
     const uint32_t *gst =
         (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
     const uint32_t *src =
-        (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
+        (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + use_fy) * s_hostmap_pitch);
     memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest */
     if (y < lead_t)
       for (int x = 0; x < kVideoWidth; x++) dst[x] = blanked ? 0xff000000u
-                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
     else if (halve)
       for (int x = 0; x < left_cover; x++) {
-        const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
+        const uint32_t c = blanked ? 0xff000000u : src[x + use_fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
       for (int x = 0; x < left_cover; x++) dst[x] = blanked ? 0xff000000u
-                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
     if (halve)
       for (int x = x_start; x < s_video_w; x++) {
-        const uint32_t c = blanked ? 0xff000000u : src[x + fx + 8];
+        const uint32_t c = blanked ? 0xff000000u : src[x + use_fx + 8];
         dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
       }
     else
       for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
-                        : sc_ext_sub(src[x + fx + 8], dim_r, dim_g, dim_b);
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
     /* Sprites the host map cannot draw. dst[x] past the guest's edge was
      * rendered by the PPU at x + s_ws_extra, and only s_ws_extra px of the
      * wider strip has PPU coverage. Transparency is RGB-only: the render
