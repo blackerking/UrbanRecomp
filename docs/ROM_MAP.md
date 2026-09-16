@@ -5238,8 +5238,9 @@ the art unpacks was wrong: reported from play as WEITER over the end of
 GESPEICHERTE STADT, because the menu composer's fourth band is `$160` and its
 sprites' lower halves are `$170`-`$17F`, where the saved-game line's last two
 sprites land. It is scoped to `$04` and `$00` (the city, where `01:9FD1`
-runs) now, and `write_packets` notes any bytes two entries of one packet
-write differently on a screen they share. The German title set sits at the
+runs) now -- confirmed from play on 2026-09-16, WEITER shows in the city --
+and `write_packets` notes any bytes two entries of one packet write
+differently on a screen they share. The German title set sits at the
 US address, hidden from a packet scan by a false stream in front of it, so a
 donor's copy is looked for there first.
 
@@ -5366,7 +5367,8 @@ city as `$09:C0FB`, whose window words differ too.
 All three raw sets and the BG3 set are tile-for-tile sets now (the table
 above). Checked offline: picture and donor routes agree for US, German and
 French, and the patched frames and icon table equal the donor's. Checked in
-play (German, San Francisco): toolbar W G PH FH, the police station PH.
+play (German, San Francisco): toolbar W G PH FH, the police station PH; and
+reported from play on 2026-09-16, the graph window's "10 Jahr" / "120 Jahr".
 
 ## Scenario city names
 
@@ -5438,4 +5440,5 @@ pictures import to exactly the donor routes, with all five screens drawing
 every cell as the cartridge does, pixels and attributes. In play the letter
 could not be reopened cleanly from savestate 2: re-entering the bank from
 there garbles the screen, palette included, in the unpatched US game just the
-same (the known trouble with states on report screens).
+same (the known trouble with states on report screens). Confirmed from play
+on 2026-09-16 with the bank opened normally: the letter reads German.
