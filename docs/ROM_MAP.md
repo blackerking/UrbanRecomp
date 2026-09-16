@@ -4870,17 +4870,76 @@ with the lead each one has, where there is one; none is investigated yet.
 
 ## The map select screen
 
-The new-city map picker (unpacked on `$14 = $04`) has two English words, both
-pictures: "MAP SELECT" in the header, on BG3 from the 2bpp set `$08:C4DB`, and
-"Please wait..." in the preview, on BG1 from the 4bpp set `$08:DEA2`. Its
-tilemaps `$0B:A10B` and `$0B:9BA4` are identical in the German cartridge; only
-the artwork of the tiles they use differs: 22 tiles give LANDKARTEN, 21 give
-"Bitte warten...". NEXT, OK and No. are the same in both cartridges.
+The new-city screens (unpacked on `$14 = $04`) are one device on two layers.
 
-`packets --mapselect` takes those tiles from the donor, scoped to `$04`,
-because `$08:C4DB` is also the scenario selector's set. Checked offline: every
-tile the two tilemaps use then matches the German cartridge, 155 of 155 and
-27 of 27.
+| layer | tile set | tilemap | pages |
+|---|---|---|---|
+| BG1 | `$08:DEA2`, 4bpp | `$0B:9BA4` | 3: the device, "Please wait..." |
+| BG3 | `$08:C4DB`, 2bpp | `$0B:A10B` | 4: MAP SELECT; "Enter name of the city"; "Select game level", Easy/Medium/Hard and their funds; "Is this OK?  Yes  No" with the chosen level and funds |
+
+The first version of this section looked only at page 1 of each tilemap and
+said both were identical in the German cartridge, and that NEXT was the same
+in both. Both were wrong, and the name entry, level select and confirmation
+pages stayed English:
+
+- BG1's three pages are identical; 21 tiles differ ("Bitte warten...").
+- BG3's first page keeps its layout (LANDKARTEN, 22 tiles). Pages 2-4 are laid
+  out anew: "Name der Stadt", "Waehle Schwierigkeitsgrad" with "1 Leicht
+  2 Mittel 3 Schwer", "Ist das richtig?  Ja  Nein" -- other cells, other
+  tiles, other palettes.
+- NEXT is not on either layer. It is a sprite from the menu art `$09:A571`,
+  tiles `$172`-`$174`, which German draws as WEITER; it is taken with the
+  tile-for-tile sets below.
+
+BG1's later pages also name tiles past the set's 256, from another part of
+VRAM. Those cells are left out of the picture (orange) and of the import;
+before that, a US picture redrew 195 tiles.
+
+So BG1 imports tile for tile, and BG3 cell by cell like the selector: a
+changed cell takes an identical tile if there is one, else a redrawn one --
+a tile all of whose cells changed, or a blank tile no page uses -- and its
+palette and priority come from the picture's colour ramp. `$08:C4DB` is also
+the scenario selector's set, and the selector's entry is not scoped, so the
+BG3 entries are scoped to `$04` and write every tile the new pages use, not
+just the redrawn ones. The new tilemap goes in whole, also scoped.
+
+The confirmation's first line is not all tilemap. Choosing a level runs mode
+`$15`, which writes six BG3 words over the page before it shows:
+
+```
+03:d9eb  LDA $0B57 (level) / ASL / TAY
+         LDA $DAAF,Y -> $7E41D4    four cells of the level's name
+         LDA $DAB5,Y -> $7E41D6
+         LDA $DABB,Y -> $7E41D8
+         LDA $DAC1,Y -> $7E41DA
+         LDA $DAC7,Y -> $7E41DE    the funds' first two digits
+         LDA $DACD,Y -> $7E41E0
+```
+
+The code is the same in all three cartridges, shifted (German `03:DA0D`,
+French `03:DA10`); the 36-byte table after it (German `$03:DAD1`, French
+`$03:DAD4`) holds each donor's own tile numbers. With the pages imported and the US table left alone, Leicht came out
+right by chance and Mittel and Schwer as fragments, and French showed the
+wrong words. Some of the table's tiles are on no page (the 1 of 10, the 5, a
+blank), so the import counts the eighteen entries as cells like the pages'
+and writes the table back, as cart spans; the AOT code reads it at run time
+(`cpu_read16`), so no `force_lle` is needed. The table is found through the
+code in front of it.
+
+`text_tool.py mapselect --out FILE` writes one 512x1024 picture: BG3's four
+pages on the left in four colours (a cell in a colour ramp has a palette of
+its own), BG1's three on the right in sixteen, and under BG1, from cell row 97,
+the level table as three rows of six BG3 cells (Easy, Medium, Hard). A picture
+from before the table, with those cells orange, keeps the US words and their
+tiles. `packets --mapselect` takes the donor's, `--mapselect-from FILE` (or
+the graphics folder) a painted one.
+
+Checked offline: the US picture imports to nothing, with or without the table;
+the German and French pictures import to exactly the donor routes, and with
+the donor route applied the pages and all three table rows draw as the
+cartridge does, pixels and attributes. Checked in play on the German- and
+French-patched US builds, from a cold boot through name entry, level select
+and the confirmation of each level.
 
 ## Event lines and month names
 
@@ -4909,7 +4968,11 @@ breaks a line nine cells further left. So its strings are decoded as text and
 re-encoded for the US drawer, which starts every line at column 12: 18 cells,
 to column 29, two lines. 22 of 24 German entries fit once re-wrapped; two are
 shortened (`EVENT_SHORTER`): the "Bevoelkerung erreicht die ...-Marke" lines
-become "Bevoelkerung / 30,000 erreicht".
+become "Bevoelkerung / 30,000 erreicht". `template --from` a donor applies
+the same re-wrapping and shortening to lines that do not fit as they stand,
+so a template seeded from the German or French cartridge builds unedited
+(before, `translate` stopped at German entry 17); lines that fit keep their
+breaks, and a US template is unchanged.
 
 Correction: the width was first taken as 17, which cost "Hohe
 Luftverschmutzung!" its exclamation mark and French a short form. The US
@@ -5091,17 +5154,18 @@ import takes whichever files are present. Each also works alone, as
 | `maptitles.png` | map window titles | tile for tile |
 | `labels.png` | toolbar building labels | tile for tile, slices fixed |
 | `panels.png` | in-city panels, five pages + page 3's extras | lists and sheet rebuilt, lists in bank 0F |
-| `mapselect.png` | MAP SELECT, Please wait... | tiles redrawn in place |
+| `mapselect.png` | the new-city display's four pages, Please wait... | BG3 per cell with colour attributes, BG1 tile for tile |
 | `strips.png` | evaluation problems and categories | art in report rows `$18`-`$1D`, columns from the picture |
 | `accents.png` | accented glyphs: message font, notices, report face, briefing | glyph source instead of a donor |
 | `selector.png` | card names, disaster lines, Sylt's line | per cell, with colour attributes |
-| `tilesets/` | city zone letters, bank window, graph title, gift signs, RCI meters | tile for tile |
+| `tilesets/` | city zone letters, bank window, graph title, gift signs, RCI meters, PUSH START, NEXT, police and fire stations, toolbar icons, in-city window words | tile for tile |
 | `saveload/` | save/load dialog: sheet, prompt runs, month names | sheet up to 176 tiles, runs and months repointed |
 
 Two conventions run through all of them. Colours are palette indices: the
 sixteen `LABEL_PAL` colours for 4bpp sets, the first four for 2bpp, and the
 grey `REPORT_RAMP` on the report screens; orange means a cell that is not
-drawn. And in the two tilemap pictures, reports and selector, a cell whose
+drawn. And in the tilemap pictures -- reports, selector and map select's
+BG3 -- a cell whose
 palette or priority differs from the US tilemap is shown in a ramp of its
 own (one hue per palette, paler for priority), which the import reads back
 as that cell's attribute -- plain pictures from before still import as they
@@ -5141,13 +5205,40 @@ each pairing is confirmed by the code that loads it (the `LDX #addr` / `LDA
 | gift building signs | `$0A:C4CF` | `$0A:CB37` | `01:CD6C` / `01:CD6F` | 54 / 64 |
 | RCI demand meter, city sprites | `$0A:81E9` | `$0A:8522` | `01:E45C` / `01:E45F` | 3 / 0 |
 | RCI demand meter, menu sprites | `$0A:8F68` | `$0A:92A2` | `01:E477` / `01:E47A` | 4 / 0 |
+| title: PUSH START, tiles `$118`-`$11F`, `$138`-`$139` | `$07:A680` | `$07:A680` | `05:90B5` / `05:90B5` | 10 / 10 |
+| NEXT button, tiles `$172`-`$174` | `$09:A571` | `$09:A65B` | `01:A10E` / `01:A149`, and three more | 3 / 3 |
+| in-city BG3 set past its font, tiles `$100`-`$27F` (2bpp) | `$09:C0FB` | `$09:C223` | the notices' font | 30 / 15 |
+| police and fire stations on the map, PD FD -> PH FH | raw `$05:C000`, four `$1400` frames | same address | -- | 16 / 32 |
+| toolbar icons: R C PD FD -> W G PH FH; 10/120 Year | raw `$07:8000`-`$A680` | same address | -- | 21 / 24 |
 
 `text_tool.py tilesets --out DIR [--from ROM]` writes each as a 16-tile-wide
 sheet; `packets --tilesets` takes the donor's differing tiles and
-`--tilesets-from DIR` (or the graphics folder) painted ones. No screen scope:
-the German art is what the German game shows wherever these unpack. Checked
-offline: the US sheets import to nothing, the German sheets to exactly the
-donor route.
+`--tilesets-from DIR` (or the graphics folder) painted ones. None has a
+screen scope: the German art is what the German game shows wherever these
+unpack.
+
+The last two are taken only in part. The title set differs in 111 tiles
+(French 87), but only "DRUECKE START" ("PRESSE START") is text; the rest is the
+German cartridge's trademark sign and copyright lines, which are not ours to
+change, and recoloured street lights and filler. The menu art differs in 97
+tiles, which are the menu's own words (composed by the menu import, see "The
+menu's artwork is shared" above) and the save list's glyphs `$19C` and
+`$1AC`; only WEITER (SUITE) is taken. The button is sprite-text record `$2C`,
+drawn on the new-city screens and by the in-city screen at `01:9FD1` that
+shows the city's name, and it was first scoped to `$04`; it now goes wherever
+the art unpacks, as in the German cartridge -- its tiles are in no other
+record and not in the menu composer's pool. The German title set sits at the
+US address, hidden from a packet scan by a false stream in front of it, so a
+donor's copy is looked for there first.
+
+The in-city set `$09:C0FB` is the notices' font below tile `$100` (German
+reorders it, and the notices import writes its accents at `$F0`-`$FE`), and
+window words above: TOP (French MAX), R and C on frames, R-1..., LOW MID
+UPPER HIGH (ABW. MITTE AUFW. HOCH). Only `$100`-`$27F` is taken, exported as
+four colours.
+
+Checked offline: the US sheets import to nothing, the German sheets to exactly
+the donor route.
 
 Not taken, and why:
 
@@ -5215,3 +5306,87 @@ tile numbers); `packets --saveload` takes the donor's, `--saveload-from DIR`
 to nothing; the German and French folders import to exactly the donor routes
 (German: 83 tiles differ, six runs, months changed; French: 87), and the runs
 read back from the patched image are the donor's.
+
+## What the packet inventory could not see
+
+The inventory above compares LZ5 packets, and play still showed English on
+the confirmation page, over the scenario selector, on the toolbar and on the
+police and fire stations. None of it is in a packet that differs. Two more
+passes found them.
+
+**Code banks, aligned.** Banks 00-03 and 05 of the US and German images were
+aligned with a byte diff (difflib) and every non-trivial replacement looked
+at; lone operands shifted by the local offset are relocations. Besides the
+event strings and relocated tables already handled:
+
+- `03:D9EB`'s level table, see "The map select screen".
+- `$03:CF32`, the scenario cities' names, see below.
+- `$03:C5C3`/`$03:C5CF`, the scenario reminder thresholds: German keeps five
+  counts where the US has a second table. Game logic, not taken.
+- `$05:C000`-`$FFFF`, four frames of the map's animated tiles: PD and FD on
+  the police and fire stations. At the same address in all three, raw.
+
+**Banks at the same address.** Bank 04 is identical; bank 06's differences
+are all in the HUD region `--hud` already copies; bank 07 is aligned up to
+`$07:A7C0`.
+
+**The toolbar, traced.** The icons stayed English with `--hud` applied. A
+VRAM and OAM dump of a city (`SC_VRAM_DUMP`, `SC_OAM_DUMP`, the capture's
+bytes being plain VRAM) showed the toolbar as 16x16 sprites on tiles
+`$100`-`$12F`, and more than half of those tiles match not the HUD region but
+a raw table at `$07:8000`: both states of every icon, copied to VRAM as an
+icon is drawn. German changes 21 of its tiles (R C PD FD, and "10 Year" /
+"120 Year" of the graph window), French 24. The same dump showed BG3 of the
+city as `$09:C0FB`, whose window words differ too.
+
+All three raw sets and the BG3 set are tile-for-tile sets now (the table
+above). Checked offline: picture and donor routes agree for US, German and
+French, and the patched frames and icon table equal the donor's. Checked in
+play (German, San Francisco): toolbar W G PH FH, the police station PH.
+
+## Scenario city names
+
+Starting a scenario, or the practice map, names the city:
+
+```
+03:cf19  LDA $CF32,Y / STA $79      Y = scenario * 2, nine pointers
+         copy length + 1 bytes from ($79) to $0B5B
+```
+
+The list is CISCO, BERN, TOKYO, DETROIT, BOSTON, RIO, LASVEGAS, FREEDOM and
+PRACTICE, the practice map being entry 8, in the city-name codes: 0-9, A-Z
+(`$0A`-`$23`), then `,` `.` `-` and space (`$24`-`$27`). The name is drawn as
+sprites by `01:A312` (halves from `$03:E57F`/`$03:E5A7`), in the save list by
+`00:CD98`, and on the name entry page.
+
+French renames BERN and PRACTICE (BERNE, ENTRAIN). German renames PRACTICE
+UBUNG with an U-umlaut, code `$28`, which only new German code can draw: the
+save list's remap `CMP #$0028 / LDA #$0041` at `00:CDE1`, and sprite tables
+one entry longer. Not taken, so a donor's `$28` comes over as UE: UEBUNG.
+
+The list and the pointers are read at run time (`cpu_read16` in the AOT
+code), so a translation is a cart span packing the nine names into the 62
+bytes the US names take. `packets --cities` takes the donor's; the translate
+JSON has them as `cities`, ids 0-8, 1-8 characters each.
+
+## The scenario selector's title
+
+"-SELECT SCENARIO-" is sprite-text record `$15`, drawn by `03:DD6D` from base
+(96, 96): nine 16x16 sprites at y = -84 in the menu's own face, a dash (tile
+`$0C0`) at each end. The record table and the code are the same in all
+three cartridges; German draws SCHAUPLAETZE on `$0C4`-`$0CE` with an 8x8
+sprite for the dots, French CHOISIS SCENARIO on `$0E0`-`$0EE` without the
+dashes. Our build showed the US title, because the menu import composes its
+glyphs only on `$02` and `$12`.
+
+It is composed like the option lines now: glyphs from the alphabet into
+`$0E0`-`$0EE` and `$0C4`-`$0CE` -- the tiles the German and French titles
+prove unused elsewhere on the selector -- in an artwork entry scoped to
+`$0A`, with record `$15` rebuilt at the end of the bank-0 filler and
+repointed, centred where the US title is. An odd last word leaves a blank
+half, which the right dash closes over, as German's does. The text is the
+third menu line unless `--selector-title` (JSON `selector_title`) says
+otherwise; in all three cartridges the two read the same. The US wording
+composes nothing. Checked in play: the German and French builds show
+SCHAUPLAETZE (the dots squashed into the A, as in the menu) and CHOISIS
+SCENARIO over the selector.

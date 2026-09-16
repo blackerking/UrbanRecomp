@@ -1588,6 +1588,116 @@ def menu_lines_spans(us, art, lines):
           "%d sprites" % (MENU_MOVE[0], MENU_FREE, len(MENU_SPRITES)))
     return art_spans, cart
 
+# -- the scenario selector's title -----------------------------------------
+# "-SELECT SCENARIO-" over the selector ($14 = $0A) is sprite-text record $15,
+# drawn by 03:DD6D from base (96, 96) in the menu's own face: nine 16x16
+# sprites at y = -84, a dash (tile $0C0) at each end and the words on $0CA-
+# $0CE and $0E0-$0E6 between. German draws SCHAUPLAETZE the same way on
+# $0C4-$0CE (its dots an extra 8x8 sprite), French CHOISIS SCENARIO on
+# $0E0-$0EE without the dashes. The record table and the code are the same in
+# all three; the words are the record and the artwork.
+#
+# So the title is composed like the option lines: glyphs from the alphabet
+# into $0E0-$0EE and $0C4-$0CE -- the tiles the German and French titles
+# prove unused elsewhere on the selector -- in an artwork entry scoped to $0A,
+# and record $15 rebuilt, centred where the US title is, at the end of the
+# bank-0 filler (the menu's relocated records take its start). Its text is
+# the third option line unless given separately: in all three cartridges the
+# two read the same.
+SELTITLE_RECORD = 0x15
+SELTITLE_SCREEN = 0x0A
+SELTITLE_BASE = (96, 96)
+SELTITLE_Y = -84
+SELTITLE_CENTRE = 27                    # the US title's middle, from the base
+SELTITLE_DASH = 0x0C0
+SELTITLE_SLOTS = (0x0E0, 0x0E2, 0x0E4, 0x0E6, 0x0E8, 0x0EA, 0x0EC, 0x0EE,
+                  0x0C4, 0x0C6, 0x0C8, 0x0CA, 0x0CC, 0x0CE)
+SELTITLE_WIDTH = 176                    # the words; with the dashes 208
+SELTITLE_US = "SELECT SCENARIO"
+
+
+def seltitle_spans(us, art, text):
+    """the selector's title -> (artwork spans for $0A, cart spans)"""
+    text = " ".join(text.upper().split())
+    if text == SELTITLE_US:
+        return [], []
+    cells = menu_layout(text)
+    if not cells:
+        sys.exit("the selector's title is empty")
+    width = cells[-1][0] + 16
+    if len(cells) > len(SELTITLE_SLOTS) or width > SELTITLE_WIDTH:
+        sys.exit('the selector\'s title "%s" takes %d sprites and %d pixels; it '
+                 "has %d and %d" % (text, len(cells), width, len(SELTITLE_SLOTS),
+                                    SELTITLE_WIDTH))
+    missing = sorted(set(c for _, pair in cells for c in pair
+                         if menu_glyph(art, c) is None))
+    if missing:
+        sys.exit("no glyph for %s in the selector's title"
+                 % " ".join("%s (U+%04X)" % (c, ord(c)) for c in missing))
+    bx, by = SELTITLE_BASE
+    ptr = us[MENU_TABLE + 2 * SELTITLE_RECORD] | us[MENU_TABLE + 2 * SELTITLE_RECORD + 1] << 8
+    attr = us[ptr - 0x8000 + 5] & 0xfe
+    # an odd last word leaves its sprite's right half blank; the dash closes
+    # up over it, as the German title's does
+    shown = width - (8 if len(text.split()[-1]) % 2 else 0)
+    x0 = SELTITLE_CENTRE - shown // 2
+    art_spans = []
+    entries = [(x0 - 16, SELTITLE_DASH)]
+    for k, (dx, pair) in enumerate(cells):
+        t = SELTITLE_SLOTS[k]
+        for half in (0, 1):
+            top, bot = menu_glyph(art, pair[half])
+            art_spans += [(t + half, top), (t + 16 + half, bot)]
+        entries.append((x0 + dx, t))
+    entries.append((x0 + shown, SELTITLE_DASH))
+    rec = bytearray()
+    for c0 in range(0, len(entries) + 1, 8):
+        part = entries[c0:c0 + 8]
+        flags, body = 0, bytearray()
+        for i, (x, t) in enumerate(part):
+            xb = x & 0xff
+            carry = 1 if xb + bx >= 0x100 else 0
+            flags |= (carry | 2) << (i * 2)
+            body += bytes([xb, SELTITLE_Y & 0xff, t & 0xff, ((t >> 8) & 1) | attr])
+        if len(part) < 8:
+            flags |= 1 << (len(part) * 2)
+            body += bytes([0])
+        rec += bytes([flags & 0xff, (flags >> 8) & 0xff]) + body
+        if len(part) < 8:
+            break
+    at = MENU_FREE_END - len(rec)
+    if any(b != 0xFF for b in us[at:MENU_FREE_END]):
+        sys.exit("the filler before the header at $%06X is not free" % at)
+    new = 0x8000 + (at % 0x8000)
+    print('selector title "%s": %d sprites, record $%02X rebuilt at $%06X'
+          % (text, len(entries), SELTITLE_RECORD, at))
+    return art_spans, [(at, bytes(rec)),
+                       (MENU_TABLE + 2 * SELTITLE_RECORD, bytes([new & 0xff, new >> 8]))]
+
+
+def _seltitle_entry(us, art, text):
+    """(cart spans, packet entries) for the selector's title, or nothing"""
+    if not text:
+        return [], []
+    spans, cart = seltitle_spans(us, art, text)
+    if not spans:
+        return [], []
+    return cart, [(MENU_ART, len(art), [(t * 32, d) for t, d in spans],
+                   (SELTITLE_SCREEN,))]
+
+
+def _seltitle_text(a):
+    t = getattr(a, "selector_title", None)
+    if t:
+        return t
+    menu = getattr(a, "menu_text", None)
+    if menu:
+        field = [x.strip() for x in menu.split("|")]
+        if len(field) == len(MENU_LINE_Y):
+            return field[-1]
+    return None
+
+
 def _menu_record(rom, ptr):
     """(bytes, sprite count) for one record, respecting its real terminator"""
     a = ptr - 0x8000
@@ -2287,30 +2397,175 @@ def _maptitles_for(a, us, eg):
     return maptitle_spans(us, eg, bytes(pk))
 
 
-# ── the map select screen ─────────────────────────────────────────────────
-# The new-city map picker (screen $04) has two English words, both pictures:
-# "MAP SELECT" in its header, on BG3 from the 2bpp set $08:C4DB, and "Please
-# wait..." in the preview window, on BG1 from the 4bpp set $08:DEA2. Its
-# tilemaps ($0B:9BA4, $0B:A10B) are identical in the German cartridge; only
-# the artwork of the tiles they use differs -- 22 tiles give LANDKARTEN and 21
-# give "Bitte warten...". NEXT, OK and No. are the same in both cartridges.
+# ── scenario city names ──────────────────────────────────────────────────
+# Starting a scenario, or the practice map, gives the city a name from a list
+# in bank 03:
 #
-# $08:C4DB is also the scenario selector's set, so the entries are scoped to
-# the screen that unpacks them for the picker, $04.
+#   03:cf19  LDA $CF32,Y / STA $79        Y = scenario * 2; nine pointers
+#            copy length + 1 bytes from ($79) to $0B5B
+#
+# The list is CISCO, BERN, TOKYO, DETROIT, BOSTON, RIO, LASVEGAS, FREEDOM and
+# PRACTICE, the practice map being entry 8. The name is drawn as sprites
+# (01:A312, halves from $03:E57F and $03:E5A7), in the save list (00:CD98) and
+# on the name entry page, all in the city-name codes: 0-9, A-Z, then , . -
+# and space. French renames BERN and PRACTICE BERNE and ENTRAIN. German
+# renames PRACTICE with an U-umlaut, code $28, which only new German code
+# draws (the save list's remap at 00:CDE1 and two longer sprite tables), so a
+# donor's $28 comes over as UE. The list is read at run time: a translation
+# is a cart span holding the nine pointers and the names, packed into the
+# room the US names take.
+CITY_CODES = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ,.- "
+CITY_DONOR_CODES = {0x28: "UE"}
+CITY_COUNT = 9
+CITY_NAME_MAX = 8
+# after LDA table,Y: STA $0079 / SEP #$30 / LDY #$00 / LDA ($79),Y
+CITY_READER = bytes.fromhex("8d7900e230a000b179")
+
+
+def city_table(rom):
+    """(pointer table offset, the nine names as codes, name area start, end)"""
+    i = rom.find(CITY_READER, 3 * 0x8000, 4 * 0x8000)
+    if i < 3 or rom[i - 3] != 0xB9 or rom.find(CITY_READER, i + 1, 4 * 0x8000) >= 0:
+        sys.exit("the scenario city name list's reader (US 03:CF19) is not in bank 03")
+    tab = 3 * 0x8000 + (rom[i - 2] | rom[i - 1] << 8) - 0x8000
+    ptrs = [3 * 0x8000 + (rom[tab + 2 * k] | rom[tab + 2 * k + 1] << 8) - 0x8000
+            for k in range(CITY_COUNT)]
+    names = [bytes(rom[q + 1:q + 1 + rom[q]]) for q in ptrs]
+    return tab, names, min(ptrs), max(q + 1 + rom[q] for q in ptrs)
+
+
+def read_cities(rom):
+    return ["".join(CITY_DONOR_CODES.get(c) or (CITY_CODES[c] if c < len(CITY_CODES) else "?")
+                    for c in n) for n in city_table(rom)[1]]
+
+
+def city_spans(us, names):
+    """nine names -> cart spans for the list, or [] if it is the US one"""
+    tab, unames, start, end = city_table(us)
+    if len(names) != CITY_COUNT:
+        sys.exit("cities needs %d names, the scenarios in list order and then the "
+                 "practice map; the file has %d" % (CITY_COUNT, len(names)))
+    codes, bad = [], []
+    for k, n in enumerate(names):
+        n = n.upper()
+        if not 1 <= len(n) <= CITY_NAME_MAX:
+            bad.append("city %d %r is %d characters; a name holds 1-%d"
+                       % (k, n, len(n), CITY_NAME_MAX))
+        elif any(c not in CITY_CODES for c in n):
+            bad.append("city %d %r: a city name has only 0-9, A-Z, , . - and space "
+                       "(write an umlaut as AE, OE, UE)" % (k, n))
+        else:
+            codes.append(bytes(CITY_CODES.index(c) for c in n))
+    if bad:
+        for m in bad:
+            print("  " + m, file=sys.stderr)
+        sys.exit("%d city name%s cannot be drawn" % (len(bad), "" if len(bad) == 1 else "s"))
+    if codes == unames:
+        return []
+    names_blob, ptrs = bytearray(), bytearray()
+    for c in codes:
+        ptrs += (0x8000 + (start + len(names_blob)) % 0x8000).to_bytes(2, "little")
+        names_blob += bytes([len(c)]) + c
+    if len(names_blob) > end - start:
+        sys.exit("the city names take %d bytes with their lengths; the list has "
+                 "room for %d" % (len(names_blob), end - start))
+    return [(tab, bytes(ptrs)), (start, bytes(names_blob))]
+
+
+def _cities_for(a, us):
+    names = getattr(a, "cities_doc", None)
+    if names is None and getattr(a, "cities", False):
+        if not a.donor:
+            sys.exit("--cities takes the donor's city names and needs --donor")
+        names = read_cities(open(a.donor, "rb").read())
+    elif names is not None:
+        ids = sorted(int(e["id"]) for e in names)
+        if ids != list(range(CITY_COUNT)):
+            sys.exit("city ids must be 0-%d, each once" % (CITY_COUNT - 1))
+        names = [e["name"] for e in sorted(names, key=lambda e: int(e["id"]))]
+    if names is None:
+        return []
+    sp = city_spans(us, names)
+    print("scenario city names: %s" % (" ".join(n.upper() for n in names) if sp
+                                       else "as in the US"))
+    return sp
+
+
+# ── the map select screen ─────────────────────────────────────────────────
+# The new-city screen ($14 = $04) is one device drawn on two layers. BG1 (the
+# 4bpp set $08:DEA2 through the three-page tilemap $0B:9BA4) draws the device
+# and "Please wait..."; BG3 (the 2bpp set $08:C4DB through the four-page
+# tilemap $0B:A10B) draws the display's words, a page per step: MAP SELECT,
+# "Enter name of the city", "Select game level" with Easy/Medium/Hard and
+# their funds, and "Is this OK?  Yes  No". The NEXT button is a sprite from
+# the menu art, taken with the tile sets.
+#
+# German keeps BG1's tilemap and redraws 21 of its tiles ("Bitte warten...").
+# BG3's first page keeps its layout (LANDKARTEN); the other three are laid out
+# anew ("Name der Stadt", "Waehle Schwierigkeitsgrad", "Ist das richtig?").
+# So BG1 is imported tile for tile, and BG3 cell by cell, as the selector is:
+# a changed cell takes an identical tile, else a redrawn one -- one whose
+# cells have all changed, or a blank tile the tilemap does not use -- and its
+# palette and priority come from the picture's colour ramp.
+#
+# $08:C4DB is also the scenario selector's set, and the selector's entry is
+# not scoped. So the BG3 entries are scoped to $04 and write every tile the
+# new tilemap uses, not just the redrawn ones: whatever another entry left in
+# a tile, the picker sees its own.
+#
+# The confirmation's first line is not all tilemap. On entering it, mode $15
+# (03:D9EB) writes six BG3 words over the page -- four cells of the level's
+# name, two of its funds' first digits -- from a table of six columns of
+# three, a row a level. The code is the same in all three cartridges and only
+# the table moves (US $03:DAAF, German $03:DAD1, French $03:DAD4), so it is
+# found through the code. Its words name tiles of the same set, some of which
+# no page shows (the 1 of 10, the 5), so the import counts its eighteen
+# entries as cells like the pages' and writes the table back.
+#
+# text_tool.py mapselect exports the four BG3 pages (left, in ramps) and the
+# three BG1 pages (right, sixteen colours) as one 512x1024 picture, and the
+# level table as three rows of six cells under BG1, in ramps like BG3.
 MAPSELECT_SCREEN = 0x04
 MAPSELECT_SETS = (
-    # (tile set, bytes a tile, tilemap packet, tilemap pages used)
-    (0x0444DB, 16, 0x05A10B, 1),      # BG3: MAP SELECT
-    (0x045EA2, 32, 0x059BA4, 1),      # BG1: Please wait...
+    # (tile set, bytes a tile, tilemap packet, tilemap pages)
+    (0x0444DB, 16, 0x05A10B, 4),      # BG3: the display's words
+    (0x045EA2, 32, 0x059BA4, 3),      # BG1: the device, Please wait...
 )
-
-
-#
-# text_tool.py mapselect exports both layers as one picture, BG3 on the left
-# and BG1 on the right, each the full 32x32-cell tilemap. An import redraws
-# tiles in place, so a tile the tilemap uses in several cells must be painted
-# the same in all of them; the import names the cells when it is not.
 MAPSELECT_CELLS = 32
+# SEP #$20 / LDA #$5C / STA $64 / REP #$30 / STZ $36 / LDA $0B57 / ASL / TAY,
+# then six times LDA table,Y / STA $7E41xx
+MAPSELECT_LEVEL_CODE = bytes.fromhex("e220a95c8564c2306436ad570b0aa8")
+MAPSELECT_LEVEL_WIDTH = 6
+MAPSELECT_LEVEL_ROW = 97              # the table's first cell row in the picture
+
+
+def mapselect_level_table(rom):
+    """the cart offsets of the level table's six columns"""
+    i = rom.find(MAPSELECT_LEVEL_CODE, 3 * 0x8000, 4 * 0x8000)
+    if i < 0 or rom.find(MAPSELECT_LEVEL_CODE, i + 1, 4 * 0x8000) >= 0:
+        sys.exit("the map select level table's code (US 03:D9EB) is not in bank 03")
+    cols, q = [], i + len(MAPSELECT_LEVEL_CODE)
+    for k in range(MAPSELECT_LEVEL_WIDTH):
+        if rom[q] != 0xB9 or rom[q + 3] != 0x8F or rom[q + 6] != 0x7E:
+            sys.exit("the map select level table's code at $%06X is not as expected" % i)
+        cols.append(3 * 0x8000 + (rom[q + 1] | rom[q + 2] << 8) - 0x8000)
+        q += 7
+    return cols
+
+
+def mapselect_level_words(rom):
+    """the table's eighteen words, a level at a time"""
+    cols = mapselect_level_table(rom)
+    return [rom[c + 2 * lv] | rom[c + 2 * lv + 1] << 8 for lv in range(3) for c in cols]
+
+
+def _mapselect_bg3_pos(i):
+    """(column, row) of BG3 cell i in the picture: pages, then the level table"""
+    n = MAPSELECT_CELLS
+    if i < n * n * MAPSELECT_SETS[0][3]:
+        return i % n, i // n
+    j = i - n * n * MAPSELECT_SETS[0][3]
+    return n + j % MAPSELECT_LEVEL_WIDTH, MAPSELECT_LEVEL_ROW + j // MAPSELECT_LEVEL_WIDTH
 
 
 def _cell_any(chrb, bpt, e):
@@ -2360,24 +2615,31 @@ def _nearest_pal(c, n=16, memo={}):
 
 
 def mapselect_pictures(path, eg, us):
-    """[cells per layer, 64 indices each] as a cartridge draws the map select"""
+    """[(cells, attrs) for BG3 and its level table, (cells, attrs) for BG1] as a
+    cartridge draws them"""
     rom = open(path, "rb").read()
     pk = None if rom == us else scan_packets(rom, eg, 512)
     out = []
     for chr_off, bpt, map_off, pages in MAPSELECT_SETS:
         uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
         umap = bytes(eg.nintendo_decompress(us, map_off)[0])
-        chrb = uchr
+        chrb, mapb = uchr, umap
         if pk is not None:
-            tw_chr = find_twin(pk, uchr)
-            tw_map = find_twin(pk, umap)
+            tw_chr, tw_map = find_twin(pk, uchr), find_twin(pk, umap)
             if not tw_chr or not tw_map:
                 sys.exit("no map select graphics found in %s" % os.path.basename(path))
-            if tw_map[2][:2048 * pages] != umap[:2048 * pages]:
-                sys.exit("the donor's map select tilemap $%06X differs from the US "
-                         "one; a tile-for-tile import would misplace it" % tw_map[0])
-            chrb = tw_chr[2]
-        out.append([_cell_any(chrb, bpt, e) for e in _map_words(umap[:2048 * pages])])
+            chrb, mapb = tw_chr[2], tw_map[2]
+            if bpt == 32 and mapb[:2048 * pages] != umap[:2048 * pages]:
+                sys.exit("the donor's BG1 tilemap $%06X differs from the US one; a "
+                         "tile-for-tile import would misplace it" % tw_map[0])
+        words = _map_words(mapb[:2048 * pages])
+        # BG1's later pages also name tiles past this set's 256, drawn from
+        # another part of VRAM; those cells are not this picture's to show
+        inside = lambda e: (e & 0x3ff) < len(chrb) // bpt
+        if bpt == 16:
+            words += mapselect_level_words(rom)
+        out.append(([_cell_any(chrb, bpt, e) if inside(e) else None for e in words],
+                    [e & 0x3C00 for e in words]))
     return out
 
 
@@ -2389,17 +2651,28 @@ def cmd_mapselect(a):
     eg = _lz5()
     us = open(a.rom, "rb").read()
     layers = mapselect_pictures(getattr(a, "from") or a.rom, eg, us)
+    ((c3, a3), (c1, _)) = layers
+    uw3 = (_map_words(eg.nintendo_decompress(us, MAPSELECT_SETS[0][2])[0][:2048 * MAPSELECT_SETS[0][3]])
+           + mapselect_level_words(us))
     n = MAPSELECT_CELLS
-    img = PIL.Image.new("RGB", (n * 8 * len(layers), n * 8))
+    img = PIL.Image.new("RGB", (n * 8 * 2, n * 8 * 4), PANEL_MARK)
     px = img.load()
-    for k, cells in enumerate(layers):
-        for i, cell in enumerate(cells):
-            for j, v in enumerate(cell):
-                px[k * n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8] = LABEL_PAL[v]
+    for i, cell in enumerate(c3):
+        ramp = LABEL_PAL[:4] if a3[i] == uw3[i] & 0x3C00 else _attr_ramp(a3[i])
+        x, y = _mapselect_bg3_pos(i)
+        for j, v in enumerate(cell):
+            px[x * 8 + j % 8, y * 8 + j // 8] = ramp[v]
+    for i, cell in enumerate(c1):
+        for j, v in enumerate(cell or ()):
+            px[n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8] = LABEL_PAL[v]
     img.save(a.out)
-    print("map select -> %s: BG3 (MAP SELECT, four colours) on the left, BG1 "
-          "(Please wait..., sixteen) on the right. Tiles are redrawn in place, so "
-          "a tile used in several cells must look the same in all of them." % a.out)
+    print("map select -> %s: on the left BG3's four pages (MAP SELECT, name entry, "
+          "game level, confirmation) in four colours, a cell in colour having a "
+          "palette of its own; on the right BG1's three pages in sixteen colours, "
+          "redrawn in place, so a BG1 tile used in several cells must look the "
+          "same in all of them. Under BG1, three rows of six BG3 cells: the "
+          "confirmation's level name and funds for Easy, Medium and Hard, which "
+          "the game writes over the page's first line." % a.out)
 
 
 def _mapselect_from_png(path):
@@ -2409,40 +2682,133 @@ def _mapselect_from_png(path):
         sys.exit("this needs Pillow: pip install Pillow")
     n = MAPSELECT_CELLS
     img = PIL.Image.open(path).convert("RGB")
-    if img.size != (n * 8 * len(MAPSELECT_SETS), n * 8):
+    if img.size != (n * 8 * 2, n * 8 * 4):
         sys.exit("%s is %dx%d; the map select picture is %dx%d"
-                 % ((path,) + img.size + (n * 8 * len(MAPSELECT_SETS), n * 8)))
+                 % ((path,) + img.size + (n * 8 * 2, n * 8 * 4)))
     px = img.load()
-    return [[tuple(_nearest_pal(px[k * n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8])
-                   for j in range(64)) for i in range(n * n)]
-            for k in range(len(MAPSELECT_SETS))]
+    decode = _attr_decoder(LABEL_PAL[:4])
+    c3, a3 = [], []
+    for i in range(n * n * MAPSELECT_SETS[0][3] + 3 * MAPSELECT_LEVEL_WIDTH):
+        x, y = _mapselect_bg3_pos(i)
+        pts = [px[x * 8 + j % 8, y * 8 + j // 8] for j in range(64)]
+        if x >= n and all(q == PANEL_MARK for q in pts):
+            # a picture from before the level table: keep the US words
+            c3.append(None)
+            a3.append(None)
+            continue
+        idx, at = _decode_cell(decode, pts, "%s BG3 cell %d,%d" % (path, x, y))
+        c3.append(idx)
+        a3.append(at)
+    c1 = []
+    for i in range(n * n * MAPSELECT_SETS[1][3]):
+        pts = [px[n * 8 + i % n * 8 + j % 8, i // n * 8 + j // 8] for j in range(64)]
+        c1.append(None if all(q == PANEL_MARK for q in pts)
+                  else tuple(_nearest_pal(q) for q in pts))
+    return [(c3, a3), (c1, None)]
 
 
 def mapselect_spans(us, eg, pictures):
-    """the map select layers as pictures -> packet entries for the tiles that change"""
+    """the map select pictures -> (cart spans, packet entries)"""
+    (c3, a3), (c1, _) = pictures
     entries = []
-    for (chr_off, bpt, map_off, pages), cells in zip(MAPSELECT_SETS, pictures):
-        uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
-        umap = bytes(eg.nintendo_decompress(us, map_off)[0])
-        want, first = {}, {}
-        for i, e in enumerate(_map_words(umap[:2048 * pages])):
-            t = e & 0x3ff
-            g = _cell_pack(cells[i], bpt, e)
-            if g is None:
-                sys.exit("map select $%06X, cell %d,%d: a four-colour layer painted "
-                         "with more than four colours" % (chr_off, i % 32, i // 32))
-            if want.setdefault(t, g) != g:
-                j = first[t]
-                sys.exit("map select $%06X: cells %d,%d and %d,%d share tile $%03X "
-                         "but are painted differently" % (chr_off, j % 32, j // 32,
-                                                          i % 32, i // 32, t))
-            first.setdefault(t, i)
-        spans = [(t * bpt, g) for t, g in sorted(want.items())
-                 if g != uchr[t * bpt:(t + 1) * bpt]]
-        print("map select: %d tiles of $%06X changed" % (len(spans), chr_off))
-        if spans:
-            entries.append((chr_off, len(uchr), spans, (MAPSELECT_SCREEN,)))
-    return entries
+    # BG1: tile for tile
+    chr_off, bpt, map_off, pages = MAPSELECT_SETS[1]
+    uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
+    umap = bytes(eg.nintendo_decompress(us, map_off)[0])
+    want, first = {}, {}
+    for i, e in enumerate(_map_words(umap[:2048 * pages])):
+        t = e & 0x3ff
+        if t >= len(uchr) // bpt or c1[i] is None:
+            continue
+        g = _cell_pack(c1[i], bpt, e)
+        if want.setdefault(t, g) != g:
+            j = first[t]
+            sys.exit("map select BG1: cells %d,%d and %d,%d share tile $%03X but are "
+                     "painted differently" % (j % 32, j // 32, i % 32, i // 32, t))
+        first.setdefault(t, i)
+    spans = [(t * bpt, g) for t, g in sorted(want.items()) if g != uchr[t * bpt:(t + 1) * bpt]]
+    print("map select BG1: %d tiles redrawn" % len(spans))
+    if spans:
+        entries.append((chr_off, len(uchr), spans, (MAPSELECT_SCREEN,)))
+    # BG3: cell by cell
+    chr_off, bpt, map_off, pages = MAPSELECT_SETS[0]
+    uchr = bytes(eg.nintendo_decompress(us, chr_off)[0])
+    umap = bytes(eg.nintendo_decompress(us, map_off)[0])
+    words = _map_words(umap[:2048 * pages])
+    npage = len(words)
+    level_cols = mapselect_level_table(us)
+    words += mapselect_level_words(us)
+    c3 = [_cell_any(uchr, bpt, e) if c3[i] is None else c3[i] for i, e in enumerate(words)]
+    attrs = [words[i] & 0x3C00 if a3[i] is None else a3[i] for i in range(len(words))]
+    changed = [i for i, e in enumerate(words) if c3[i] != _cell_any(uchr, bpt, e)]
+    chg = set(changed)
+    recoloured = [i for i, e in enumerate(words) if i not in chg and attrs[i] != e & 0x3C00]
+    if not changed and not recoloured:
+        print("map select BG3: as in the US")
+        return [], entries
+    tiles = len(uchr) // bpt
+    tile = lambda b, t: bytes(b[t * bpt:(t + 1) * bpt])
+    refs = {}
+    for i, e in enumerate(words):
+        refs.setdefault(e & 0x3ff, set()).add(i)
+    freed = sorted(t for t, cs in refs.items() if cs <= chg)
+    blank = [t for t in range(tiles) if t not in refs and not any(tile(uchr, t))]
+    pool = freed + blank
+    in_pool = set(pool)
+    have, as_is = {}, {}
+    for t in range(tiles):
+        (as_is if t in in_pool else have).setdefault(tile(uchr, t), t)
+    wants = []
+    for i in changed:
+        g = _cell_pack(c3[i], bpt, 0)
+        if g is None:
+            sys.exit("map select BG3 cell %d,%d uses more than four colours" % (i % 32, i // 32))
+        wants.append((i, g))
+    assign, used = {}, set()
+    for _, g in wants:
+        if g in assign:
+            continue
+        if g in have:
+            assign[g] = have[g]
+        elif g in as_is and as_is[g] not in used:
+            assign[g] = as_is[g]
+            used.add(as_is[g])
+    free = [t for t in pool if t not in used]
+    new_chr, new_map = bytearray(uchr), bytearray(umap)
+    new_level = list(words[npage:])
+    redrawn = 0
+    for _, g in wants:
+        if g in assign:
+            continue
+        if not free:
+            sys.exit("the map select pages need more tiles than the %d BG3 can redraw" % len(pool))
+        t = free.pop(0)
+        new_chr[t * bpt:(t + 1) * bpt] = g
+        assign[g] = t
+        redrawn += 1
+    def put(i, w):
+        if i < npage:
+            new_map[2 * i:2 * i + 2] = bytes([w & 0xFF, w >> 8])
+        else:
+            new_level[i - npage] = w
+    for i, g in wants:
+        put(i, attrs[i] | assign[g])
+    for i in recoloured:
+        put(i, (words[i] & 0xC3FF) | attrs[i])
+    in_use = sorted(set(w & 0x3ff for w in _map_words(bytes(new_map[:2048 * pages])) + new_level))
+    spans = [(t * bpt, tile(new_chr, t)) for t in in_use]
+    cart = []
+    if new_level != words[npage:]:
+        for k, col in enumerate(level_cols):
+            cart.append((col, b"".join(bytes([w & 0xFF, w >> 8])
+                                       for w in new_level[k::MAPSELECT_LEVEL_WIDTH])))
+    print("map select BG3: %d cells changed, %d recoloured, %d tiles redrawn; all %d "
+          "tiles the pages and the level table use written for $%02X; level table %s"
+          % (len(changed), len(recoloured), redrawn, len(in_use), MAPSELECT_SCREEN,
+             "rewritten" if cart else "as in the US"))
+    entries.append((chr_off, len(uchr), spans, (MAPSELECT_SCREEN,)))
+    entries.append((map_off, len(umap), [(0, bytes(new_map))], (MAPSELECT_SCREEN,)))
+    return cart, entries
 
 
 def _mapselect_for(a, us, eg):
@@ -2452,7 +2818,7 @@ def _mapselect_for(a, us, eg):
         return mapselect_spans(us, eg, mapselect_pictures(a.donor, eg, us))
     if getattr(a, "mapselect_from", None):
         return mapselect_spans(us, eg, _mapselect_from_png(a.mapselect_from))
-    return []
+    return [], []
 
 
 # ── accented glyphs ──────────────────────────────────────────────────────
@@ -3546,34 +3912,103 @@ def selector_import(us, eg, path):
 #   $0A:C4CF  gift buildings       their signs (Zoo, Casino, Stadium, Expo...)
 #   $0A:81E9  city sprites         the RCI demand meter (WGI)
 #   $0A:8F68  menu sprites         the RCI demand meter, second copy
+#   $07:A680  title                PUSH START (DRUECKE START), tiles $118-$11F
+#                                  and $138-$139 only
+#   $09:A571  menu art             the NEXT button (WEITER), tiles
+#                                  $172-$174 only
+#   $05:C000  city map, animated   the police and fire stations' PD and FD
+#                                  (PH, FH); four raw frames, not a packet
+#   $09:C0FB  in-city BG3 set      past its font: TOP, R and C on window
+#                                  frames, R-1..., LOW MID UPPER HIGH; 2bpp,
+#                                  tiles $100-$27F only -- the font below is
+#                                  the notices' (see NOTICE_GLYPH_SLOTS)
+#   $07:8000  toolbar icons        R, C, PD, FD on the building tools (W, G,
+#                                  PH, FH) and the graph window's "10 Year"
+#                                  and "120 Year"; raw, not a packet
 #
-# No screen scope: the German art is what the German game shows wherever the
-# packet unpacks. text_tool.py tilesets exports each as a 16-tile-wide sheet;
-# an import takes the tiles that differ from the US packet.
+# Where a set is limited to some tiles, the rest is not ours to take: the
+# title's other differences are the German cartridge's trademark mark and
+# copyright lines, plus street lights and filler; the menu art's are the menu
+# words, which the menu import composes itself, and the save list's glyphs.
+# The NEXT button is sprite-text record $2C, drawn on the new-city screens
+# and by the in-city screen at 01:9FD1 that shows the city's name, so it is
+# taken wherever the art unpacks, as the German cartridge has it. An
+# unscoped set is taken on every screen that unpacks it.
+#
+# Two sets are not packed. The map's animated tiles sit in bank 05 as four
+# frames of 160 tiles, $1400 bytes each; the toolbar's icons, both states of
+# each, sit at the start of bank 07, and the game copies an icon's tiles to
+# VRAM whenever it is drawn (the HUD region $06:CC00 holds only a first copy
+# of some). Both are at the same address in all three cartridges, and a
+# translation of them is a cart span. Found by dumping VRAM and OAM in a city
+# and tracing each toolbar tile back to the cartridge.
+#
+# text_tool.py tilesets exports each as a whole 16-tile-wide sheet (the
+# frames one under another); an import takes the tiles, within a set's
+# ranges, that differ from the US. A donor's copy is looked for at the US
+# address first -- the German title set sits there, hidden from a packet scan
+# by a false stream in front of it.
 TILESETS = (
-    # (picture, US packet, bytes a tile)
-    ("citytiles.png", 0x03E584, 32),
-    ("bank.png", 0x046422, 32),
-    ("graphs.png", 0x057CE1, 32),
-    ("gifts.png", 0x0544CF, 32),
-    ("rci.png", 0x0501E9, 32),
-    ("rci_menu.png", 0x050F68, 32),
+    # (picture, US packet or raw (start, end) cart ranges, bytes a tile,
+    #  tile ranges taken or None, screens)
+    ("citytiles.png", 0x03E584, 32, None, ()),
+    ("bank.png", 0x046422, 32, None, ()),
+    ("graphs.png", 0x057CE1, 32, None, ()),
+    ("gifts.png", 0x0544CF, 32, None, ()),
+    ("rci.png", 0x0501E9, 32, None, ()),
+    ("rci_menu.png", 0x050F68, 32, None, ()),
+    ("title.png", 0x03A680, 32, ((0x118, 0x120), (0x138, 0x13A)), ()),
+    ("next.png", 0x04A571, 32, ((0x172, 0x175),), ()),
+    ("cityui.png", FONT_PACKET, 16, ((0x100, 0x280),), ()),
+    ("stations.png", ((0x02C000, 0x02D400), (0x02D400, 0x02E800),
+                      (0x02E800, 0x02FC00), (0x02FC00, 0x031000)), 32, None, ()),
+    ("icons.png", ((0x038000, 0x03A680),), 32, None, ()),
 )
 
 
+def _tileset_bytes(rom, eg, off):
+    """a set as a cartridge holds it: an LZ5 packet, or raw frames"""
+    if isinstance(off, tuple):
+        return b"".join(rom[lo:hi] for lo, hi in off)
+    return bytes(eg.nintendo_decompress(rom, off)[0])
+
+
+def _tileset_where(off):
+    if not isinstance(off, tuple):
+        return "$%06X" % off
+    return "raw " + " ".join("$%06X-$%06X" % r for r in off)
+
+
+def _tileset_cart(off, pos):
+    """a byte position in a raw set -> its cart offset"""
+    for lo, hi in off:
+        if pos < hi - lo:
+            return lo + pos
+        pos -= hi - lo
+    raise ValueError(pos)
+
+
 def tileset_sheets(path, eg, us):
-    """{US packet offset: that set's bytes as a cartridge has them}"""
+    """{picture: that set's bytes as a cartridge has them}"""
     rom = open(path, "rb").read()
     out = {}
-    for name, off, bpt in TILESETS:
-        u = bytes(eg.nintendo_decompress(us, off)[0])
+    for name, off, bpt, span, screens in TILESETS:
+        u = _tileset_bytes(us, eg, off)
         if rom == us:
-            out[off] = u
+            out[name] = u
             continue
-        tw = find_twin(scan_packets(rom, eg, 512), u)
+        try:
+            same = _tileset_bytes(rom, eg, off)
+        except Exception:
+            same = b""
+        if len(same) == len(u) and sum(x == y for x, y in zip(same, u)) * 2 > len(u):
+            out[name] = same
+            continue
+        tw = None if isinstance(off, tuple) else find_twin(scan_packets(rom, eg, 512), u)
         if not tw:
-            sys.exit("no counterpart of $%06X (%s) in %s" % (off, name, os.path.basename(path)))
-        out[off] = bytes(tw[2])
+            sys.exit("no counterpart of %s (%s) in %s"
+                     % (_tileset_where(off), name, os.path.basename(path)))
+        out[name] = bytes(tw[2])
     return out
 
 
@@ -3586,20 +4021,19 @@ def cmd_tilesets(a):
     us = open(a.rom, "rb").read()
     sheets = tileset_sheets(getattr(a, "from") or a.rom, eg, us)
     os.makedirs(a.out, exist_ok=True)
-    for name, off, bpt in TILESETS:
-        pk = sheets[off]
+    for name, off, bpt, span, screens in TILESETS:
+        pk = sheets[name]
         n = len(pk) // bpt
         img = PIL.Image.new("RGB", (16 * 8, (n + 15) // 16 * 8), PANEL_MARK)
         px = img.load()
         for t in range(n):
-            rows = _tile_pixels(pk[t * bpt:(t + 1) * bpt])
-            for y in range(8):
-                for x in range(8):
-                    px[t % 16 * 8 + x, t // 16 * 8 + y] = LABEL_PAL[rows[y][x]]
+            for j, v in enumerate(_cell_any(pk, bpt, t)):
+                px[t % 16 * 8 + j % 8, t // 16 * 8 + j // 8] = LABEL_PAL[v]
         img.save(os.path.join(a.out, name))
-        print("  %s  $%06X, %d tiles" % (name, off, n))
-    print("tile sets -> %s. Sixteen colours; keep every word on the tiles it "
-          "already uses, since the game places them by tile number." % a.out)
+        print("  %s  %s, %d tiles" % (name, _tileset_where(off), n))
+    print("tile sets -> %s. Sixteen colours (cityui.png four); keep every word "
+          "on the tiles it already uses, since the game places them by tile "
+          "number." % a.out)
 
 
 def _tilesets_from_dir(folder, eg, us):
@@ -3608,41 +4042,48 @@ def _tilesets_from_dir(folder, eg, us):
     except ImportError:
         sys.exit("this needs Pillow: pip install Pillow")
     out = {}
-    for name, off, bpt in TILESETS:
+    for name, off, bpt, span, screens in TILESETS:
         path = os.path.join(folder, name)
         if not os.path.exists(path):
             continue
-        u = bytes(eg.nintendo_decompress(us, off)[0])
+        u = _tileset_bytes(us, eg, off)
         n = len(u) // bpt
         img = PIL.Image.open(path).convert("RGB")
         if img.size != (16 * 8, (n + 15) // 16 * 8):
             sys.exit("%s is %dx%d; that sheet is %dx%d"
                      % ((path,) + img.size + (16 * 8, (n + 15) // 16 * 8)))
         px = img.load()
+        colours = 4 if bpt == 16 else 16
         pk = bytearray()
         for t in range(n):
-            pk += _tile_bytes([[_nearest_pal(px[t % 16 * 8 + x, t // 16 * 8 + y])
-                                for x in range(8)] for y in range(8)])
-        out[off] = bytes(pk)
+            pk += _cell_pack([_nearest_pal(px[t % 16 * 8 + j % 8, t // 16 * 8 + j // 8], colours)
+                              for j in range(64)], bpt, 0)
+        out[name] = bytes(pk)
     if not out:
         sys.exit("no tile set pictures in %s" % folder)
     return out
 
 
 def tileset_spans(us, eg, sheets):
-    """{US packet offset: wanted bytes} -> packet entries for the tiles that change"""
-    entries = []
-    for name, off, bpt in TILESETS:
-        if off not in sheets:
+    """{picture: wanted bytes} -> (cart spans, packet entries) for the tiles
+    that change"""
+    cart, entries = [], []
+    for name, off, bpt, span, screens in TILESETS:
+        if name not in sheets:
             continue
-        u = bytes(eg.nintendo_decompress(us, off)[0])
-        pk = sheets[off]
+        u = _tileset_bytes(us, eg, off)
+        pk = sheets[name]
+        taken = lambda t: span is None or any(lo <= t < hi for lo, hi in span)
         spans = [(t * bpt, bytes(pk[t * bpt:(t + 1) * bpt])) for t in range(len(u) // bpt)
-                 if pk[t * bpt:(t + 1) * bpt] != u[t * bpt:(t + 1) * bpt]]
+                 if taken(t) and pk[t * bpt:(t + 1) * bpt] != u[t * bpt:(t + 1) * bpt]]
         print("tile set %s: %d tiles changed" % (name, len(spans)))
-        if spans:
-            entries.append((off, len(u), spans))
-    return entries
+        if not spans:
+            continue
+        if isinstance(off, tuple):
+            cart += [(_tileset_cart(off, o), d) for o, d in spans]
+        else:
+            entries.append((off, len(u), spans, tuple(screens)))
+    return cart, entries
 
 
 def _tilesets_for(a, us, eg):
@@ -3652,7 +4093,7 @@ def _tilesets_for(a, us, eg):
         return tileset_spans(us, eg, tileset_sheets(a.donor, eg, us))
     if getattr(a, "tilesets_from", None):
         return tileset_spans(us, eg, _tilesets_from_dir(a.tilesets_from, eg, us))
-    return []
+    return [], []
 
 
 # ── the save/load dialog ────────────────────────────────────────────────
@@ -3851,13 +4292,15 @@ GRAPHICS = (
     ("maptitles.png", "cmd_maptitles", "maptitles_from", "map window titles"),
     ("labels.png", "cmd_labels", "labels_from", "the toolbar's building labels"),
     ("panels.png", "cmd_panels", "panels_from", "the in-city panels"),
-    ("mapselect.png", "cmd_mapselect", "mapselect_from", "MAP SELECT and Please wait..."),
+    ("mapselect.png", "cmd_mapselect", "mapselect_from",
+     "the new-city display's pages, its level names and Please wait..."),
     ("strips.png", "cmd_strips", "strips_from", "the evaluation's problems and categories"),
     ("accents.png", "cmd_accents", "accents_from", "accented glyphs of four fonts"),
     ("selector.png", "cmd_selector", "selector_from",
      "scenario card names, disaster lines and Sylt's line"),
     ("tilesets", "cmd_tilesets", "tilesets_from",
-     "city tiles, bank window, graph title, gift signs, RCI meters"),
+     "city tiles, bank window, graph title, gift signs, RCI meters, PUSH START, "
+     "NEXT, police and fire stations"),
     ("saveload", "cmd_saveload", "saveload_from",
      "the save/load dialog: its sheet and where its prompts are"),
 )
@@ -3943,10 +4386,12 @@ def _packets_menu_only(a, us, eg):
     ecart, echr = _events_for(a, us, eg)
     pcart, pchr = _panels_for(a, us, eg)
     scart, schr = _saveload_for(a, us, eg)
-    ncart = ncart + ecart + pcart + scart
+    mcart, mchr = _mapselect_for(a, us, eg)
+    tcart, tchr = _tilesets_for(a, us, eg)
+    ncart = ncart + ecart + pcart + scart + mcart + tcart + _cities_for(a, us)
     nfont = nfont + schr
     nfont = (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg) + echr
-             + pchr + _mapselect_for(a, us, eg) + _tilesets_for(a, us, eg))
+             + pchr + mchr + tchr)
     sel = []
     if getattr(a, "selector_from", None):
         smap, sspans, sylt = selector_import(us, eg, a.selector_from)
@@ -3955,9 +4400,10 @@ def _packets_menu_only(a, us, eg):
                     (SELECTOR_CHR, 16384, sspans)]
         if sylt:
             sel.append((SYLT_CARD_PSEUDO, 0, sylt))
+    tcart, tart = _seltitle_entry(us, art, _seltitle_text(a))
     write_packets(a.out, [(MENU_ART, len(art),
                            [(t * 32, d) for t, d in art_spans], MENU_SCREENS),
-                          (ROM_SPAN_PSEUDO, 0, cart + ncart)] + sel + nfont)
+                          (ROM_SPAN_PSEUDO, 0, cart + ncart + tcart)] + tart + sel + nfont)
 
 
 def _msg_cols_spans(a):
@@ -3978,7 +4424,8 @@ def cmd_packets(a):
         # US artwork itself, so it still works; the scenario card names and
         # the building labels stay English, because they are pictures.
         for opt in ("hud", "menu", "rom_copy", "swap", "reports", "maptitles",
-                    "mapselect", "events", "panels", "tilesets", "saveload"):
+                    "mapselect", "events", "panels", "tilesets", "saveload",
+                    "cities"):
             if getattr(a, opt, None):
                 sys.exit("--%s needs --donor" % opt.replace("_", "-"))
         return _packets_menu_only(a, us, eg)
@@ -4182,6 +4629,11 @@ def cmd_packets(a):
         extra.append((MENU_ART, len(art),
                       [(t * 32, d) for t, d in art_spans], MENU_SCREENS))
         rom_spans += cart
+    if getattr(a, "menu_text", None) or getattr(a, "selector_title", None):
+        art, _ = eg.nintendo_decompress(us, MENU_ART)
+        tcart, tart = _seltitle_entry(us, art, _seltitle_text(a))
+        rom_spans += tcart
+        extra += tart
 
     ncart, nfont = _notices_for(a, us)
     rom_spans += ncart
@@ -4192,8 +4644,13 @@ def cmd_packets(a):
     scart, schr = _saveload_for(a, us, eg)
     rom_spans += scart
     extra += schr
+    mcart, mchr = _mapselect_for(a, us, eg)
+    rom_spans += mcart
+    tcart, tchr = _tilesets_for(a, us, eg)
+    rom_spans += tcart
+    rom_spans += _cities_for(a, us)
     extra += (nfont + _reports_for(a, us, eg) + _maptitles_for(a, us, eg)
-              + _mapselect_for(a, us, eg) + echr + pchr + _tilesets_for(a, us, eg))
+              + mchr + echr + pchr + tchr)
     entries = ([(SELECTOR_MAP, len(umap), [(0, bytes(out_map))]),
                 (SELECTOR_CHR, len(uchr), spans)]
                + ([(SYLT_CARD_PSEUDO, 0, sylt)] if sylt else []) + extra)
@@ -4417,6 +4874,8 @@ def cmd_template(a):
             "Accented letters are built on the fly, so write them normally.",
             "menu_saved: the line above them while a save exists. Empty keeps",
             "the US RESUME SAVED CITY.",
+            "selector_title: the title over the scenario selector. Empty uses",
+            "the third menu line, as all three cartridges do.",
             "",
             "messages: the in-game message box. It renders into a fixed-width",
             "box, so runs of spaces are LAYOUT, not padding to strip. Each",
@@ -4436,6 +4895,15 @@ def cmd_template(a):
             "two lines of 18 characters; ids 13-15 are the evaluation's game",
             "level, one line of 6. months: twelve three-letter names.",
             "",
+            "cities: the name a city gets when it is started, ids 0-7 the",
+            "scenarios (San Francisco, Bern, Tokyo, Detroit, Boston, Rio, Las",
+            "Vegas, Freeland), 8 the practice map. 1-%d characters of 0-9, A-Z,"
+            % CITY_NAME_MAX,
+            ", . - and space; umlauts as AE, OE, UE. %d bytes for all nine,"
+            % (city_table(open(a.us_rom, "rb").read())[3]
+               - city_table(open(a.us_rom, "rb").read())[2]),
+            "counting one more a name.",
+            "",
             "Build it with:",
             "  python tools/text_tool.py translate --in FILE --out-prefix NAME",
             "Add --donor ROM for the accented glyphs of the message font, the",
@@ -4447,11 +4915,12 @@ def cmd_template(a):
         "columns": detect_msg_cols([to_text(r) for r in recs]),
         "menu": list(MENU_US),
         "menu_saved": "",
+        "selector_title": "",
         "messages": [{"id": i, "text": to_text(r)} for i, r in enumerate(recs)],
         "notices": read_notices(open(src, "rb").read()),
-        "events": [{"id": i, "lines": l} for i, l in
-                   sorted(read_events(open(src, "rb").read())[0].items())],
+        "events": _template_events(open(src, "rb").read()),
         "months": read_events(open(src, "rb").read())[1],
+        "cities": [{"id": k, "name": n} for k, n in enumerate(read_cities(open(src, "rb").read()))],
         "briefings": [{"page": p["page"], "title": p["title"],
                        "body": p["body"], "row": p["row"], "col": p["col"]}
                       for p in _briefs_doc(src)["pages"]],
@@ -4461,6 +4930,24 @@ def cmd_template(a):
     print("template from %s (%s): %d menu lines, %d messages, %d briefings "
           "-> %s" % (os.path.basename(src), ver, len(doc["menu"]),
                      len(doc["messages"]), len(doc["briefings"]), a.out))
+
+
+def _template_events(rom):
+    """a cartridge's event lines, re-wrapped as the donor route re-wraps them,
+    so a template seeded from a donor builds as it stands"""
+    ev, _ = read_events(rom)
+    width = _event_level_width(rom)
+    out = []
+    for i, lines in sorted(ev.items()):
+        if i < 16:
+            fits = len(lines) == 1 and len(lines[0]) <= width
+        else:
+            fits = len(lines) <= 2 and all(len(x) <= EVENT_WIDTH for x in lines)
+        fit = lines if fits else _event_fit(i, lines, width)
+        if fit is None:
+            fit = EVENT_SHORTER.get(" ".join(" ".join(lines).split()), lines)
+        out.append({"id": i, "lines": fit})
+    return out
 
 
 def _translate_briefs(doc, us_rom):
@@ -4564,7 +5051,9 @@ def cmd_translate(a):
         tilesets=False, tilesets_from=a.tilesets_from,
         saveload=False, saveload_from=a.saveload_from,
         events=False,
-        events_doc=doc.get("events"), months_doc=doc.get("months"))
+        events_doc=doc.get("events"), months_doc=doc.get("months"),
+        cities=False, cities_doc=doc.get("cities"),
+        selector_title=doc.get("selector_title") or None)
     cmd_packets(ns)
 
 def main():
@@ -4649,6 +5138,11 @@ def main():
                          "letters are built on the fly")
     pc.add_argument("--events", action="store_true",
                     help="take the event lines and month names from the donor")
+    pc.add_argument("--selector-title", metavar="TEXT",
+                    help="the scenario selector's title; the third --menu-text "
+                         "line when not given")
+    pc.add_argument("--cities", action="store_true",
+                    help="take the scenario and practice city names from the donor")
     pc.add_argument("--saveload", action="store_true",
                     help="take the save/load dialog from the donor: its sheet and "
                          "prompt runs")
@@ -4656,7 +5150,8 @@ def main():
                     help="an edited save/load dialog from text_tool.py saveload")
     pc.add_argument("--tilesets", action="store_true",
                     help="take the tile-for-tile sets from the donor: city zone "
-                         "letters, bank window, graph title, gift signs, RCI meters")
+                         "letters, bank window, graph title, gift signs, RCI "
+                         "meters, PUSH START, NEXT, police and fire stations")
     pc.add_argument("--tilesets-from", metavar="DIR",
                     help="edited tile set sheets from text_tool.py tilesets")
     pc.add_argument("--graphics-from", metavar="DIR",
