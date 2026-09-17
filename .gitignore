@@ -40,6 +40,11 @@ __pycache__/
 
 # Local-only config overrides (per-developer, applied after config.ini)
 config.local.ini
+# Launcher state (src/sc_launcher.c, recomp-ui)
+sc-settings.ini
+sc-settings.ini.tmp
+keybinds.ini
+imgui.ini
 
 # Boot traces / triage scratch (generated at runtime)
 boot_trace*.txt

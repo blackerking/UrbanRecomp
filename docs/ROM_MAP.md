@@ -5083,6 +5083,20 @@ more function on the interpreter.
 
 ### Save states taken on a report screen cannot check these screens
 
+**Update (2026-09-17): the cause is fixed for new states.** The device
+snapshot held the PPU's registers and memories but not its CPU-port latches
+(the VRAM pointer, VMAIN's increment-on-high bit, the CGRAM/OAM write state),
+so a state saved while the game was uploading tiles sent the uploads after
+the load to the wrong place. States now carry those latches, the host's
+master clock and its HDMA walker behind a versioned header (taken from the
+adaptive-renderer PR, blackerking/SimCitySNESRecomp#1). A save/restore at
+frame 3300 of a San Francisco run matched the uninterrupted run for 300
+frames -- WRAM hash, CPU registers, master clock -- and all 12 captured
+pictures byte for byte. Old states still load, with a warning, and behave as
+they did; save them again to get the fix. `SC_SAVE_AT`/`SC_SAVE_PATH` and
+`SC_STATE_TRACE` under `--qualify` reproduce the check. The text below is
+what was measured with the old format.
+
 Loading a state saved while a report screen is open does not redraw it. Frame
 0 is the saved picture; within 40 frames the tiles break up, and pad input at
 60 and 150 frames changes nothing visible. Plain US, with no translation and

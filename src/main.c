@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <stddef.h>
 
 /* Shared SDL2/SDL3 include boundary. SNESRECOMP_SDL3 is set by
  * snesrecomp_target_sdl() in CMakeLists.txt; the shim pulls in the right
@@ -85,6 +86,7 @@ uint8_t    g_ram[0x20000];
  * returned false was observed as true, and the US-only gate silently passed on
  * a German ROM. It compiled and linked without a word. */
 #include "simcity_mapview.h"
+#include "sc_launcher.h"
 #include "simcity_mapgen.h"
 #include "simcity_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
@@ -171,6 +173,10 @@ void dsp_shadow_verify_echo(const int16_t *l, const int16_t *r, const int8_t *co
 }
 
 static uint64_t s_frames;
+/* From sc-settings.ini (src/sc_launcher.c): 0 window, 1 borderless, 2 exclusive. */
+static int  s_fullscreen;
+static bool s_linear_filter;
+static bool s_enable_audio = true;
 static uint64_t s_nmi_requests;
 static uint64_t s_nmi_serviced;
 
@@ -5773,6 +5779,23 @@ static void file_sli_read(SaveLoadInfo *sli, void *data, size_t n) {
   if (fs->ok && fread(data, 1, n, fs->f) != n) fs->ok = false;
 }
 
+/* A versioned format, from the adaptive-renderer PR (blackerking/
+ * SimCitySNESRecomp#1). The device snapshot holds the PPU's registers and
+ * memories but not its CPU-port latches -- the VRAM pointer and VMAIN's
+ * increment-on-high bit among them -- so a state loaded where the game was
+ * mid-upload sent the following tile and palette uploads to the wrong place.
+ * That is the old "a state taken on a report screen breaks up after loading".
+ * The latches (vramPointer up to the widescreen fields), this host's master
+ * clock and its HDMA walker are written after the old contents, behind a
+ * header naming their sizes, so a state from a build whose layout differs is
+ * refused rather than misread.
+ *
+ * States without the header still load, with a warning: they are what every
+ * bug report so far was filed against. */
+enum { kScPpuBusBytes = offsetof(Ppu, extraLeftCur) - offsetof(Ppu, vramPointer) };
+static const uint32_t kScStateHeader[] = {0x54534353u /* "SCST" */, 1,
+                                          kScPpuBusBytes, sizeof(s_hdma)};
+
 static bool save_state(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) return false;
@@ -5780,9 +5803,13 @@ static bool save_state(const char *path) {
   fs.base.func = file_sli_write;
   fs.f = f;
   fs.ok = true;
+  fs.base.func(&fs.base, (void *)kScStateHeader, sizeof(kScStateHeader));
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
+  fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
+  fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
   bool ok = fs.ok;
   return fclose(f) == 0 && ok;
 }
@@ -5790,6 +5817,23 @@ static bool save_state(const char *path) {
 static bool load_state(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return false;
+  uint32_t header[4];
+  bool versioned = fread(header, 1, sizeof(header), f) == sizeof(header) &&
+                   header[0] == kScStateHeader[0];
+  if (versioned && memcmp(header, kScStateHeader, sizeof(header)) != 0) {
+    fprintf(stderr, "state: %s is from a build with another layout "
+                    "(version %u, %u latch bytes, %u HDMA bytes); save it again "
+                    "with this build\n", path, (unsigned)header[1],
+            (unsigned)header[2], (unsigned)header[3]);
+    fclose(f);
+    return false;
+  }
+  if (!versioned) {
+    fprintf(stderr, "state: %s is in the old format, without the PPU port "
+                    "latches; uploads right after loading can come out wrong. "
+                    "Save it again with this build.\n", path);
+    fseek(f, 0, SEEK_SET);
+  }
   FileSli fs;
   fs.base.func = file_sli_read;
   fs.f = f;
@@ -5797,6 +5841,12 @@ static bool load_state(const char *path) {
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
+  if (versioned) {
+    fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
+    fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
+    fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
+  }
+  g_ppu->lastBrightnessMult = 0xff;   /* rebuild the brightness tables */
   bool ok = fs.ok;
   fclose(f);
   /* Hand the restored registers to the fiber, HERE rather than at the call
@@ -7444,6 +7494,22 @@ static int run_qualification(uint64_t frames) {
     if (f > 1 && h != last_ram_hash) { logic_changes++; stall_run = 0; }
     else if (f > 1) { stall_run++; if (stall_run > stall_max) stall_max = stall_run; }
     last_ram_hash = h;
+    /* SC_STATE_TRACE=<file>: a line a frame -- WRAM hash, CPU registers and
+     * the master clock -- to compare a run with a save/restore of it.
+     * SC_SAVE_AT=<frame> with SC_SAVE_PATH=<file> saves a state after that
+     * frame. Both from the adaptive-renderer PR's save-state check. */
+    { static FILE *trace; static int trace_init;
+      if (!trace_init) { trace_init = 1;
+        const char *pth = getenv("SC_STATE_TRACE"); if (pth && *pth) trace = fopen(pth, "w"); }
+      if (trace) { fprintf(trace, "%llu %016llx %02x%04x %04x %04x %04x %04x %02x %llu\n",
+                           (unsigned long long)f, (unsigned long long)h, g_cpu->k, g_cpu->pc,
+                           g_cpu->a, g_cpu->x, g_cpu->y, g_cpu->sp, interp816_getFlags(g_cpu),
+                           (unsigned long long)g_master_cycles);
+                   fflush(trace); } }
+    { const char *at = getenv("SC_SAVE_AT"), *pth = getenv("SC_SAVE_PATH");
+      if (at && pth && f == strtoull(at, NULL, 0))
+        fprintf(stderr, "state: %s %s at frame %llu\n", save_state(pth) ? "saved" : "FAILED to save",
+                pth, (unsigned long long)f); }
     static int s_dbg_interval = -1;
     if (s_dbg_interval < 0) {
       const char *e = getenv("SC_DEBUG");
@@ -7995,11 +8061,18 @@ int main(int argc, char **argv) {
    * presses. */
   { const char *e = getenv("SC_DEBUG_CODE_AT");
     if (e && *e) queue_debug_menu_code(strtoull(e, NULL, 0)); }
+  bool rom_given = false, scale_given = false;
+  bool force_launcher = false, no_settings = false;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--qualify") && i + 1 < argc) {
       qualify_frames = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--launcher") || !strcmp(argv[i], "--mods")) {
+      force_launcher = true;
+    } else if (!strcmp(argv[i], "--no-settings")) {
+      no_settings = true;
     } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
       scale = atoi(argv[++i]);
+      scale_given = true;
     } else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
       if (!add_input_event(argv[++i])) {
         fprintf(stderr, "invalid --input event; expected start:duration:hexmask\n");
@@ -8014,7 +8087,36 @@ int main(int argc, char **argv) {
       load_state_path = argv[++i];
     } else if (argv[i][0] != '-') {
       rom_path = argv[i];
+      rom_given = true;
     }
+  }
+
+  /* Settings and the pre-boot launcher (src/sc_launcher.c).
+   *
+   * A player's run starts without a ROM argument and gets the launcher --
+   * unless they told it to skip itself; --launcher brings it back. Any run
+   * that is not --qualify then applies sc-settings.ini: window, audio, and the
+   * SC_WIDESCREEN / SC_NINTH / SC_TRANSLATION / SC_PACKET_PATCH variables,
+   * each only where it is not already set by hand. --qualify runs, and
+   * --no-settings, stay exactly as their environment says, so every tool and
+   * comparison in tools/ and docs/ keeps meaning what it meant. */
+  static ScSettings s_launch_settings;
+  ScSettingsLoad(&s_launch_settings, kScSettingsPath);
+  if (!qualify_frames && !no_settings) {
+    if (force_launcher || (!rom_given && !s_launch_settings.skip_launcher)) {
+      const int r = ScLauncherRun(&s_launch_settings, kScSettingsPath);
+      if (r == 0) return 0;
+      if (r > 0) { rom_path = s_launch_settings.rom; rom_given = true; }
+    }
+    if (!rom_given && !getenv("SC_LANG")) {
+      FILE *probe = fopen(s_launch_settings.rom, "rb");
+      if (probe) { fclose(probe); rom_path = s_launch_settings.rom; }
+    }
+    if (!scale_given) scale = s_launch_settings.window_scale;
+    s_fullscreen = s_launch_settings.fullscreen;
+    s_linear_filter = s_launch_settings.linear_filter != 0;
+    s_enable_audio = s_launch_settings.enable_audio != 0;
+    ScSettingsApply(&s_launch_settings);
   }
 
   uint32_t rom_size = 0;
@@ -8668,8 +8770,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
+#if SNESRECOMP_SDL3
+  const SDL_WindowFlags window_flags = s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0;
+#else
+  const Uint32 window_flags = s_fullscreen == 2 ? SDL_WINDOW_FULLSCREEN
+                            : s_fullscreen == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
+#endif
   SDL_Window *window = snesrecomp_sdl_create_window(
-      "SimCitySNESRecomp", s_video_w * scale, kVideoHeight * scale, 0);
+      "SimCitySNESRecomp", s_video_w * scale, kVideoHeight * scale, window_flags);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
@@ -8692,13 +8800,14 @@ int main(int argc, char **argv) {
    * to blending, so A=0 renders it fully transparent -- a black window, with a
    * frame loop, blit and present that all report success. Pin the mode. */
   SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
+  snesrecomp_sdl_set_texture_linear(texture, s_linear_filter);
 
   /* Queued (pushed) audio, not a pull callback: this host owns the DSP drain
    * loop and hands over finished samples. SDL3 removed SDL_QueueAudio and
    * folded the same behaviour into SDL_AudioStream, so the backend difference
    * lives in sc_sdl_compat.h rather than here. */
   ScAudio audio; SDL_memset(&audio, 0, sizeof(audio));
-  bool audio_dev = sc_audio_open(&audio, 32040, 2, 1024);
+  bool audio_dev = s_enable_audio && sc_audio_open(&audio, 32040, 2, 1024);
   if (audio_dev) {
     fprintf(stderr, "audio: opened freq=%d channels=%d samples=%d\n",
             audio.freq, audio.channels, audio.samples);
@@ -9051,6 +9160,19 @@ int main(int argc, char **argv) {
       if (fdx || fdy) apply_mouse_delta(fdx, fdy);
     }
     uint16_t input = 0;
+    /* The pad through the launcher's keybinds.ini when this build has the
+     * launcher (src/sc_launcher.c); its first run writes the layout below, so
+     * nothing moves for a player who never opens the Controller page. */
+    static int s_keybinds = -1;
+    if (s_keybinds < 0) s_keybinds = ScKeybindsInit() ? 1 : 0;
+    if (s_keybinds) {
+      input = (uint16_t)ScKeybindsRead((const unsigned char *)keys);
+      /* U/H/J/K stay a spare D-pad for testing, unless a binding took them. */
+      if (keys[SDL_SCANCODE_U] && !ScKeybindsUses(SDL_SCANCODE_U)) input |= kPad_Up;
+      if (keys[SDL_SCANCODE_J] && !ScKeybindsUses(SDL_SCANCODE_J)) input |= kPad_Down;
+      if (keys[SDL_SCANCODE_H] && !ScKeybindsUses(SDL_SCANCODE_H)) input |= kPad_Left;
+      if (keys[SDL_SCANCODE_K] && !ScKeybindsUses(SDL_SCANCODE_K)) input |= kPad_Right;
+    } else {
     /* Diamond cluster U/H/J/K as an alternate D-pad, alongside arrow keys,
      * for testing (U=up, H=left, J=down, K=right). */
     if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_U]) input |= kPad_Up;
@@ -9092,6 +9214,7 @@ int main(int argc, char **argv) {
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
     if (keys[sc_select]) input |= kPad_Select;
+    }   /* fixed bindings */
     /* Mouse buttons: LEFT = SNES B, RIGHT = SNES A.
      *
      * Lets host-mouse cursor control (F3) actually select and interact, not

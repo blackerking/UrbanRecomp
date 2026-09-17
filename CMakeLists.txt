@@ -12,6 +12,21 @@ set(SNESRECOMP_ROOT "${CMAKE_SOURCE_DIR}/snesrecomp" CACHE PATH
 
 include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 
+# The pre-boot launcher (settings, key bindings, the Sylt mod) comes from the
+# shared recomp-ui submodule. Without the checkout the game builds and starts
+# directly, with the settings in sc-settings.ini.
+set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH
+    "Shared launcher (recomp-ui) checkout")
+if(EXISTS "${RECOMP_UI_ROOT}/recomp_ui.cmake")
+    set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL "SimCity launcher mods (Sylt)" FORCE)
+    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+    set(SIMCITY_HAVE_LAUNCHER ON)
+else()
+    message(STATUS "SimCitySNESRecomp: no recomp-ui checkout, building without "
+                   "the launcher (git submodule update --init recomp-ui)")
+    set(SIMCITY_HAVE_LAUNCHER OFF)
+endif()
+
 # Phase-1 bring-up (see README.md and src/main.c): SimCity runs entirely on
 # the shared LLE interpreter tier (standalone interp816 over the device
 # models), NOT the AOT/CpuState hybrid runtime. `bash tools/regen.sh` already
@@ -34,6 +49,7 @@ endif()
 
 add_executable(SimCitySNESRecomp
     src/main.c
+    src/sc_launcher.c
     src/simcity_mapview.c
     src/simcity_mapgen.c
         src/simcity_decomp.c
@@ -114,6 +130,9 @@ endif()
 # dump (SC_DUMP_AT / write_ppm) is unaffected and is the reliable check --
 # it is byte-identical between the two backends.
 snesrecomp_target_sdl(SimCitySNESRecomp)
+if(SIMCITY_HAVE_LAUNCHER)
+    recomp_target_launcher_ui(SimCitySNESRecomp CONSOLE snes)
+endif()
 
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
 #
@@ -250,6 +269,7 @@ endif()
 if(SIMCITY_GEN_SOURCES)
     add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
         src/main.c
+        src/sc_launcher.c
         src/simcity_mapview.c
         ${SIMCITY_GEN_SOURCES}
         src/simcity_hle.c

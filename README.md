@@ -239,7 +239,37 @@ map, which instead rendered completely flat. See
 cause and fix (implemented game-side in `src/main.c`, no changes to the
 shared `snesrecomp` runtime needed).
 
+## Launcher and settings
+
+Started without a ROM argument, the game opens the shared
+[recomp-ui](https://github.com/RetroPortingToolKit/recomp-ui) launcher first
+(the `recomp-ui` submodule): ROM choice, window size, fullscreen, filtering,
+audio, **Widescreen** (Display), **Language** -- English, Deutsch, Francais
+(Localization), the **Sylt** scenario (Mods), and the keyboard bindings
+(Controller). The choices are saved to `sc-settings.ini`, the bindings to
+`keybinds.ini`, both next to where the game runs.
+
+- `--launcher` shows the launcher even with a ROM argument, or after "skip
+  the launcher" was ticked.
+- Every run that is not `--qualify` applies `sc-settings.ini`: widescreen,
+  language and Sylt become `SC_WIDESCREEN`, `SC_TRANSLATION` /
+  `SC_PACKET_PATCH` and `SC_NINTH`, each only where the variable is not
+  already set by hand. `--no-settings` ignores the file; `--qualify` runs
+  always do, so tools and comparisons keep their meaning.
+- A language needs `translation_<de|fr>.bin` and
+  `translation_<de|fr>_selector.scpk` (from `tools/text_tool.py`) next to the
+  game; without them it starts in English.
+- The launcher draws with OpenGL 3.3. Where there is none -- a Hyper-V VM
+  without a GPU reports only "GDI Generic" OpenGL 1.1 -- the game skips it and
+  starts with the saved settings. (recomp-ui itself does not check and
+  crashed there; `src/sc_launcher.c` asks the context for its version first.)
+
 ## Controls (windowed mode)
+
+The keys below are the defaults `keybinds.ini` gets on the first run; the
+launcher's Controller page changes them. `keybinds.ini` stores key POSITIONS
+(SDL scancode names), so on a German keyboard SNES Y reads `Z` there -- the
+key labelled Y.
 
 | SNES button | Key(s) |
 |---|---|
@@ -819,7 +849,8 @@ bash tools/bootstrap.sh
 bash tools/regen.sh --no-tests
 cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --target SimCitySNESRecomp
-./build/SimCitySNESRecomp.exe simcity.sfc                 # windowed
+./build/SimCitySNESRecomp.exe                             # launcher, then the game
+./build/SimCitySNESRecomp.exe simcity.sfc                 # windowed, saved settings
 ./build/SimCitySNESRecomp.exe simcity.sfc --qualify 3600  # headless qualification
 ```
 
