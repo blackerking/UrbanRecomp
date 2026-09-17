@@ -27,14 +27,14 @@ else()
     set(SC_HAVE_LAUNCHER OFF)
 endif()
 
-# Phase-1 bring-up (see README.md and src/main.c): the game runs entirely on
+# Phase-1 bring-up (see docs/AOT_LLE.md and src/main.c): the game runs entirely on
 # the shared LLE interpreter tier (standalone interp816 over the device
 # models), NOT the AOT/CpuState hybrid runtime. `bash tools/regen.sh` already
 # produces real AOT-eligible banks under src/gen/ -- proving the recompiler
 # pipeline works end to end against the ROM -- but that generated C targets
 # the CpuState ABI (cpu_state.c/common_cpu_infra.c/interp_bridge.c), which
 # this executable does not link yet. Wiring that hybrid tier in is the
-# documented next phase (see README.md); until then src/gen/*.c is
+# documented next phase (see docs/AOT_LLE.md); until then src/gen/*.c is
 # intentionally left out of this target so the build doesn't silently
 # mismatch ABIs.
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/gen)
@@ -43,7 +43,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/gen)
         message(STATUS
             "UrbanRecomp: src/gen has ${SC_GEN_PROBE} generated "
             "AOT bank(s) from tools/regen.sh, not yet linked -- Phase 1 is "
-            "interpreter-only. See CMakeLists.txt / README.md.")
+            "interpreter-only. See CMakeLists.txt / docs/AOT_LLE.md.")
     endif()
 endif()
 
@@ -275,7 +275,7 @@ endif()
 #
 #   cmake --build build --target UrbanRecompAOT
 # NOTE: this now builds the same content as the default target, which links the
-# AOT tier itself. Kept because README.md, docs/ and tools/gen_align_check.py
+# AOT tier itself. Kept because docs/AOT_LLE.md and tools/gen_align_check.py
 # name it, and because having a target that is unambiguously the AOT build is
 # useful when the default one is configured without src/gen.
 if(SC_GEN_SOURCES)

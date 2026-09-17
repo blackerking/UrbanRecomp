@@ -6044,11 +6044,10 @@ static bool add_input2_event(const char *text) {
 /* One-button macro for the documented debug-menu entry code (Peter's
  * SNES guide for the game, crediting Corey Miller/"ZaphodBee"): a fixed
  * 16-step sequence read on controller 2 while on the "Goodbye! See you
- * soon" quit-confirmation screen. Static ROM analysis found no code
- * anywhere in this ROM dump reading a second controller (no $421A/$421B
- * or manual $4016/$4017 access), so this is unverified for this specific
- * ROM revision -- this macro exists to test it live/headlessly rather
- * than requiring 16 hand-timed presses. Each step is held for
+ * soon" quit-confirmation screen. It opens the debug menu -- confirmed in
+ * play (2026-09-17), although static analysis had found no code reading a
+ * second controller (no $421A/$421B or manual $4016/$4017 access). The
+ * macro saves 16 hand-timed presses. Each step is held for
  * kP2StepHold frames with a kP2StepGap release between steps so the
  * game's edge-detection (if any) sees 16 distinct presses, not one held
  * button. */
