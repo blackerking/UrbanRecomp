@@ -906,7 +906,14 @@ static void handle_pos_stuff(void) {
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
         if (swap) memcpy(&g_ppu->vram[s_wood_pass_src], held, sizeof held);
       }
-      if (getenv("SC_WS_DIAG") && snes->vPos == 100) { static int n;
+      /* Both diagnostics below are read once: this runs every scanline, and
+       * getenv() is a locked scan of the whole environment on Windows. */
+      static int ws_diag = -1, pass_diag;
+      if (ws_diag < 0) {
+        ws_diag = getenv("SC_WS_DIAG") != NULL;
+        pass_diag = getenv("SC_PASS_DIAG") != NULL;
+      }
+      if (ws_diag && snes->vPos == 100) { static int n;
         if (n < 3) { n++;
           fprintf(stderr, "[wsdiag] clamp=%02x widenMask=%02x extraL=%u extraR=%u budget=%u\n",
                   g_ppu->wsLayerClamp, g_ppu->wsLayerWidenMask,
@@ -961,7 +968,7 @@ static void handle_pos_stuff(void) {
        * nothing changed between them, and see whether the pixels match. The
        * seam repair's re-render approach assumes they do; its measured result
        * (cloning got WORSE, not better) says they may not. */
-      if (getenv("SC_PASS_DIAG") && s_ws_scratch) {
+      if (pass_diag && s_ws_scratch) {
         /* Compare an EXTRA pass against the MAIN one -- the comparison that
          * matters. Diffing two extra passes against each other, as this first
          * did, cannot catch a difference between the first render of a line and
@@ -3255,6 +3262,13 @@ static bool run_one_frame(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
+  /* Read once: the loop below runs once per guest opcode, tens of thousands
+   * of times a frame, and getenv() is a locked linear scan on Windows. */
+  static int scen_diag = -1, brief_diag;
+  if (scen_diag < 0) {
+    scen_diag = getenv("SC_SCEN_DIAG") != NULL;
+    brief_diag = getenv("SC_BRIEF_DIAG") != NULL;
+  }
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
@@ -3397,7 +3411,7 @@ static bool run_one_frame(void) {
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
-    if (getenv("SC_SCEN_DIAG") && cpu->k == 0x03 &&
+    if (scen_diag && cpu->k == 0x03 &&
         (cpu->pc == 0xc518 || cpu->pc == 0xc5a2 || cpu->pc == 0xe30a ||
          cpu->pc == 0xcf31 || cpu->pc == 0xce2e || cpu->pc == 0xce5e ||
          cpu->pc == 0xc548)) {
@@ -3465,7 +3479,7 @@ static bool run_one_frame(void) {
      * overwrite the ninth scenario's own words. */
     if ((s_brief_count || s_scen_tiles_len || s_glyph_count || s_bp_count ||
          s_sg_count ||
-         getenv("SC_BRIEF_DIAG")) &&
+         brief_diag) &&
         cpu->k == 0x00) {
       if (cpu->pc == 0x90eb) {
         s_brief_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
@@ -3478,7 +3492,7 @@ static bool run_one_frame(void) {
          * layouts is defeated by translations being longer. Watching which
          * source the game asks for on which screen is the way to pair
          * them, and it needs no reading of the text at all. */
-        if (getenv("SC_BRIEF_DIAG")) {
+        if (brief_diag) {
           /* Keyed on source AND screen: one source serving two screens is
            * exactly the case that would make a briefing substitution appear
            * on a page it does not belong to. Sylt already shares 0B:FBE7
@@ -8794,6 +8808,8 @@ int main(int argc, char **argv) {
   /* vsync off deliberately -- see the comment above; pacing is manual. */
   SDL_Renderer *renderer = snesrecomp_sdl_create_renderer(window, false, false);
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
+  { const char *rn = snesrecomp_sdl_renderer_name(renderer);
+    fprintf(stderr, "renderer: %s\n", rn ? rn : "?"); }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
       s_video_w, kVideoHeight);
@@ -8829,6 +8845,18 @@ int main(int argc, char **argv) {
    * on a slow host (e.g. a VM) tell at a glance whether the emulator itself
    * is keeping up with real time, independent of anything ROM-side. */
   uint64_t fps_window_start = SDL_GetPerformanceCounter();
+  /* SC_PERF=1: once a second, where the wall clock of a host frame went --
+   * guest emulation, texture upload and draw, the pacing sleep, and the
+   * present. Average and worst frame, in ms. */
+  const bool perf_on = getenv("SC_PERF") != NULL;
+  enum { kPerfInput, kPerfEmu, kPerfAudio, kPerfDraw, kPerfSleep, kPerfPresent,
+         kPerfCount };
+  double perf_sum[kPerfCount] = {0}, perf_max[kPerfCount] = {0};
+  int perf_frames = 0;
+  const double perf_ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
+#define SC_PERF_ADD(slot, t0, t1) do { if (perf_on) { \
+    const double _ms = (double)((t1) - (t0)) * perf_ms; \
+    perf_sum[slot] += _ms; if (_ms > perf_max[slot]) perf_max[slot] = _ms; } } while (0)
   uint64_t fps_window_frames = 0;
   /* Manual frame pacer, replacing vsync (see the renderer-creation comment
    * above): target the SNES's real ~60.0988fps, sleeping off any leftover
@@ -8837,8 +8865,19 @@ int main(int argc, char **argv) {
   const double kTargetFrameSeconds = 1.0 / 60.0988;
   uint64_t next_frame_deadline = SDL_GetPerformanceCounter();
   while (!quit) {
+    const uint64_t loop_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
     SDL_Event ev;
-    while (SDL_PollEvent(&ev)) {
+    for (;;) {
+      /* SC_PERF also names a poll that stalls, and the event it returned. */
+      const uint64_t poll_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+      const bool got = SDL_PollEvent(&ev) != 0;
+      if (perf_on) {
+        const double ms = (double)(SDL_GetPerformanceCounter() - poll_t0) * perf_ms;
+        if (ms > 20.0)
+          fprintf(stderr, "[perf] SDL_PollEvent took %.1f ms (event 0x%x) at frame %llu\n",
+                  ms, got ? (unsigned)ev.type : 0u, (unsigned long long)s_frames);
+      }
+      if (!got) break;
       if (ev.type == SDL_QUIT) quit = true;
       if (ev.type == SDL_KEYDOWN && SNESRECOMP_SDL_EVENT_KEY(ev) == SDLK_ESCAPE) quit = true;
       if (ev.type == SDL_KEYDOWN && SC_EVENT_SCANCODE(ev) == SDL_SCANCODE_F1) {
@@ -9317,7 +9356,8 @@ int main(int argc, char **argv) {
      * longer than ~16.67ms on some screen, the game visibly runs below
      * 60fps on that screen specifically, with no other symptom. */
     const char *frame_time_thresh_env = getenv("SC_FRAME_TIME");
-    uint64_t frame_t0 = frame_time_thresh_env ? SDL_GetPerformanceCounter() : 0;
+    uint64_t frame_t0 = (frame_time_thresh_env || perf_on) ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfInput, loop_t0, frame_t0);
 
     /* While the settings menu is open, freeze the game -- skip advancing
      * the emulator entirely and just keep re-presenting the last rendered
@@ -9346,6 +9386,8 @@ int main(int argc, char **argv) {
       }
     }
     if (guard_tripped) break;
+    const uint64_t emu_t1 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfEmu, frame_t0, emu_t1);
 
     /* REVERTED (see docs/ROM_MAP.md or git history for the attempt):
      * fast-forward's audio comment above ("only the last of the batch's
@@ -9457,6 +9499,8 @@ int main(int argc, char **argv) {
       }
     }
 
+    const uint64_t draw_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfAudio, emu_t1, draw_t0);
     void *pixels = NULL; int pitch = 0;
     bool _lok = SDL_LockTexture(texture, NULL, &pixels, &pitch) SC_SDL_OK;
     /* Row-wise, NOT one memcpy of the whole array. s_video_pixels is sized for
@@ -9509,6 +9553,7 @@ int main(int argc, char **argv) {
 
     next_frame_deadline += (uint64_t)(kTargetFrameSeconds * (double)SDL_GetPerformanceFrequency());
     uint64_t now = SDL_GetPerformanceCounter();
+    SC_PERF_ADD(kPerfDraw, draw_t0, now);
     if (now < next_frame_deadline) {
       double remaining_ms = (double)(next_frame_deadline - now) * 1000.0 /
                              (double)SDL_GetPerformanceFrequency();
@@ -9521,6 +9566,8 @@ int main(int argc, char **argv) {
        * drift after a one-off slow frame. */
       next_frame_deadline = now;
     }
+    const uint64_t present_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfSleep, now, present_t0);
     /* SC_DUMP_DIR + SC_DUMP_INTERVAL, for the INTERACTIVE loop.
      *
      * The same pair has worked in run_qualification() for a long time, and I
@@ -9561,6 +9608,10 @@ int main(int argc, char **argv) {
                 (int)(SDL_GetRenderer(window) == renderer), SDL_GetError());
       } }
 
+    if (perf_on) {
+      SC_PERF_ADD(kPerfPresent, present_t0, SDL_GetPerformanceCounter());
+      perf_frames++;
+    }
     fps_window_frames++;
     double fps_window_elapsed = (double)(SDL_GetPerformanceCounter() - fps_window_start) /
                                  (double)SDL_GetPerformanceFrequency();
@@ -9569,6 +9620,17 @@ int main(int argc, char **argv) {
       snprintf(title, sizeof(title), "Urban Recomp -- %.1f fps",
                (double)fps_window_frames / fps_window_elapsed);
       SDL_SetWindowTitle(window, title);
+      if (perf_on && perf_frames) {
+        static const char *const kPerfName[kPerfCount] = {
+            "input", "emu", "audio", "draw", "sleep", "present"};
+        fprintf(stderr, "[perf] %.1f fps", (double)fps_window_frames / fps_window_elapsed);
+        for (int k = 0; k < kPerfCount; k++) {
+          fprintf(stderr, "  %s %.2f/%.2f", kPerfName[k], perf_sum[k] / perf_frames, perf_max[k]);
+          perf_sum[k] = perf_max[k] = 0;
+        }
+        fputc('\n', stderr);
+        perf_frames = 0;
+      }
       fps_window_frames = 0;
       fps_window_start = SDL_GetPerformanceCounter();
     }
