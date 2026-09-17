@@ -5,6 +5,62 @@ downstream fork, i.e. with `b8ef573 runtime: execute HDMA on LLE beam timeline`.
 
 **Game:** the city builder this host targets (US), scenario view screen (the isometric city on a desk).
 
+## Resolved (2026-09-17): the host lost the beam, not the HDMA engine
+
+Root cause found with a save state in the current format. In the jittering
+frame every HDMA write of all three channels -- including channel 5, whose
+table is in ROM and cannot change -- lands exactly **one line late** (L44
+instead of L43, L8 instead of L7), and the next frame is back on time. So a
+line's HDMA step was skipped, and everything after it slid down a line.
+
+It was skipped because snes.c moves the beam past the host's own driver
+(`handle_pos_stuff()` in `src/main.c`), in two places:
+
+1. **`$4212` reads.** Each read adds a synthetic 64-clock step unless
+   `g_interp_apu_driving` is set. This host advances the beam from every
+   opcode already, but left the flag at 0. A step that jumps over h=1024
+   loses that line's HDMA transfer.
+2. **DMA starts (`$420B`).** The transfer's guest time is charged through
+   `snes_set_master_clock_charge_hook()`, and without a hook snes.c moves
+   hPos/vPos itself. The host never draws the lines crossed, never runs
+   their HDMA step, never counts a crossing of the frame end, and never gives
+   the APU that time.
+
+Fix: `sc_own_the_beam()` installs a charge hook that walks the time through
+`handle_pos_stuff()` (and the APU), and sets `g_interp_apu_driving`.
+`SC_BEAM_LEGACY=1` restores the old behaviour for A/B runs.
+
+Measured on the report's screen, 900 frames: 58 one-frame outliers before, 0
+after. The second path also explains crackling audio: in a city
+(`savestate_2`) the APU got about 94% of its time, 503.5 samples per frame
+against the 533.1 the output drains, so the queue kept running dry. After the
+fix: 533.7. The attract demo still passes, and so do all ten local states;
+its frames shift slightly in time because DMA time now counts.
+
+### Follow-up: sound behind the picture
+
+Once the DMA time reached the APU, the sound drifted behind the picture. Two
+causes, both fixed in `src/main.c`:
+
+- `kApuCyclesPerMaster` used LakeSnes's `/ (1364*262*60)`: 60 fps instead of
+  60.0988, which is 534 samples a frame against the 533.12 the output
+  plays. The surplus had been hidden by the missing DMA time. The constant is
+  now `32040*32 / 21477272` (533.125 a frame), and the drain takes exactly
+  that (`kDspSamplesPerFrame`).
+- The audio device keeps its own clock. Over RDP ("Remote Audio") it measured
+  0.76% to 1.4% slow, varying between sessions, so the device queue grew
+  without bound. `sc_audio_rate_control()` now resamples each frame by a
+  small ratio steered by the queue level (proportional plus a learned drift,
+  tuned in a simulation). Measured over 75 s: queue 2400-4400 samples, learned
+  drift -1.2%, no drops, the DSP backlog at 0-1 sample. Past fast-forward the
+  DSP backlog is trimmed to one frame.
+
+`SC_AUDIO_DEBUG=1` prints the queue, the DSP backlog and the learned drift
+every 180 frames.
+
+Upstream angle, if it is worth raising: a host that drives the beam itself has
+to know about both paths, and nothing in `snes.h` says so.
+
 ## Symptom
 
 Reported from play as the map "jittering a little bit every couple of frames".

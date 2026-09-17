@@ -594,8 +594,18 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
   snes_write(g_snes, adr, v);
 }
 
-/* SPC cycles per master clock (LakeSnes: (32040*32)/(1364*262*60)). */
-static const double kApuCyclesPerMaster = (32040.0 * 32.0) / (1364.0 * 262.0 * 60.0);
+/* SPC cycles per master clock: 32 per DSP sample at 32040 Hz, over the NTSC
+ * master clock of 21477272 Hz -- 533.12 samples per frame at 60.0988 fps.
+ *
+ * LakeSnes writes it as (32040*32)/(1364*262*60), with 60 fps, which is 534
+ * samples a frame. While a DMA transfer's time never reached the APU nobody
+ * noticed; once it did (sc_own_the_beam), the DSP made 534 a frame against
+ * the 533.12 the output plays, and the backlog grew by 53 samples a second
+ * until the ring was full: sound a quarter of a second behind the picture. */
+static const double kApuCyclesPerMaster = (32040.0 * 32.0) / 21477272.0;
+/* What that makes per frame (1364 x 262 master clocks): 533.125. The audio
+ * drain takes exactly this many, so the DSP ring neither fills nor starves. */
+static const double kDspSamplesPerFrame = 1364.0 * 262.0 * 32040.0 / 21477272.0;
 
 /* SC_WIDESCREEN=<pixels per side>: widen the rendered picture.
  *
@@ -2142,6 +2152,11 @@ static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
  * because that path is this project's correctness baseline and every
  * `--qualify` number rests on it. */
 static bool s_fiber_mode;
+#endif
+/* SC_BEAM_LEGACY=1: leave the beam to snes.c's own DMA and $4212 steps, as
+ * before sc_own_the_beam() -- for A/B comparisons only. */
+static bool s_own_beam = true;
+#ifdef SC_AOT_TIER
 /* What was asked for, and whether a human asked. The difference matters
  * only on a non-US ROM: an explicit SC_FIBER=1 there is an error worth
  * stopping for, while the mere default quietly steps down to the
@@ -3247,6 +3262,105 @@ static void sc_classifier_hook(Interp816 *cpu) {
     else s_cls_hits++;
   }
   s_cls_pending = 0;
+}
+
+/* Dynamic rate control for the audio output.
+ *
+ * The DSP makes 32040 samples per second of guest time, and the host paces
+ * guest time to the wall clock -- but the audio device plays by its own
+ * clock. Over RDP ("Remote Audio") that clock measured 0.76% slow: the queue
+ * grew by about 240 samples a second and the sound fell further and further
+ * behind the picture. A fixed cap would cut a gap into the sound every couple
+ * of seconds. Instead each frame's samples are resampled, steered by how full
+ * the device queue is: too full, the frame is played in slightly fewer
+ * samples; too empty, in slightly more. The integral term learns the device's
+ * drift so the queue settles on the target; the proportional term reacts to
+ * stalls. The drift is clamped to 5%, as RetroArch's timing skew is: a real
+ * sound card is off by well under 0.1%, but the RDP device here measured 1-3%
+ * slow and varied between sessions -- which does shift the pitch audibly, but
+ * is still better than sound that drifts away or drops out. */
+enum { kAudioQueueTarget = 2048, kAudioOutMax = 2048 };
+static double s_audio_drift;       /* learned device drift, for SC_AUDIO_DEBUG */
+
+static int sc_audio_rate_control(const int16_t *in, int n, uint32_t queued,
+                                 int16_t *out) {
+  static double frac, level = -1.0;
+  static int16_t prev[2];
+  if (n <= 0) return 0;
+  /* The queue level is read after each push and jumps by whole device
+   * buffers as the device pulls; steer on its smoothed value. */
+  level = level < 0 ? (double)queued : level + 0.05 * ((double)queued - level);
+  double err = ((double)kAudioQueueTarget - level) / kAudioQueueTarget;
+  if (err > 1.0) err = 1.0;
+  if (err < -1.0) err = -1.0;
+  s_audio_drift += 1e-5 * err;
+  if (s_audio_drift > 0.05) s_audio_drift = 0.05;
+  if (s_audio_drift < -0.05) s_audio_drift = -0.05;
+  const double ratio = 1.0 + s_audio_drift + 0.02 * err;
+  frac += n * ratio;
+  int m = (int)frac;
+  frac -= m;
+  if (m > kAudioOutMax) m = kAudioOutMax;
+  if (m <= 0) return 0;
+  /* Output i sits at source position (i+1)*n/m - 1, so the last output lands
+   * on the last input and the next frame continues from it (prev). */
+  for (int i = 0; i < m; i++) {
+    const double pos = (double)(i + 1) * n / m - 1.0;
+    const int k = (int)(pos + 1.0) - 1;          /* floor, pos >= -1 */
+    const double f = pos - k;
+    for (int c = 0; c < 2; c++) {
+      const double a = k < 0 ? prev[c] : in[k * 2 + c];
+      const double b = k + 1 < n ? in[(k + 1) * 2 + c] : in[(n - 1) * 2 + c];
+      const double v = a + (b - a) * f;
+      out[i * 2 + c] = (int16_t)(v >= 0 ? v + 0.5 : v - 0.5);
+    }
+  }
+  prev[0] = in[(n - 1) * 2];
+  prev[1] = in[(n - 1) * 2 + 1];
+  return m;
+}
+
+/* The beam belongs to handle_pos_stuff(), and snes.c has two ways round it.
+ *
+ * A DMA start ($420B) charges the transfer's guest time through a hook, and
+ * with no hook installed snes.c moves hPos/vPos itself. The lines it crosses
+ * are then never drawn by this host, their HDMA step never runs, a crossing of
+ * the frame end is never counted, and the APU never gets the time. So the
+ * time is walked through the host's own driver instead, like any opcode's.
+ *
+ * And every $4212 read adds a synthetic 64-clock step unless
+ * g_interp_apu_driving says the caller already advances the beam per opcode,
+ * which this loop does. That step can jump over h=1024: the line loses its
+ * HDMA transfer and every later line of the frame is one line late. On the
+ * scenario view that is the one-frame "jitter" -- every 4th scanline of the
+ * skewed map off by a line -- once every few seconds
+ * (docs/upstream/ISSUE_hdma_line_phase.md).
+ *
+ * The fiber tier keeps snes.c's own behaviour: its bridge sets and restores
+ * the flag itself and syncs the beam from the CpuState clock. */
+static void sc_charge_master_cycles(Snes *snes, uint64_t clocks) {
+#ifdef SC_AOT_TIER
+  if (s_fiber_mode) {
+    while (clocks) {
+      const uint32_t chunk = clocks > 0xffffffffull ? 0xffffffffu : (uint32_t)clocks;
+      snes_advance_master_cycles(snes, chunk);
+      clocks -= chunk;
+    }
+    return;
+  }
+#endif
+  g_master_cycles += clocks;
+  for (uint64_t i = 0; i < clocks; i += 2) handle_pos_stuff();
+  snes->apuCatchupCycles += (double)clocks * kApuCyclesPerMaster;
+}
+
+static void sc_own_the_beam(void) {
+  extern int g_interp_apu_driving;   /* common_rtl.c, or this file */
+  snes_set_master_clock_charge_hook(sc_charge_master_cycles);
+#ifdef SC_AOT_TIER
+  if (s_fiber_mode) return;
+#endif
+  g_interp_apu_driving = 1;
 }
 
 static bool run_one_frame(void) {
@@ -7629,14 +7743,10 @@ static int run_qualification(uint64_t frames) {
       if (dsp->sampleBuffer[idx * 2] || dsp->sampleBuffer[idx * 2 + 1]) { active = true; break; }
     }
     if (active) audio_active_frames++;
-    /* dsp_getSamples() (runner/src/snes/dsp.c) always consumes a fixed 534
-     * native samples per call and resamples them to the `samplesPerFrame`
-     * argument -- it does NOT consume `samplesPerFrame` samples. Gating the
-     * call on "available >= (a ~533 target output count)" therefore lets it
-     * fire when fewer than 534 raw samples truly exist, pushing sampleRead
-     * past sampleWrite; the unsigned wraparound then reads as "ring
-     * completely full" to the DSP's own backpressure check in dsp_cycle and
-     * freezes sample production forever. Gate on the real fixed quantum. */
+    /* The headless drain takes 534 a frame whenever that many exist, a hair
+     * more than the 533.125 the DSP makes, so the ring never fills here.
+     * dsp_getSamples() takes exactly what it is asked for and never more
+     * than exists (runner/src/snes/dsp.c). */
     /* SC_APU_DIAG=1: per-frame audio ledger -- what the DSP produced, what
      * was queued, and what the drain took. Cheap and env-gated. */
     { static int diag = -1;
@@ -8627,6 +8737,9 @@ int main(int argc, char **argv) {
   }
 
   g_snes = snes_init(g_ram);
+  { const char *e = getenv("SC_BEAM_LEGACY");
+    if (e && *e && *e != '0') s_own_beam = false; }
+  if (s_own_beam) sc_own_the_beam();
   sc_wram_watch_install();
   sc_dma_vram_install();
   sc_vram_write_watch_install();
@@ -8829,7 +8942,8 @@ int main(int argc, char **argv) {
   ScAudio audio; SDL_memset(&audio, 0, sizeof(audio));
   bool audio_dev = s_enable_audio && sc_audio_open(&audio, 32040, 2, 1024);
   if (audio_dev) {
-    fprintf(stderr, "audio: opened freq=%d channels=%d samples=%d\n",
+    fprintf(stderr, "audio: opened driver=%s freq=%d channels=%d samples=%d\n",
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
             audio.freq, audio.channels, audio.samples);
   } else {
     /* Previously silent on failure -- every audio code path below is
@@ -8873,9 +8987,14 @@ int main(int argc, char **argv) {
       const bool got = SDL_PollEvent(&ev) != 0;
       if (perf_on) {
         const double ms = (double)(SDL_GetPerformanceCounter() - poll_t0) * perf_ms;
-        if (ms > 20.0)
-          fprintf(stderr, "[perf] SDL_PollEvent took %.1f ms (event 0x%x) at frame %llu\n",
-                  ms, got ? (unsigned)ev.type : 0u, (unsigned long long)s_frames);
+        if (ms > 20.0) {
+          unsigned sub = 0;
+#if !SNESRECOMP_SDL3
+          if (got && ev.type == SDL_WINDOWEVENT) sub = ev.window.event;
+#endif
+          fprintf(stderr, "[perf] SDL_PollEvent took %.1f ms (event 0x%x/%u) at frame %llu\n",
+                  ms, got ? (unsigned)ev.type : 0u, sub, (unsigned long long)s_frames);
+        }
       }
       if (!got) break;
       if (ev.type == SDL_QUIT) quit = true;
@@ -9451,7 +9570,7 @@ int main(int argc, char **argv) {
        * actually running: while the settings menu is open no frames are
        * simulated, so no samples are produced and there is nothing to pace
        * against. (This is the immediate half of the fix below.) */
-      if (!s_menu_open) audio_acc += (double)audio.freq / 60.0988;
+      if (!s_menu_open) audio_acc += kDspSamplesPerFrame;
       /* Hard-clamp the accumulator to exactly the drain condition's upper
        * bound, which is also audio_buf's capacity. Without this, ANY stall
        * of two or more host iterations where the ring hasn't refilled --
@@ -9470,19 +9589,31 @@ int main(int argc, char **argv) {
       int wantN = (int)audio_acc;
       Dsp *dsp = g_snes->apu->dsp;
       uint32_t available = dsp->sampleWrite - dsp->sampleRead;
-      /* dsp_getSamples() always consumes a fixed 534 native samples per
-       * call and resamples them to `wantN` -- gate on that real fixed
-       * quantum, not on `wantN`, or the DSP's own ring-full backpressure
-       * permanently freezes production (see run_qualification()). */
+      /* dsp_getSamples() takes exactly as many native samples as it is
+       * asked for, and never more than exist (runner/src/snes/dsp.c). */
       static uint64_t s_audio_dbg_queued, s_audio_dbg_calls, s_audio_dbg_fails;
-      if (available >= 534 && wantN > 0 && wantN <= 1024) {
+      if (available >= (uint32_t)wantN && wantN > 0 && wantN <= 1024) {
         audio_acc -= (double)wantN;
-        dsp_getSamples(dsp, audio_buf, wantN);
-        int qrc = sc_audio_queue(&audio, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
+        const uint32_t got = dsp_getSamples(dsp, audio_buf, wantN);
+        const Uint32 queued_samples = sc_audio_queued(&audio) / (2 * sizeof(int16_t));
+        static int16_t rs_buf[kAudioOutMax * 2];
+        const int out_n = sc_audio_rate_control(audio_buf, (int)got, queued_samples, rs_buf);
+        /* Hard cap for a stall the rate control cannot absorb: past a quarter
+         * of a second queued, the frame is dropped rather than played late. */
+        int qrc = 0;
+        if (queued_samples < 8192u && out_n > 0)
+          qrc = sc_audio_queue(&audio, rs_buf, (Uint32)(out_n * 2 * sizeof(int16_t)));
         s_audio_dbg_calls++;
         if (qrc != 0) s_audio_dbg_fails++;
-        else s_audio_dbg_queued += (uint64_t)wantN;
+        else s_audio_dbg_queued += (uint64_t)out_n;
       }
+      /* And on the DSP side: fast-forward (Tab) and drag turbo run several
+       * guest frames per host frame, but only one frame's worth is played.
+       * Whatever is left beyond about three frames is dropped, so the sound
+       * catches up with the picture instead of trailing it by up to the
+       * ring's quarter second. */
+      if (dsp->sampleWrite - dsp->sampleRead > 1600u)
+        dsp_trimSamples(dsp, 534u);
       /* SC_AUDIO_DEBUG: periodic drain-loop status, for diagnosing
        * windowed-only audio issues -- headless qualify mode shows healthy
        * DSP production (92% active frames) as a baseline, so if this
@@ -9492,8 +9623,11 @@ int main(int argc, char **argv) {
        * turned out to be self-inflicted (see the revert above) -- kept
        * for next time. */
       if (getenv("SC_AUDIO_DEBUG") && (s_frames % 180) == 0) {
-        fprintf(stderr, "audio: f=%llu queued_dev=%u drained_total=%llu calls=%llu fails=%llu\n",
-                (unsigned long long)s_frames, sc_audio_queued(&audio),
+        fprintf(stderr, "audio: f=%llu queued=%u dsp_backlog=%u drift=%+.3f%% "
+                        "played_total=%llu calls=%llu fails=%llu\n",
+                (unsigned long long)s_frames,
+                sc_audio_queued(&audio) / (unsigned)(2 * sizeof(int16_t)),
+                (unsigned)(dsp->sampleWrite - dsp->sampleRead), s_audio_drift * 100.0,
                 (unsigned long long)s_audio_dbg_queued, (unsigned long long)s_audio_dbg_calls,
                 (unsigned long long)s_audio_dbg_fails);
       }
