@@ -50,6 +50,7 @@ endif()
 add_executable(UrbanRecomp
     src/main.c
     src/sc_launcher.c
+    src/sc_sram.c
     src/sc_mapview.c
     src/sc_mapgen.c
         src/sc_decomp.c
@@ -282,6 +283,7 @@ if(SC_GEN_SOURCES)
     add_executable(UrbanRecompAOT EXCLUDE_FROM_ALL
         src/main.c
         src/sc_launcher.c
+        src/sc_sram.c
         src/sc_mapview.c
         ${SC_GEN_SOURCES}
         src/sc_hle.c

@@ -87,6 +87,7 @@ uint8_t    g_ram[0x20000];
  * a German ROM. It compiled and linked without a word. */
 #include "sc_mapview.h"
 #include "sc_launcher.h"
+#include "sc_sram.h"
 #include "sc_mapgen.h"
 #include "sc_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
@@ -2451,6 +2452,7 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * the other four regions are the same game at different offsets, where the
  * same PC is some unrelated instruction. */
 static bool s_rom_is_us = true;
+static uint32_t s_rom_fnv;      /* FNV-1a of the ROM file, see main() */
 static uint32_t s_tr_off, s_tr_len;  /* SC_TRANSLATION, for the recheck */
 /* Translated scenario briefings, keyed by the address they decompress FROM.
  * The game unpacks each briefing through 00:90dd, so the substitution goes
@@ -5966,6 +5968,7 @@ static bool load_state(const char *path) {
   fs.base.func = file_sli_read;
   fs.f = f;
   fs.ok = true;
+  ScSram_Hold();   /* the saved cities on disk stay the player's */
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
@@ -5975,6 +5978,7 @@ static bool load_state(const char *path) {
     fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
   }
   g_ppu->lastBrightnessMult = 0xff;   /* rebuild the brightness tables */
+  ScSram_Release();
   bool ok = fs.ok;
   fclose(f);
   /* Hand the restored registers to the fiber, HERE rather than at the call
@@ -6189,10 +6193,8 @@ static void menu_action_clear_milestones(void) {
  * left alone: they are not scenarios and have nothing to win.
  *
  * SRAM lives in the cart model (`cart->ram`), not in g_ram, so it has to go
- * through the bus rather than a direct array write -- and it is not persisted
- * to disk by this host, so the unlock lasts for the session and is captured
- * by save states (which snapshot every device model), but does not survive a
- * fresh launch on its own. */
+ * through the bus rather than a direct array write. The windowed game keeps
+ * SRAM on disk (src/sc_sram.c), so the unlock is saved like any city. */
 #define kWinMarkBits 0x007fu   /* scenarios 0-6 */
 static bool s_unlock_all;
 
@@ -8268,6 +8270,7 @@ int main(int argc, char **argv) {
                      : region == 0x02 ? "Europe" : region == 0x06 ? "France"
                      : region == 0x09 ? "Germany" : "unknown";
     s_rom_is_us = (fp == 0xec01686au);
+    s_rom_fnv = fp;
     ScMapView_SetRomIsUs(s_rom_is_us);
     fprintf(stderr, "rom: %s  region=%s (%02x)  fnv=%08x%s\n",
             rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
@@ -8885,6 +8888,29 @@ int main(int argc, char **argv) {
   if (qualify_frames) {
     return run_qualification(qualify_frames);
   }
+
+  /* The cartridge's save memory on disk (src/sc_sram.c): saved cities and
+   * scenario win marks survive closing the game. Windowed runs only -- a
+   * --qualify run has returned above, so no tool or comparison ever reads or
+   * writes the player's saves. Opened after --load-state, so the file wins
+   * over whatever SRAM the state carried. SC_SRAM_PATH names the file,
+   * SC_SRAM=0 turns this off. */
+  { const char *off = getenv("SC_SRAM");
+    if (!(off && *off == '0')) {
+      char path[1024];
+      const char *e = getenv("SC_SRAM_PATH");
+      if (e && *e) {
+        snprintf(path, sizeof path, "%s", e);
+      } else {
+        const char *tag = s_rom_fnv == SC_ROM_FNV_US ? "us"
+                        : s_rom_fnv == SC_ROM_FNV_EU ? "eu"
+                        : s_rom_fnv == SC_ROM_FNV_FR ? "fr"
+                        : s_rom_fnv == SC_ROM_FNV_DE ? "de"
+                        : s_rom_fnv == SC_ROM_FNV_JP ? "jp" : "rom";
+        snprintf(path, sizeof path, "urbanrecomp-%s.srm", tag);
+      }
+      ScSram_Open(g_snes->cart->ram, g_snes->cart->ramSize, path);
+    } }
 
   /* SDL3 returns true on success where SDL2 returned 0, so a bare `!= 0`
    * reads a successful init as a failure -- with an empty SDL_GetError(),
@@ -9506,6 +9532,7 @@ int main(int argc, char **argv) {
     if (guard_tripped) break;
     const uint64_t emu_t1 = perf_on ? SDL_GetPerformanceCounter() : 0;
     SC_PERF_ADD(kPerfEmu, frame_t0, emu_t1);
+    ScSram_Tick();
 
     /* REVERTED (see docs/ROM_MAP.md or git history for the attempt):
      * fast-forward's audio comment above ("only the last of the batch's
@@ -9770,6 +9797,7 @@ int main(int argc, char **argv) {
   }
 
   if (audio_dev) sc_audio_close(&audio);
+  ScSram_Flush();
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);

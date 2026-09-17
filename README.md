@@ -146,6 +146,24 @@ audio, **Widescreen** (Display), **Language** -- English, Deutsch, Francais
   starts with the saved settings. (recomp-ui itself does not check and
   crashed there; `src/sc_launcher.c` asks the context for its version first.)
 
+## Saving
+
+Cities saved in the game, and the scenario win marks, live in the cartridge's
+battery-backed memory (SRAM). The game keeps it in `urbanrecomp-us.srm` in the
+folder it runs from (`-eu`, `-fr`, `-de` or `-jp` with another region's ROM;
+German and French run on the US ROM and share its file).
+
+- The file is written half a second after the game stores something, and
+  again when the game closes, always through a temporary file, so a crash
+  cannot leave half a save. The file as it was at start is kept as
+  `urbanrecomp-us.srm.bak`.
+- It is the raw 32 KB SRAM image, the format SNES emulators use for `.srm`
+  files.
+- Save states (Shift+digit) are separate. Loading one does not change the
+  saved cities in the file.
+- `SC_SRAM_PATH=<file>` uses another file, `SC_SRAM=0` turns saving off.
+  `--qualify` runs never read or write it.
+
 ## Controls (windowed mode)
 
 The keys below are the defaults `keybinds.ini` gets on the first run; the
@@ -228,7 +246,7 @@ are not passed to the game.
 | MOUSE SPEED | Mouse sensitivity, 50-200 % (default 100). |
 | FAST CURSOR | Same as F9. |
 | CURSOR SPEED | How far the fast cursor moves per frame (2, 4, 8 or 16 pixels; default 4). |
-| UNLOCK SCENARIOS | Marks every scenario as won, including the hidden Las Vegas one, so the select screen opens its fourth column (Las Vegas and free play). It writes what the game's own save path writes, and only once the game has set up its save memory. The host does not write the cartridge's save memory to disk yet, so the unlock lasts for the session; save states keep it. Headless: `SC_UNLOCK_ALL=1`. |
+| UNLOCK SCENARIOS | Marks every scenario as won, including the hidden Las Vegas one, so the select screen opens its fourth column (Las Vegas and free play). It writes what the game's own save path writes, and only once the game has set up its save memory. It is stored in the save file like a saved city (see Saving). Headless: `SC_UNLOCK_ALL=1`. |
 | REPLAY MENU | On by default. When you pick a scenario you have already won, offers STANDARD (the scenario again, with its goal and disasters) or FREE (its city as free play). |
 | FIX POWER ON LOAD | On by default: fixes the stock game's post-load power dropout, see above. |
 

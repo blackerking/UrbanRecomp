@@ -25,6 +25,8 @@ src/gen/
 saves/
 *.sav
 *.srm
+*.srm.bak
+*.srm.tmp
 
 # IDE
 .vs/
