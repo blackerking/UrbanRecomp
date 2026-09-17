@@ -1,6 +1,6 @@
 # Map data format
 
-Source: **SNES SimCity Map Viewer**, a BizHawk Lua script by **Brad Smith**
+Source: a **map viewer** for this game, a BizHawk Lua script by **Brad Smith**
 (2022-08-30), <https://rainwarrior.ca> — support the author at
 <https://www.patreon.com/rainwarrior>.
 
@@ -127,7 +127,7 @@ special-cased elsewhere.
 raw 24000-byte `.bin` in the live `$7F0200` layout and a false-colour `.png`
 preview.
 
-Cross-check: the third-party "Sim City - Sylt" hack patches exactly file offsets
+Cross-check: the third-party "Sylt" hack patches exactly file offsets
 `0x1ce75` / `0x1ce7e` / `0x1ce87`, which are index 5 (Rio) in each of the three
 arrays — confirming both the layout and the index.
 

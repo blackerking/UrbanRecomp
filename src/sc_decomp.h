@@ -1,6 +1,6 @@
-/* SimCity (SNES) stream decompressor, decompiled. See simcity_decomp.c. */
-#ifndef SIMCITY_DECOMP_H
-#define SIMCITY_DECOMP_H
+/* The game's stream decompressor, decompiled. See sc_decomp.c. */
+#ifndef SC_DECOMP_H_INCLUDED
+#define SC_DECOMP_H_INCLUDED
 
 #include <stdint.h>
 

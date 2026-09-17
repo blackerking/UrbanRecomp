@@ -17,7 +17,7 @@
  * two cannot currently be linked together. This probe links common_rtl.c's
  * and leaves main.c alone.
  *
- * Build: cmake --build build --target SimCityAOTProbe
+ * Build: cmake --build build --target UrbanRecompAOTProbe
  */
 #include <stdio.h>
 #include <stdint.h>

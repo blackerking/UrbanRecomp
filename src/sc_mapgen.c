@@ -1,4 +1,4 @@
-/* SimCity (SNES) map generation, decompiled to native C.
+/* The game's map generation, decompiled to native C.
  *
  * GOAL: generate maps without running guest code, so generation can be
  * changed -- bigger maps, new terrain rules, custom seeds -- rather than only
@@ -34,7 +34,7 @@
  * terrain vocabulary -- while $7E0200 holds 411, which is far too many to be
  * tiles. Corrected in ROM_MAP.md too. */
 
-#include "simcity_mapgen.h"
+#include "sc_mapgen.h"
 #include <string.h>
 #include <stdlib.h>
 

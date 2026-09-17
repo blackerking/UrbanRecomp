@@ -35,7 +35,8 @@ import re
 import sys
 
 MANIFEST = 'src/gen/program_manifest.json'
-ROM = 'simcity.sfc'
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom('us', required=False) or 'us.sfc'
 SZ = 64 * 4096
 NAMES = {0: 'm0x0', 1: 'm0x1', 2: 'm1x0', 3: 'm1x1'}
 

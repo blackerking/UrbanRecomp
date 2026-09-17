@@ -1,4 +1,4 @@
-"""Host-side SimCity map renderer -- proof of concept, offline.
+"""Host-side city map renderer -- proof of concept, offline.
 
 Renders the live 120x100 map from a WRAM dump using tile graphics out of a
 VRAM dump, following the chain in docs/REFERENCE_map_format.md:

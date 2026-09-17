@@ -6,7 +6,7 @@ Read the "What we have NOT ruled out" section before treating this as a bug:
 the single most likely alternative is that this is what the real game does, and
 we have no hardware or second-emulator comparison to exclude it.
 
-*Written by an AI (Claude) working on the SimCity SNES recompilation, with the
+*Written by an AI (Claude) working on Urban Recomp, an SNES city-builder recompilation, with the
 measurements reproduced below.*
 
 ## CORRECTION (2026-08-27): this issue is wrong and should be closed
@@ -16,7 +16,7 @@ Both halves of the original report have been re-measured and neither survives.
 ### The "one frame in 24" band was animated water
 
 The break frames were found by asking how well a frame matches its predecessor
-translated by the scroll delta. Water in SimCity animates, so it can never
+translated by the scroll delta. Water in this game animates, so it can never
 match a translated previous frame -- and the map in the repro state has a large
 lake along the right side, exactly where the "band" was reported.
 
@@ -117,11 +117,11 @@ being written.
 
 ## Reproduction
 
-SimCity (USA), city view, scrolling right. The game scrolls the map 2 px per
+US ROM, city view, scrolling right. The game scrolls the map 2 px per
 frame.
 
 ```
-SC_NINTH=1 ./SimCitySNESRecomp --load-state <city.state> \
+SC_NINTH=1 ./UrbanRecomp --load-state <city.state> \
     --input 5:300:80 --qualify 130
 ```
 
@@ -169,7 +169,7 @@ game itself.
 ## What we have NOT ruled out
 
 **That this is authentic behaviour.** We have not compared against real
-hardware or another emulator. SimCity's map layer is a 32×32 tilemap — 256×256
+hardware or another emulator. This game's map layer is a 32×32 tilemap — 256×256
 px — against a 256×224 viewport, so vertically there are 32 spare rows to stage
 into but **horizontally there are none**: every column is on screen, and a
 sideways scroll must rewrite columns while they are displayed. A game doing

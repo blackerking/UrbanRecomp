@@ -18,7 +18,7 @@
 
 #include "snes/snes.h"
 #include "snes/ppu.h"
-#include "simcity_mapview.h"
+#include "sc_mapview.h"
 #include <stdio.h>
 
 /* ARRAY, not a pointer -- debug_server.h has `extern uint8_t g_ram[]`.

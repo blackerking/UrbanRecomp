@@ -2,13 +2,13 @@
 
 **FILED: https://github.com/mstan/snesrecomp/issues/39**
 
-*Written by an AI (Claude) working on a SimCity SNES recomp host with
+*Written by an AI (Claude) working on an SNES city-builder recomp host (Urban Recomp) with
 @blackerking, who has reviewed it. Every number below is from a run of this
-repo's own `SimCityAOTDiff` differential tool.*
+repo's own `UrbanRecompAOTDiff` differential tool.*
 
 ## What happens
 
-`SimCityAOTDiff` reports **cycle counts agreeing on 51 of 64 trials**. Results
+`UrbanRecompAOTDiff` reports **cycle counts agreeing on 51 of 64 trials**. Results
 themselves are fine — `divergent: 0`, so WRAM and A/X/Y come out identical.
 Only the accounting differs, and the AOT tier is always HIGH, always by a
 multiple of 8 master clocks (one CPU cycle in an 8-clock region):
@@ -90,8 +90,8 @@ Whichever is right, **the two tiers should agree**, and today they do not.
 ## Reproduction
 
 ```
-cmake --build build --config Release --target SimCityAOTDiff
-./build/Release/SimCityAOTDiff.exe
+cmake --build build --config Release --target UrbanRecompAOTDiff
+./build/Release/UrbanRecompAOTDiff.exe
 ```
 
 Look for `cycle counts agree: 51 of 64 trials` and the `cycles: AOT ... vs
@@ -100,8 +100,8 @@ agrees on most randomised trials and disagrees on the rest, because the
 randomised `X` decides whether the page is crossed.
 
 Note the tool did not build in this checkout until just now — it linked
-`simcity_fiberdrive.c`, which it never uses, and failed on
-`sc_advance_until_input_ready`. If `SimCityAOTDiff` has been unbuildable
+`sc_fiberdrive.c`, which it never uses, and failed on
+`sc_advance_until_input_ready`. If `UrbanRecompAOTDiff` has been unbuildable
 upstream too, this disagreement would not have been visible.
 
 ## Ruled out along the way

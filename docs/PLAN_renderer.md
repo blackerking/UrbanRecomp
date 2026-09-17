@@ -28,7 +28,7 @@ oracle.
 
 This is the important finding. The runner is not a plain PPU with a framebuffer
 out the back: it already has hooks for a host to observe and extend individual
-BG layers. A SimCity map renderer would plug into that architecture rather than
+BG layers. A city map renderer would plug into that architecture rather than
 be built outside it.
 
 ar-recomp's reusable contribution is the **presentation** half (shaders,

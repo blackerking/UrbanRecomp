@@ -120,7 +120,7 @@ through a function in `cpu_state.c`, which this target deliberately excludes --
 safe to stub because it is purely a diagnostic), and MSVC portability for
 `__attribute__((constructor))`, which MSVC rejects outright.
 
-Submodule now at `blackerking/snesrecomp` branch `simcity-host-main`.
+Submodule now on an earlier host branch of `blackerking/snesrecomp` (since merged).
 
 #### Inherited: a nested submodule with no URL
 
@@ -228,14 +228,14 @@ depended on it.
 
 ## GOAL -- move the slow work off the emulated CPU, via fiber + HLE
 
-The mechanism already exists and is documented in `src/simcity_hle.c`: routines
+The mechanism already exists and is documented in `src/sc_hle.c`: routines
 declared `hle_func` in the recompiler config are replaced by native C. Today
 exactly one is -- `00:930d`, wait-for-vblank.
 
 Two constraints shape everything:
 
-- **HLE is AOT-only.** `simcity_hle.c` is "shared by every AOT-linked target";
-  `SimCitySNESRecomp`, the interp816 build actually played, never sees it.
+- **HLE is AOT-only.** `sc_hle.c` is "shared by every AOT-linked target";
+  `UrbanRecomp`, the interp816 build actually played, never sees it.
 - **Compiled bodies only run under `SC_FIBER=1`.** Without it the AOT target is
   a pure interpreter and reports `bounces=0`. It is guarded to the US ROM by
   fingerprint, so other regions stay playable on the interpreter.
@@ -271,14 +271,14 @@ choosing what to HLE second.
 ### FIXED: save state + fiber hung
 
 `load_state()` restores `g_snes` and the INTERP816 cpu. It knows nothing about
-`simcity_fiberdrive.c`'s `static CpuState s_cpu`, which is what the fiber
-actually executes -- and `SimCityFiberDrive_Init()` runs during env parsing,
+`sc_fiberdrive.c`'s `static CpuState s_cpu`, which is what the fiber
+actually executes -- and `ScFiberDrive_Init()` runs during env parsing,
 long before any state is loaded, pinning the 65816 reset contract (PB=0, DB=0,
 D=0, S=$01ff, 8-bit A/index, resume at the reset vector).
 
 So the fiber ran BOOT registers over MID-GAME WRAM.
 
-`SimCityFiberDrive_AdoptInterpState()` now copies the architectural registers
+`ScFiberDrive_AdoptInterpState()` now copies the architectural registers
 across after a load and republishes the resume PC. Save state + fiber passes,
 and the tier ratio in-game is far healthier than at boot: bounces=51732 against
 interp_steps=1,302,787, versus 5263 against 2,790,629.
@@ -299,7 +299,7 @@ wait-for-vblank spin, and `recomp/bank00.cfg` disables its HLE deliberately:
 > immediately and the frame is never paced.
 
 So the spin IS the frame-pacing seam. Enabling `hle_func 930d` would break
-pacing, and `g_simcity_yield_to_host` is NULL anyway -- nothing sets it.
+pacing, and `g_sc_yield_to_host` is NULL anyway -- nothing sets it.
 
 That said, ~123k interpreted opcodes per frame spent busy-waiting is real
 wall-clock waste even when it is functionally correct. The tractable idea is to
@@ -349,7 +349,7 @@ return context) which the restore does not reconcile.
 
 Goal: generate maps natively rather than by running guest code, so generation
 can be CHANGED -- larger maps, new terrain rules, chosen seeds -- instead of
-only replayed. Started 2026-08-30 in `src/simcity_mapgen.c`; it compiles and is
+only replayed. Started 2026-08-30 in `src/sc_mapgen.c`; it compiles and is
 in the build, but nothing is wired in and **nothing is verified**.
 
 ### Done and VERIFIED: the PRNG
@@ -472,7 +472,7 @@ consumption against the DSP's production over a real session, with
 to answer first is whether production and consumption differ at all in that
 path -- everything above leaves it genuinely unknown.
 
-## OPEN -- title: the Maxis / SimCity building parts move wrongly
+## OPEN -- title: the publisher and title building parts move wrongly
 
 Reported from play 2026-08-27, straight after the light-row fix below. Not yet
 investigated at all; this entry is the report and a starting point, nothing
@@ -576,9 +576,9 @@ early on.
 
 **Open. One approach tried and reverted -- do not repeat it.**
 
-Reported from play: an animated tile carrying the SimCity lettering rides in
+Reported from play: an animated tile carrying the title lettering rides in
 with a building, reaches the left edge and parks there instead of leaving; the
-building shows Maxis beneath it and departs normally while the lettering stays.
+building shows the publisher's name beneath it and departs normally while the lettering stays.
 
 Located by clamping one layer at a time and rendering the margin as text:
 

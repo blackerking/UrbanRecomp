@@ -12,7 +12,7 @@
 # their own map plus the pointer and seed bytes to hook it up -- no ROM
 # content. See sylt_graphics/PROVENANCE.md.
 *.ips
-!sylt_graphics/Sim City Sylt.ips
+!sylt_graphics/sylt.ips
 
 # Active recompiler output -- generated locally per-developer
 src/gen/
@@ -62,8 +62,8 @@ wram_snapshot.bin
 savestate_*.bin
 menu_preview.ppm
 
-# Local visual reference, kept for designing a future project logo. The
-# official SimCity wordmark is Maxis/Nintendo artwork, so it stays local
+# Local visual reference from the design of the project logo. The game's
+# official wordmark is its publisher's artwork, so it stays local
 # and is deliberately not distributed with this repository -- same
 # reasoning as the ROM and the save states above.
 logo.png
@@ -71,7 +71,7 @@ logo.png
 # Third-party reference tool (Brad Smith, rainwarrior.ca) -- no stated
 # licence, so kept local and not redistributed. Findings are recorded in
 # docs/REFERENCE_map_format.md instead.
-SimCity_map.lua
+*_map.lua
 
 # Recorded-session artifacts. Both are derived from the copyrighted ROM --
 # coverage.bin is a map of which ROM addresses executed, session_sram.bin is
@@ -102,13 +102,13 @@ mx_*.bin
 # permission of its author, and the card artwork is the project's own. Two
 # exceptions stay out:
 #
-#   "Sim City Rio on its own Bank.ips" embeds 7605 bytes that are byte-identical
+#   The "Rio on its own Bank" patch embeds 7605 bytes that are byte-identical
 #   to Rio's map in the ROM (verified: it decompresses to the same 10068 bytes).
 #   That is copyrighted ROM data, which no third-party permission covers, and
 #   this host does not need it -- Rio is never relocated. See docs/ROM_MAP.md.
 #
 #   *_check.png are regenerated previews, not sources.
-sylt_graphics/Sim City Rio on its own Bank.ips
+sylt_graphics/*Rio on its own Bank.ips
 sylt_graphics/*_check.png
 
 # Screen-packet patches (tools/text_tool.py packets). Built from a donor

@@ -1,10 +1,10 @@
-/* main.c -- SimCitySNESRecomp desktop host.
+/* main.c -- UrbanRecomp desktop host.
  *
  * Phase-1 bring-up: drives the ROM entirely through the shared runner's
  * standalone 65816 interpreter (interp816) over the real device models
  * (snes.c/ppu.c/apu.c/dma.c/cart.c), exactly the "LLE-first" correctness
  * baseline snesrecomp/docs/LLE_FIRST_ANALYSIS.md describes as authoritative
- * for every game before any AOT bank is layered on top. No SimCity-specific
+ * for every game before any AOT bank is layered on top. No game-specific
  * addresses or scheduler knowledge are required for this milestone: the
  * host runs a fixed number of accurate H/V master-clock ticks per video
  * frame and pauses, the same frame-boundary technique snesrecomp's own
@@ -12,7 +12,7 @@
  *
  * Wiring the AOT/CpuState hybrid tier (common_cpu_infra.c's SnesInit /
  * RtlRegisterGame contract, interp_bridge.c's compiled<->interpreted
- * bouncing) is the documented next step once SimCity's own scheduler idiom
+ * bouncing) is the documented next step once the game's own scheduler idiom
  * is understood well enough to declare it safely -- see README.md.
  */
 #include <stdio.h>
@@ -64,8 +64,8 @@ typedef SDL_Rect ScRect;
 #include "types.h"
 
 /* ── globals the shared runner device sources reference ─────────────────── */
-/* SIMCITY_AOT_TIER: built as part of the AOT/CpuState migration (see
- * src/aot_probe.c and the SimCitySNESRecompAOT target). In that build the
+/* SC_AOT_TIER: built as part of the AOT/CpuState migration (see
+ * src/aot_probe.c and the UrbanRecompAOT target). In that build the
  * shared runtime is linked in, and it already defines several of the symbols
  * this file provides for the standalone interpreter build. They are the same
  * objects with the same meaning -- common_rtl.c's g_ram is a 0x20000 array
@@ -73,10 +73,10 @@ typedef SDL_Rect ScRect;
  * snes_init(), so both tiers end up sharing one WRAM array rather than
  * needing any copying between them. Defining them here too would just be a
  * duplicate symbol, so the AOT build defers to the runtime's copies. */
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 #include "common_rtl.h"
 #include "common_rtl.h"          /* extern uint8 g_ram[0x20000]; */
-#include "simcity_fiberdrive.h"
+#include "sc_fiberdrive.h"
 #else
 uint8_t    g_ram[0x20000];
 #endif
@@ -85,10 +85,10 @@ uint8_t    g_ram[0x20000];
  * and read all of EAX where the callee had only set AL -- so a function that
  * returned false was observed as true, and the US-only gate silently passed on
  * a German ROM. It compiled and linked without a word. */
-#include "simcity_mapview.h"
+#include "sc_mapview.h"
 #include "sc_launcher.h"
-#include "simcity_mapgen.h"
-#include "simcity_decomp.h"
+#include "sc_mapgen.h"
+#include "sc_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
  * collides with the interp816 core this target actually builds against.
  * Only present in a build configured with SNESRECOMP_TRACE=1. */
@@ -106,7 +106,7 @@ static uint64_t   g_master_cycles;
 /* ── RTL glue the device sources call. This host bypasses common_rtl.c (the
  * AOT/CpuState runtime) entirely for Phase 1, so these are the same
  * minimal no-op/direct implementations snesrecomp's own reference driver
- * uses (cosim/ref_driver.c) rather than a SimCity-specific reinterpretation. */
+ * uses (cosim/ref_driver.c) rather than a game-specific reinterpretation. */
 void RtlApuLock(void)   {}
 void RtlApuUnlock(void) {}
 void rtl_sync_apu_to_cpu_locked(void) {}
@@ -119,7 +119,7 @@ bool g_fail = false;
 uint8 g_snesrecomp_last_hdmaen;
 /* Referenced by snes.c/interp_bridge.c; only meaningful once the AOT/
  * CpuState hybrid tier (interp_bridge.c) is wired in. 0 = not driving. */
-#ifndef SIMCITY_AOT_TIER
+#ifndef SC_AOT_TIER
 /* All three are provided by the shared runtime in the AOT build:
  * g_interp_apu_driving and ppudma_record_dma by common_rtl.c /
  * ppu_dma_trace.c, interp816_opcode_hook by interp_bridge.c. */
@@ -132,7 +132,7 @@ int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
 /* Upstream's snes.c now logs every direct WRAM write through
  * wlog_addr_note_direct(), which lives in cpu_state.c -- and this target
  * deliberately builds the interp816 core WITHOUT the CpuState runtime (see the
- * SIMCITY_DEVICE_SOURCES note in CMakeLists.txt).
+ * SC_DEVICE_SOURCES note in CMakeLists.txt).
  *
  * Stubbing it is safe here in a way that stubbing sc_advance_until_input_ready
  * would NOT have been: wlog_addr_note_via() returns immediately unless a WRAM
@@ -696,7 +696,7 @@ static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
  *                    bit3=Up bit2=Down bit1=Left bit0=Right
  *
  * -- the constants below are what must be set in input1_currentState;
- * verified empirically against SimCity itself (holding each direction moves
+ * verified empirically against the game itself (holding each direction moves
  * exactly one cursor axis in the right direction: Left drives $01EB down,
  * Right up, Up drives $01ED down, Down up). Do not "simplify" these to the
  * naive hardware bit order -- that was the original bug.
@@ -926,7 +926,7 @@ static void handle_pos_stuff(void) {
        * OBJ reaches the margins however the backgrounds are clamped -- measured
        * on the title, BG2 and BG3 clamp to zero margin pixels while OBJ still
        * puts 1623 there. What shows up is the off-screen half of sprites the
-       * hardware clips at the screen edge: the SIMCITY billboard and the row of
+       * hardware clips at the screen edge: the title billboard and the row of
        * blinking lights along the bottom, reported from play as a blinking
        * rope. The strict OAM decode does not help -- that governs the right
        * band [256, 256+extraRight), and these are all on the left.
@@ -996,7 +996,7 @@ static void handle_pos_stuff(void) {
         /* Force blank paints BLACK, not the backdrop.
          *
          * brightnessMult covers a fade, and misses the other way a SNES shows
-         * nothing. SimCity ends a fade by writing $8f -- force blank on,
+         * nothing. The game ends a fade by writing $8f -- force blank on,
          * brightness restored to 15 -- so this computed cgram[0] at FULL
          * intensity and painted the sky into the margins while the guest was
          * black. Leaving the loan screen that is twelve frames of bright sky
@@ -2122,10 +2122,10 @@ static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
   s_aot_variant_count++;
 }
 
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 /* ── SC_FIBER=1: run the guest inside the fiber (migration step 3d) ───────
  *
- * The driver itself lives in src/simcity_fiberdrive.c, because it needs
+ * The driver itself lives in src/sc_fiberdrive.c, because it needs
  * cpu_state.h and that header declares a global `CpuState g_cpu` which
  * collides with this file's `Interp816 *g_cpu`. Keeping it in its own
  * translation unit is cheaper than renaming a symbol used several hundred
@@ -2146,7 +2146,7 @@ static int  s_fiber_explicit;
  * frame (so raster effects still work line by line, per MIGRATION_step3 §4),
  * release the vblank wait the way the NMI handler would, then let the guest
  * run until its vblank HLE hands the frame back. */
-/* Beam advance, exposed to the frame driver (src/simcity_fiberdrive.c).
+/* Beam advance, exposed to the frame driver (src/sc_fiberdrive.c).
  * handle_pos_stuff() is static and deeply tied to this file, so the driver
  * calls in rather than duplicating the device model. */
 /* One beam step, catching the APU up on the same cadence the per-opcode path
@@ -2288,13 +2288,13 @@ static bool run_one_frame_fiber(void) {
   if (g_cpu->nmiWanted) { g_cpu->nmiWanted = false; nmi_pending = true; }
 
   { static uint64_t last_guest_master;
-    const uint64_t guest_start = SimCityFiberDrive_MasterCycles();
+    const uint64_t guest_start = ScFiberDrive_MasterCycles();
 
     /* Slice A: bounded so the beam stops short of the wrap. */
     { uint64_t a = sc_cycles_to_frame_end();
       if (a > kFrameCycles) a = kFrameCycles;
       if (a < 1364u) a = 1364u;
-      ok = SimCityFiberDrive_RunGuestSlice(s_frames, nmi_pending, a); }
+      ok = ScFiberDrive_RunGuestSlice(s_frames, nmi_pending, a); }
 
     /* Cross the boundary with the guest stopped. This is the present. */
     { unsigned guard = 0;
@@ -2303,20 +2303,20 @@ static bool run_one_frame_fiber(void) {
 
     /* Slice B: the remainder of this frame's budget, capped so the beam
      * cannot reach the NEXT boundary either. No NMI -- one per frame. */
-    { const uint64_t used = SimCityFiberDrive_MasterCycles() - guest_start;
+    { const uint64_t used = ScFiberDrive_MasterCycles() - guest_start;
       if (used < kFrameCycles) {
         uint64_t b = kFrameCycles - used;
         uint64_t room = sc_cycles_to_frame_end();
         if (room && b > room) b = room;
         if (b >= 1364u)
-          ok = SimCityFiberDrive_RunGuestSlice(s_frames, false, b) && ok;
+          ok = ScFiberDrive_RunGuestSlice(s_frames, false, b) && ok;
       } }
 
-    s_nmi_serviced = SimCityFiberDrive_NmiDelivered();
+    s_nmi_serviced = ScFiberDrive_NmiDelivered();
 
     /* Mirror the guest clock into the host counter ONCE per frame. Doing this
      * per slice is how the earlier attempt double-counted. */
-    uint64_t now = SimCityFiberDrive_MasterCycles();
+    uint64_t now = ScFiberDrive_MasterCycles();
     if (now > last_guest_master) {
       uint64_t delta = now - last_guest_master;
       g_master_cycles += delta;
@@ -2356,10 +2356,10 @@ static bool run_one_frame_fiber(void) {
   sc_catch_missed_vblank();
   return ok;
 }
-#endif /* SIMCITY_AOT_TIER */
+#endif /* SC_AOT_TIER */
 
 /* s_fiber_mode only exists in the AOT build. */
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 static bool sc_fiber_active(void) { return s_fiber_mode; }
 #else
 static bool sc_fiber_active(void) { return false; }
@@ -2855,7 +2855,7 @@ static void sc_maybe_trigger_disaster(void) {
 
 /* ── 00:90dd, the stream decompressor ──────────────────────
  *
- * 48% of the overview-map load (docs/ROM_MAP.md). src/simcity_decomp.c does
+ * 48% of the overview-map load (docs/ROM_MAP.md). src/sc_decomp.c does
  * the same work on the host.
  *
  * SC_DECOMP_VERIFY=1 is the important mode, and it exists because the map
@@ -3243,7 +3243,7 @@ static void sc_classifier_hook(Interp816 *cpu) {
 }
 
 static bool run_one_frame(void) {
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   if (s_fiber_mode) return run_one_frame_fiber();
 #endif
   if (s_fast_ticks) { g_ram[0x01f3] = 0; g_ram[0x01f4] = 0; }
@@ -3306,9 +3306,9 @@ static bool run_one_frame(void) {
      * 01:f1ed is the whole generator, reached by JSL from 03:d869, and the
      * SNES CPU takes about 800 frames of wall clock to grind through it --
      * thirteen seconds of watching a map appear a few cells at a time.
-     * src/simcity_mapgen.c does the same work in well under a frame.
+     * src/sc_mapgen.c does the same work in well under a frame.
      *
-     * This is the same substitution as the SimCity_MapGen HLE, but hooked
+     * This is the same substitution as the ScHle_MapGen HLE, but hooked
      * here rather than through hle_func, and that difference is the point:
      * hle_func only applies to AOT bodies, so it needs SC_FIBER, and the
      * fiber currently has rendering defects of its own
@@ -5394,7 +5394,7 @@ static void host_map_compose(void) {
    * through the PPU's brightnessMult table. That covers brightness, and
    * misses the OTHER way a SNES shows nothing: INIDISP bit 7.
    *
-   * SimCity ends a fade-out by writing $8f -- force blank ON, brightness
+   * The game ends a fade-out by writing $8f -- force blank ON, brightness
    * restored to 15 -- so it can rebuild the screen unseen. Measured across
    * the Information -> View Mode transition: inidisp steps 09, 08 ... 01 with
    * both halves fading together, and then at the very moment the guest goes
@@ -5780,7 +5780,7 @@ static void file_sli_read(SaveLoadInfo *sli, void *data, size_t n) {
 }
 
 /* A versioned format, from the adaptive-renderer PR (blackerking/
- * SimCitySNESRecomp#1). The device snapshot holds the PPU's registers and
+ * UrbanRecomp#1). The device snapshot holds the PPU's registers and
  * memories but not its CPU-port latches -- the VRAM pointer and VMAIN's
  * increment-on-high bit among them -- so a state loaded where the game was
  * mid-upload sent the following tile and palette uploads to the wrong place.
@@ -5863,8 +5863,8 @@ static bool load_state(const char *path) {
    * inside a running fiber session hung the game. Doing it inside load_state
    * means a new call site cannot miss it, which is exactly how this one was
    * missed. */
-#ifdef SIMCITY_AOT_TIER
-  if (ok && sc_fiber_active()) SimCityFiberDrive_AdoptInterpState(g_cpu);
+#ifdef SC_AOT_TIER
+  if (ok && sc_fiber_active()) ScFiberDrive_AdoptInterpState(g_cpu);
 #endif
   return ok;
 }
@@ -5914,7 +5914,7 @@ static bool add_input2_event(const char *text) {
 }
 
 /* One-button macro for the documented debug-menu entry code (Peter's
- * SimCity SNES Guide, crediting Corey Miller/"ZaphodBee"): a fixed
+ * SNES guide for the game, crediting Corey Miller/"ZaphodBee"): a fixed
  * 16-step sequence read on controller 2 while on the "Goodbye! See you
  * soon" quit-confirmation screen. Static ROM analysis found no code
  * anywhere in this ROM dump reading a second controller (no $421A/$421B
@@ -6153,8 +6153,8 @@ static void apply_frame_input(uint64_t frame) {
   g_snes->input2_currentState = input2;
 }
 
-/* ── host-mouse cursor control, ported from the community "SimCity mouse
- * patch" (https://github.com/Selicre/simcity-mouse, main.asm/mouse.asm).
+/* ── host-mouse cursor control, ported from the community mouse patch
+ * by Selicre (https://github.com/Selicre/simcity-mouse, main.asm/mouse.asm).
  * That patch hooks the NMI to bit-bang an actual SNES mouse's serial
  * protocol on controller port 2 and accumulates the result into two WRAM
  * bytes it identified by testing: $7E01EB (X) and $7E01ED (Y) -- the same
@@ -6248,7 +6248,7 @@ static void apply_mouse_delta(int dx, int dy) {
  *
  * ar-recomp's own overlay decodes the ROM's actual dialog font/frame
  * graphics for an in-theme look -- skipped here as purely cosmetic
- * ActRaiser-specific work (not something SimCity's ROM has an equivalent
+ * ActRaiser-specific work (not something this game's ROM has an equivalent
  * of anyway). This uses a small hand-authored 3x5 bitmap font instead,
  * the same kind of fallback ar-recomp itself falls back to when ROM font
  * decoding isn't available. It only covers the character set this menu's
@@ -7386,7 +7386,7 @@ static void render_replay_menu(SDL_Renderer *renderer) {
 /* ── generic activity qualification (--qualify N): the same pass/fail bar
  * as snesrecomp/cosim/ref_driver.c's standalone mode -- "goes through the
  * attract demo without logic, video, or audio errors" made concrete and
- * automatable, with zero SimCity-specific WRAM knowledge required. ─────── */
+ * automatable, with zero game-specific WRAM knowledge required. ─────── */
 static void write_mx_bitmap_dump(void) {
   if (!s_mx_bitmap || !s_mx_bitmap_path) return;
   FILE *f = fopen(s_mx_bitmap_path, "wb");
@@ -7630,7 +7630,7 @@ static int run_qualification(uint64_t frames) {
       if (diag) fprintf(stderr, "[apu f=%llu] write=%u avail=%u produced=%d\n",
                         (unsigned long long)f, dsp->sampleWrite, available,
                         (int)(dsp->sampleWrite - last_sample_write));
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
       /* Beam-step ledger: only the fiber host has a host-side beam loop.
        * This is what showed the beam being advanced from two places at
        * once -- guest-heavy frames need only ~300 host steps instead of
@@ -7667,7 +7667,7 @@ static int run_qualification(uint64_t frames) {
       rc = 1;
     }
   }
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   /* Did the guest actually run COMPILED code? Without this the wall-clock
    * comparison in OPEN_QUESTIONS B2 is unreadable: a fiber run that quietly
    * interpreted everything would look exactly like a slow AOT tier. Tier-downs
@@ -7680,10 +7680,10 @@ static int run_qualification(uint64_t frames) {
     interp_tier2_stats(&sites, &clean, &bail);
     extern unsigned long long g_interp_bridge_bounces;
     extern unsigned long long g_interp_bridge_steps;
-    extern unsigned SimCityFiberDrive_GuestS(void);
-    extern unsigned SimCityFiberDrive_ResumePC(void);
+    extern unsigned ScFiberDrive_GuestS(void);
+    extern unsigned ScFiberDrive_ResumePC(void);
     if (s_fiber_mode) fprintf(stderr, "guest: S=%04X resume=%06X\n",
-                              SimCityFiberDrive_GuestS(), SimCityFiberDrive_ResumePC());
+                              ScFiberDrive_GuestS(), ScFiberDrive_ResumePC());
     else fprintf(stderr, "guest: S=%04X pc=%02X:%04X\n",
                          (unsigned)g_cpu->sp, (unsigned)g_cpu->k, (unsigned)g_cpu->pc);
     fprintf(stderr, "aot: bounces=%llu interp_steps=%llu tier_downs=%ld gap_sites=%d clean=%llu bail=%llu",
@@ -7933,32 +7933,28 @@ int main(int argc, char **argv) {
    *
    * The AOT tier is a different matter -- see the fingerprint guard below.
    *
-   * Candidate filenames per region, tried in order, because the No-Intro names
-   * carry decorations ("[!]") that vary by dump. An explicit ROM argument
-   * always wins over SC_LANG. */
-  const char *rom_path = "simcity.sfc";
+   * The project assumes no file name: the region's image is found in the
+   * working directory by its contents (ScFindRom, FNV-1a over the file). An
+   * explicit ROM argument always wins over SC_LANG. */
+  const char *rom_path = NULL;
+  static char s_found_rom[1024];
   { const char *lang = getenv("SC_LANG");
     if (lang && *lang) {
-      static const struct { char code; const char *names[3]; } kRoms[] = {
-        { 'U', { "simcity.sfc", "Sim City (U) [!].sfc", NULL } },
-        { 'E', { "Sim City (E) [!].sfc", "Sim City (E).sfc", NULL } },
-        { 'F', { "Sim City (F).sfc", "Sim City (F) [!].sfc", NULL } },
-        { 'G', { "Sim City (G) [!].sfc", "Sim City (G).sfc", NULL } },
-        { 'J', { "Sim City (J).sfc", "Sim City (J) [!].sfc", NULL } },
+      static const struct { char code; unsigned long fnv; } kRoms[] = {
+        { 'U', SC_ROM_FNV_US }, { 'E', SC_ROM_FNV_EU }, { 'F', SC_ROM_FNV_FR },
+        { 'G', SC_ROM_FNV_DE }, { 'J', SC_ROM_FNV_JP },
       };
       char want = (char)toupper((unsigned char)lang[0]);
-      const char *picked = NULL;
-      for (size_t i = 0; i < sizeof(kRoms)/sizeof(kRoms[0]) && !picked; i++) {
+      bool known = false;
+      for (size_t i = 0; i < sizeof(kRoms)/sizeof(kRoms[0]); i++) {
         if (kRoms[i].code != want) continue;
-        for (int n = 0; n < 3 && kRoms[i].names[n]; n++) {
-          FILE *f = fopen(kRoms[i].names[n], "rb");
-          if (f) { fclose(f); picked = kRoms[i].names[n]; break; }
-        }
-        if (!picked)
-          fprintf(stderr, "SC_LANG=%c: no ROM file found for that region\n", want);
+        known = true;
+        if (ScFindRom(kRoms[i].fnv, s_found_rom, sizeof s_found_rom))
+          rom_path = s_found_rom;
+        else
+          fprintf(stderr, "SC_LANG=%c: no ROM of that region in the working directory\n", want);
       }
-      if (picked) { rom_path = picked; }
-      else if (!strchr("UEFGJ", want))
+      if (!known)
         fprintf(stderr, "SC_LANG: want one of U E F G J\n");
     } }
   const char *load_state_path = NULL;
@@ -7987,7 +7983,7 @@ int main(int argc, char **argv) {
       fprintf(stderr, "SC_WRAM_DUMP_PC: dumps fire at guest %02X:%04X\n",
               (unsigned)(s_dump_pc24 >> 16), (unsigned)(s_dump_pc24 & 0xffff));
     } }
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   /* The AOT tier is linked into this build, but the fiber is OPT-IN again.
    *
    * It was briefly the default. Playing on it showed widescreen defects that
@@ -8117,6 +8113,13 @@ int main(int argc, char **argv) {
     s_linear_filter = s_launch_settings.linear_filter != 0;
     s_enable_audio = s_launch_settings.enable_audio != 0;
     ScSettingsApply(&s_launch_settings);
+  }
+  if (!rom_path && ScFindRom(SC_ROM_FNV_US, s_found_rom, sizeof s_found_rom))
+    rom_path = s_found_rom;
+  if (!rom_path) {
+    fprintf(stderr, "no ROM: pass the path of your own copy, pick it in the "
+                    "launcher, or put it (any file name) in the working directory\n");
+    return 1;
   }
 
   uint32_t rom_size = 0;
@@ -8403,7 +8406,7 @@ int main(int argc, char **argv) {
         free(blob);
       } }
   }
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   /* Decided HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
    * is read, so the fingerprint is not known yet. The first version of this
    * guard sat at the parse site and did nothing at all -- a German ROM ran 60
@@ -8424,7 +8427,7 @@ int main(int argc, char **argv) {
     s_fiber_want = 0;
   }
   if (s_fiber_want) {
-    if (!SimCityFiberDrive_Init()) {
+    if (!ScFiberDrive_Init()) {
       fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
       return 1;
     }
@@ -8743,7 +8746,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "loaded state '%s', now at frame %llu\n",
             load_state_path, (unsigned long long)s_frames);
 
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
     /* The fiber executes its own CpuState, which load_state does not touch --
      * and Init() pinned it to the reset contract during env parsing, before
      * any state existed. Left alone, the fiber runs boot registers over
@@ -8777,8 +8780,9 @@ int main(int argc, char **argv) {
                             : s_fullscreen == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
 #endif
   SDL_Window *window = snesrecomp_sdl_create_window(
-      "SimCitySNESRecomp", s_video_w * scale, kVideoHeight * scale, window_flags);
+      "Urban Recomp", s_video_w * scale, kVideoHeight * scale, window_flags);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+  ScSetWindowIcon(window);
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
    * (e.g. ~33ms instead of ~16.67ms), silently halving the whole loop's
@@ -9562,7 +9566,7 @@ int main(int argc, char **argv) {
                                  (double)SDL_GetPerformanceFrequency();
     if (fps_window_elapsed >= 1.0) {
       char title[128];
-      snprintf(title, sizeof(title), "SimCitySNESRecomp -- %.1f fps",
+      snprintf(title, sizeof(title), "Urban Recomp -- %.1f fps",
                (double)fps_window_frames / fps_window_elapsed);
       SDL_SetWindowTitle(window, title);
       fps_window_frames = 0;

@@ -1,6 +1,6 @@
-/* SimCity (SNES) map generation, decompiled. See simcity_mapgen.c. */
-#ifndef SIMCITY_MAPGEN_H
-#define SIMCITY_MAPGEN_H
+/* The game's map generation, decompiled. See sc_mapgen.c. */
+#ifndef SC_MAPGEN_H_INCLUDED
+#define SC_MAPGEN_H_INCLUDED
 
 #include <stdint.h>
 

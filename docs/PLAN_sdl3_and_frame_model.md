@@ -84,10 +84,10 @@ called anywhere in the runner**.
    is the only thing that can tell you whether the new host is right. Model on
    `runner/src/desktop/mmx23_host_main.inc`.
 5. **Drive the guest.** With the beam advancing, retry
-   `src/simcity_fiberdrive.c`. The mapping is already done and correct:
+   `src/sc_fiberdrive.c`. The mapping is already done and correct:
    `interp_bridge_run_loop(cpu, resume, 0x009311, 0x00b9, 0x00)` — `00:930d`'s
    `INC $c7 ; LDA $b9 ; BEQ` spin, flag `$b9`, cleared while waiting.
-   Success is concrete and cheap to check: `g_simcity_vblank_hle_calls > 0`
+   Success is concrete and cheap to check: `g_sc_vblank_hle_calls > 0`
    and `interp_bridge_lle_resume_pc()` advancing frame to frame.
    `SNESRECOMP_YIELD_DIAG=1` is the built-in diagnostic.
 6. **Qualify, then decide.** Compare the frame-model host against the

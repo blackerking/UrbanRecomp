@@ -27,7 +27,7 @@
  *     00:9280  LDA $4212 ; AND #$01 ; BNE $9280     ; auto-joypad busy
  *
  * ar-recomp gets away with a pure coroutine because its waits are all
- * vblank-shaped and HLE'd. SimCity has a hardware-status spin *before* the
+ * vblank-shaped and HLE'd. The game has a hardware-status spin *before* the
  * first vblank wait, so no amount of AOT coverage makes that design boot.
  *
  * Running under the bridge DOES fix it, and this host now works. Three things
@@ -77,11 +77,11 @@
 #include "common_rtl.h"
 #include "snes/snes.h"
 #include "snes/interp_bridge.h"
-#include "simcity_fiberdrive.h"
+#include "sc_fiberdrive.h"
 #include "interp816.h"
 
-/* src/simcity_hle.c */
-extern unsigned long g_simcity_vblank_hle_calls;
+/* src/sc_hle.c */
+extern unsigned long g_sc_vblank_hle_calls;
 
 /* 00:930d, the vblank wait -- COP service 0, the game's frame boundary:
  *
@@ -133,7 +133,7 @@ static void publish_runtime_globals(void) {
     if (g_snes->cart) g_rom = g_snes->cart->rom;
 }
 
-bool SimCityFiberDrive_Init(void) {
+bool ScFiberDrive_Init(void) {
     if (s_started) return true;
     cpu_state_init(&s_cpu, g_ram);
     /* 65816 reset contract: native mode, 8-bit A and index, stack in page 1. */
@@ -165,7 +165,7 @@ bool SimCityFiberDrive_Init(void) {
  * Copies the architectural registers across and republishes the resume PC.
  * Nothing else in CpuState is guest-visible state -- host_return_valid is the
  * paired-call bookkeeping and must start clean, exactly as after Init. */
-void SimCityFiberDrive_AdoptInterpState(const Interp816 *in) {
+void ScFiberDrive_AdoptInterpState(const Interp816 *in) {
     if (!s_started || !in) return;
     s_cpu.A  = in->a;
     s_cpu.X  = in->x;
@@ -186,7 +186,7 @@ void SimCityFiberDrive_AdoptInterpState(const Interp816 *in) {
     s_resume_pc24 = ((uint32_t)in->k << 16) | in->pc;
 }
 
-bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
+bool ScFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
                                      uint64_t budget) {
     /* Do not hand over a frame whose input latch is still busy -- see the long
      * note on sc_advance_until_input_ready() in src/main.c. */
@@ -264,7 +264,7 @@ bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
      * caller computes it from the actual beam position instead. */
     interp_bridge_set_master_deadline(s_cpu.master_cycles + budget);
 
-    unsigned long hle_before = g_simcity_vblank_hle_calls;
+    unsigned long hle_before = g_sc_vblank_hle_calls;
     int ok = interp_bridge_run_loop(&s_cpu, s_resume_pc24,
                                     SC_YIELD_PC24,
                                     SC_VBLANK_FLAG,
@@ -282,7 +282,7 @@ bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
             fprintf(stderr, "[frame] bridge bailed %u frames running at "
                     "frame %llu (resume=%06X, vblank hle calls=%lu)\n",
                     s_bail_streak, (unsigned long long)frame,
-                    (unsigned)s_resume_pc24, g_simcity_vblank_hle_calls);
+                    (unsigned)s_resume_pc24, g_sc_vblank_hle_calls);
             return false;
         }
     } else {
@@ -296,14 +296,14 @@ bool SimCityFiberDrive_RunGuestSlice(uint64_t frame, bool nmi_pending,
  * g_master_cycles, which only the per-opcode loop increments. Expose the
  * guest clock so the frame path can advance it by the same amount the guest
  * actually consumed. */
-uint64_t SimCityFiberDrive_MasterCycles(void) { return s_cpu.master_cycles; }
+uint64_t ScFiberDrive_MasterCycles(void) { return s_cpu.master_cycles; }
 
 /* NMIs actually delivered to the guest, for the qualify bar's nmi_serviced. */
-uint64_t SimCityFiberDrive_NmiDelivered(void) { return s_nmi_delivered; }
+uint64_t ScFiberDrive_NmiDelivered(void) { return s_nmi_delivered; }
 
 /* Guest stack pointer and resume PC, for host-vs-host comparisons: the two
  * hosts sample WRAM at different points in the guest's frame, so knowing
  * where the guest actually is decides whether a differing byte is live state
  * or dead stack below S. */
-unsigned SimCityFiberDrive_GuestS(void)  { return (unsigned)s_cpu.S; }
-unsigned SimCityFiberDrive_ResumePC(void){ return (unsigned)s_resume_pc24; }
+unsigned ScFiberDrive_GuestS(void)  { return (unsigned)s_cpu.S; }
+unsigned ScFiberDrive_ResumePC(void){ return (unsigned)s_resume_pc24; }

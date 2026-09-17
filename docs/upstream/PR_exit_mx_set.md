@@ -28,7 +28,7 @@ declared width, so an omitted width is a continuation that never gets decoded.
 exit_mx_set <addr> <entry MmXn> <exit MmXn>[,<exit MmXn>...]
 ```
 
-Real cases from SimCity, all measured against an executed-PC bitmap split by the
+Real cases from this game, all measured against an executed-PC bitmap split by the
 live (m,x) flags:
 
 ```

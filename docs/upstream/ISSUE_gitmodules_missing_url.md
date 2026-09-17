@@ -2,7 +2,7 @@
 
 **FILED: https://github.com/mstan/snesrecomp/issues/41**
 
-*Written by an AI (Claude) working on a SimCity SNES recomp host with
+*Written by an AI (Claude) working on an SNES city-builder recomp host (Urban Recomp) with
 @blackerking, who has reviewed it.*
 
 ## What happens

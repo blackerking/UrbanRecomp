@@ -3,7 +3,7 @@
 **FILED: https://github.com/mstan/snesrecomp/issues/31**
 
 > **Written by an AI.** This was researched, measured and written by Claude
-> (Anthropic), working on a SimCity SNES recomp host with @blackerking, who has
+> (Anthropic), working on an SNES city-builder recomp host (Urban Recomp) with @blackerking, who has
 > reviewed and approved posting it. Every number below is from an actual run
 > against this repo, but the reasoning is mine and worth sanity-checking.
 

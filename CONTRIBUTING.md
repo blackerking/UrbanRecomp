@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping improve SimCitySNESRecomp. The project keeps ROM data
+Thank you for helping improve UrbanRecomp. The project keeps ROM data
 and generated game code out of Git, so a working checkout has two explicit
 inputs: the pinned `snesrecomp` submodule and your own legally obtained ROM.
 
@@ -8,7 +8,7 @@ inputs: the pinned `snesrecomp` submodule and your own legally obtained ROM.
 
 ```bash
 git clone --recurse-submodules <this repo's URL>
-cd simcity
+cd UrbanRecomp
 bash tools/bootstrap.sh
 ```
 
@@ -16,7 +16,7 @@ bash tools/bootstrap.sh
 initializes nested submodules, and verifies that `snesrecomp` matches the
 gitlink committed by this repository.
 
-Stage a verified US ROM as `simcity.sfc` at the repository root and generate
+Put your own verified US ROM (any file name) in the repository root and generate
 the private C sources:
 
 ```bash
@@ -30,9 +30,9 @@ The ROM and `src/gen/` are ignored and must never be committed.
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --target SimCitySNESRecomp
-build/SimCitySNESRecomp.exe                 # windowed
-build/SimCitySNESRecomp.exe --qualify 3600  # headless activity qualification
+cmake --build build --target UrbanRecomp
+build/UrbanRecomp.exe                 # windowed
+build/UrbanRecomp.exe --qualify 3600  # headless activity qualification
 ```
 
 `--qualify N` runs N frames with no window and asserts the same generic bar
@@ -46,7 +46,7 @@ driver, which this project's qualification check mirrors).
 
 The `snesrecomp` gitlink is the single source of truth for the framework
 revision. Normal game-only changes should leave it untouched. If you find a
-genuine framework bug (not specific to SimCity), fix it upstream in
+genuine framework bug (not specific to this game), fix it upstream in
 `snesrecomp` on its own branch, coordinate that separately, and only then
 bump this repo's gitlink -- do not carry local patches to the submodule.
 
@@ -54,7 +54,7 @@ bump this repo's gitlink -- do not carry local patches to the submodule.
 
 - Rerun `bash tools/bootstrap.sh` and confirm `git submodule status --recursive`
   has no `-`, `+`, or `U` prefix.
-- Build the target and run `build/SimCitySNESRecomp.exe --qualify 3600`.
+- Build the target and run `build/UrbanRecomp.exe --qualify 3600`.
 - Run `git status --short` and check for ROMs, generated sources, build
   trees, or unrelated files before staging.
 - Keep game-specific addresses and behavior (bank cfgs, `src/variables.h`,

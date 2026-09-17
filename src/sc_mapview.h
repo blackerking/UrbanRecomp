@@ -1,13 +1,13 @@
-/* Host-side SimCity map renderer -- see docs/PLAN_renderer.md Stage 2.
+/* Host-side city map renderer -- see docs/PLAN_renderer.md Stage 2.
  *
  * Draws the live 120x100 city map from WRAM using tile graphics out of VRAM,
  * entirely host-side. The guest still owns every bit of state; this only draws
  * it differently, which is the state/presentation line the plan sets out.
  *
  * Kept in its own translation unit so main.c stays free of the tile-decode
- * detail, the same reason simcity_fiberdrive.c is separate. */
-#ifndef SIMCITY_MAPVIEW_H
-#define SIMCITY_MAPVIEW_H
+ * detail, the same reason sc_fiberdrive.c is separate. */
+#ifndef SC_MAPVIEW_H_INCLUDED
+#define SC_MAPVIEW_H_INCLUDED
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -41,4 +41,4 @@ void ScMapView_GetScroll(int *sx, int *sy);
 void ScMapView_SetCellPx(int px);
 int  ScMapView_GetCellPx(void);
 
-#endif /* SIMCITY_MAPVIEW_H */
+#endif /* SC_MAPVIEW_H_INCLUDED */

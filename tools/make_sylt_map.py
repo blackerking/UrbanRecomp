@@ -23,7 +23,7 @@ $7E8000 for 03:ce5e's JSR $d15f to unpack. Handing the game that form means its
 own unpacker still does the work.
 
 Usage:
-    python tools/make_sylt_map.py "sylt_graphics/Sim City Sylt.ips"
+    python tools/make_sylt_map.py "sylt_graphics/sylt.ips"
 """
 import importlib.util
 import os

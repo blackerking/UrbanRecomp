@@ -1,21 +1,21 @@
 /*
- * Host implementations of SimCity routines declared `hle_func` in recomp/.
+ * Host implementations of the game routines declared `hle_func` in recomp/.
  *
- * Shared by every AOT-linked target (SimCitySNESRecompAOT, SimCityAOTProbe,
- * SimCityAOTDiff) so there is exactly one copy.
+ * Shared by every AOT-linked target (UrbanRecompAOT, UrbanRecompAOTProbe,
+ * UrbanRecompAOTDiff) so there is exactly one copy.
  */
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "cpu_state.h"
 #include "common_rtl.h"
-#include "simcity_mapgen.h"
+#include "sc_mapgen.h"
 
 /* Set by the host once it is actually driving frames. Until then the yield has
- * nowhere to go -- see the long note in SimCity_WaitForVblank. */
-void (*g_simcity_yield_to_host)(void) = NULL;
+ * nowhere to go -- see the long note in ScHle_WaitForVblank. */
+void (*g_sc_yield_to_host)(void) = NULL;
 
-unsigned long g_simcity_vblank_hle_calls = 0;
+unsigned long g_sc_vblank_hle_calls = 0;
 
 /*
  * 00:930d -- COP service 0, the game's wait-for-vblank primitive and the most
@@ -40,7 +40,7 @@ unsigned long g_simcity_vblank_hle_calls = 0;
  * 2. $b9 MUST END NON-ZERO. That is the routine's exit condition, so callers
  *    that re-read it see a released flag, not a stuck one.
  *
- * 3. $c7 MUST KEEP ADVANCING, and this one is specific to SimCity. $c7 counts
+ * 3. $c7 MUST KEEP ADVANCING, and this one is specific to this game. $c7 counts
  *    spin iterations, and 00:823e seeds the PRNG from it ($c7 -> $59/$5b/$5d),
  *    which is where the map generator's entropy comes from -- see
  *    docs/ROM_MAP.md. An HLE that skips the spin freezes $c7, and every
@@ -51,8 +51,8 @@ unsigned long g_simcity_vblank_hle_calls = 0;
  * Anything that assumed a routine like this is a pure no-op would produce a
  * game that runs and looks fine while silently generating one map forever.
  */
-RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
-    g_simcity_vblank_hle_calls++;
+RecompReturn ScHle_WaitForVblank(CpuState *cpu) {
+    g_sc_vblank_hle_calls++;
 
     cpu->S = (uint16)(cpu->S + 2);                    /* (1) */
 
@@ -69,8 +69,8 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
 
     g_ram[0xb9] = 1;                                  /* (2) */
 
-    if (g_simcity_yield_to_host) {
-        g_simcity_yield_to_host();
+    if (g_sc_yield_to_host) {
+        g_sc_yield_to_host();
     } else {
         /* No frame driver yet: src/main.c still runs every instruction on
          * interp816, so nothing calls this and the branch is unreachable in
@@ -81,7 +81,7 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
         if (!warned) {
             warned = 1;
             fprintf(stderr,
-                    "[hle] SimCity_WaitForVblank called with no host frame "
+                    "[hle] ScHle_WaitForVblank called with no host frame "
                     "driver installed -- see docs/MIGRATION_step3.md. "
                     "Returning immediately; frame pacing is NOT happening.\n");
         }
@@ -96,13 +96,13 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
  * This is the point of the whole exercise. 03:d840 runs generation as a single
  * synchronous JSL, and the SNES CPU takes about 800 frames of wall clock to
  * grind through it -- roughly thirteen seconds of the player watching a map
- * appear a few cells at a time. src/simcity_mapgen.c does the same work
+ * appear a few cells at a time. src/sc_mapgen.c does the same work
  * natively in well under a frame.
  *
  * Safe to substitute only because it is verified bit-exact, not merely
  * plausible: three maps covering BOTH branches reproduce the guest's map on
  * all 12000 cells, consume the guest's exact draw count, and leave the PRNG in
- * the guest's exact final state. See the long note in simcity_mapgen.c.
+ * the guest's exact final state. See the long note in sc_mapgen.c.
  *
  * WHAT THIS MUST GET RIGHT BESIDES THE MAP:
  *
@@ -112,7 +112,7 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
  *    write back the state our generator ends on, which is the guest's.
  *
  * 2. THE RETURN. f1ed is reached by JSL, so three bytes come off the stack,
- *    not the two that a JSR-reached HLE like SimCity_WaitForVblank pops.
+ *    not the two that a JSR-reached HLE like ScHle_WaitForVblank pops.
  *
  * 3. NOT THE NMI SHADOW. f1f5 masks $b1 from $b3 on entry and f225 restores it
  *    on exit. Replacing the whole routine skips both, which is correct --
@@ -122,13 +122,13 @@ RecompReturn SimCity_WaitForVblank(CpuState *cpu) {
  * here (03:d84d through the d862 loop), so there is no seeding to redo: the
  * state in $59/$5b IS the starting point.
  */
-unsigned long g_simcity_mapgen_hle_calls = 0;
+unsigned long g_sc_mapgen_hle_calls = 0;
 
-RecompReturn SimCity_MapGen(CpuState *cpu) {
+RecompReturn ScHle_MapGen(CpuState *cpu) {
     static ScMapGenState gs;
     ScMapGenPrng pr;
 
-    g_simcity_mapgen_hle_calls++;
+    g_sc_mapgen_hle_calls++;
 
     pr.s0 = (uint16)(g_ram[0x59] | (g_ram[0x5a] << 8));
     pr.s1 = (uint16)(g_ram[0x5b] | (g_ram[0x5c] << 8));
@@ -154,7 +154,7 @@ RecompReturn SimCity_MapGen(CpuState *cpu) {
             if (gs.map[i] & 0x3ff) nz++;
         fprintf(stderr, "[mapgen_hle] call %lu: %u cells, %lu draws, "
                         "prng %04X/%04X\n",
-                g_simcity_mapgen_hle_calls, nz, g_sc_mapgen_prng_steps,
+                g_sc_mapgen_hle_calls, nz, g_sc_mapgen_prng_steps,
                 (unsigned)pr.s0, (unsigned)pr.s1);
     }
 

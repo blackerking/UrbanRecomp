@@ -1,7 +1,7 @@
-/* Game-specific RAM variable declarations for SimCity.
+/* Game-specific RAM variable declarations for the game.
  *
  * Scaffold: just the framework-protocol variables the shared runner expects.
- * Populate with named SimCity RAM regions as they're identified (game-state
+ * Populate with named game RAM regions as they're identified (game-state
  * byte, sprite/tile tables, city-data pointers, etc.) as bring-up proceeds —
  * for now generated code addresses memory by raw offset.
  */

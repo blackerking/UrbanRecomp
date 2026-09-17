@@ -1,4 +1,4 @@
-# SimCity (SNES, US) ROM map
+# ROM map (US image)
 
 > **CORRECTION:** entries below that describe `$011c`/`$ca`/`$0124` low
 > nibbles as "hardware-guaranteed zero" and treat `AND #$0f00` direction
@@ -108,7 +108,7 @@ confidence notes on each -- summary table only below.
 | `00:928f-92cb` | *(shared edge-detector body)* | Busy-waits on `$4212 & 1` (auto-joypad-read-in-progress) before reading each port; XORs new vs. previous value for edge-detect, writes held/edge state to `$0123,X`/`$c9,X` **and** `$011b,X` (`92c7`) -- confirmed genuinely populates `$011b` with real data, contradicting a naive "always zero" read elsewhere (see `$011b` WRAM entry) |
 | `01:afbe` | *(fast-travel scroll increment, FIXED and confirmed working)* | A 4-way `LSR`/`BCC` bit-ladder over `$01c1` (16-bit `LDA`, but only bits 0-3 tested): bit0 (Right) -> `afc6: INC $01bd`; bit1 (Left) -> `afcc: DEC $01bd`; bit2 (Down) -> `afd2: INC $01bf`; bit3 (Up) -> `afd8: DEC $01bf`. `$01bd`/`$01bf` are map scroll-X/Y. Called from the tail of `01:8d26` once `01:8d36`'s direction-nibble read is fixed (was the actual bug -- see `01:8d26`). Confirmed end-to-end via deterministic `--load-state`+`--input` testing: holding B+Right/B+Up reaches `afc6`/`afd8` respectively, and a before/after WRAM dump shows `$01bd`/`$01bf` genuinely changing |
 | `00:8211` | *(COP syscall dispatcher)* | `CLI ; PHB ; PEA $0000 ; PLB ; PLB ; REP #$20 ; REP #$10 ; ASL A ; TAX ; JSR ($8223,X) ; PLB ; RTI`. An 11-entry service table at `00:8223`, service number in `A`, ~309 call sites ROM-wide. Table: 0/5/6 -> `930d`, 1 -> `86a4`, 2 -> `8ea9`, 3 -> `8e43`, 4 -> `8e75`, 7 -> `9479`, 8 -> `90dd` (LC_LZ5), 9 -> `8f82`, 10 -> `86c8`. Confirmed live by bsnes trace (`A=4` dispatched to `008e75`, `A=0` to `00930d`) |
-| `00:930d` | ***(COP service 0 -- wait for vblank; the LLE-scheduler yield primitive)*** | `SEP #$20 ; STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6 ; RTS`. Spins until the NMI handler releases it with `INC $b9` at `00:80bc` (gated on bit 7 of `$00b1`, which service 4 at `00:8e75` sets). 133 call sites -- the most-used service. **This is SimCity's once-per-frame quiescence point**, i.e. the "which PCs are the yield primitives" answer `snesrecomp/docs/LLE_SCHEDULER.md` asks each game for. Unlike Mega Man X's coroutine-switch yield, this one plainly returns via `RTS` |
+| `00:930d` | ***(COP service 0 -- wait for vblank; the LLE-scheduler yield primitive)*** | `SEP #$20 ; STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6 ; RTS`. Spins until the NMI handler releases it with `INC $b9` at `00:80bc` (gated on bit 7 of `$00b1`, which service 4 at `00:8e75` sets). 133 call sites -- the most-used service. **This is the game's once-per-frame quiescence point**, i.e. the "which PCs are the yield primitives" answer `snesrecomp/docs/LLE_SCHEDULER.md` asks each game for. Unlike Mega Man X's coroutine-switch yield, this one plainly returns via `RTS` |
 | `$00c7` | *(spin counter / PRNG seed source)* | Incremented once per spin iteration while `00:930d` waits for vblank, and read by `00:823e` to seed `$59`/`$5b`/`$5d` -- so the PRNG is seeded from how long the player took, which is what makes generated maps vary |
 | `00:824b` / `00:824f` | ***(PRNG step -- NOT a checksum)*** | `CLC ; LDA $59 ; STA $5d ; ADC $5b ; STA $59 ; ADC $5d ; STA $5b ; RTS` -- an additive (lagged-Fibonacci-with-carry) generator over two 16-bit state words, returning the new `$5b` in `A`. It takes **no input**, which is what rules out a checksum: it folds nothing in, it only advances state. Earlier notes here and in the README called it a "shared checksum/hash routine"; the seeding at `03:d840` does fold `$0b27`-`$0b29` in, but that happens once, outside this routine. Proof it is used as randomness: `01:f1fd` calls it and immediately does `AND #$00ff ; CMP #$0056 ; BCS`, i.e. branches on a ~34%/66% split of the returned byte |
 | `03:d840`-`03:d889` | *(map-generation seeding)* | `LDA $0b28 ; EOR #$ffff ; ROL A x5 ; ADC #$1238` seeds `$5b`; a second mix of all three seed bytes gives `AND #$001f -> X`, then `JSL $00824b ; DEX ; BPL` runs the PRNG **1-32 times, a seed-dependent count** (not the fixed 10 iterations previously recorded). Then `JSL $01f1ed` and `JSL $02923f` do the actual work |
@@ -473,7 +473,7 @@ Sea sand island — which is why it can be Sylt without inventing any terrain.
 
 The game treats it as a scenario: it comes up 1991 JAN, $20 000, population 0,
 with "5 years to complete scenario". The briefing it shows is free play's
-"Welcome to the world of SIMCITY" (index 8 falls off the eight-entry seed
+"Welcome to the world of <title>" (index 8 falls off the eight-entry seed
 tables, so `SC_NINTH` supplies free play's values).
 
 Note index **7** is already the `Free` card, 1991 — the ninth is genuinely
@@ -909,7 +909,7 @@ not just inferred from the option table's ordering.
   unfixed; `SC_AUDIO_DEBUG` (periodic drain-loop stats) was added for the
   next attempt.
 - **Widescreen** (`docs/PLAN_widescreen.md`): scoped, not implemented --
-  the shared engine already has the rendering machinery; needs SimCity-
+  the shared engine already has the rendering machinery; needs game-
   specific BG-layer identification and visual verification.
 
 ## Simulation tick, calendar, seasons, population and the annual budget
@@ -2566,7 +2566,7 @@ which set `$025d`/`$025f`/`$0261` and issue `COP #$00` with `A = 2`.
 ### There is no "the logo has left the screen" signal
 
 Worth stating because it decides how the widescreen artifact can be fixed. The
-SimCity sign is ordinary tilemap content: it is drawn once and the phase-1
+title sign is ordinary tilemap content: it is drawn once and the phase-1
 scroll carries it left, and when it passes x=0 the ROM does nothing at all --
 hardware clips at the screen edge, so there is nothing to do. The mask to
 `#$01ff` means it eventually wraps back around, which is why it reappears
@@ -2626,7 +2626,7 @@ The twelve lists at `05:9696`:
 | 8, 9 | `9836`, `9892` | BG2 r14/r15, 4 | two blinking antenna lights |
 | 11 | `9754` | BG1 r16, 6 | lit windows |
 
-### The SimCity sign is NOT in the animation driver
+### The title sign is NOT in the animation driver
 
 Decoded the CHR for every tile every list writes. All of it is lit windows and
 blinking antenna lights; the three variants of lists 7-10 differ by a SINGLE
@@ -2645,7 +2645,7 @@ scroll, and not in the per-frame animator. The remaining candidates are OBJ
 (the earlier OBJ-clip measurement removed 145 margin samples on the title,
 never attributed) and a one-off tilemap write outside this driver.
 
-### The SimCity sign is OBJ (finally located)
+### The title sign is OBJ (finally located)
 
 Dumped OAM on the title with the sign stuck at the left edge (`SC_TITLE_DUMP`
 now writes OAM and the OBJ tile bases alongside VRAM):
@@ -3067,7 +3067,7 @@ rules" -- the top page is plumbing, and the actual per-tick rules sit further
 down the list.
 
 `$7F0200` is the same map the generator writes, so the accessors, the tile
-weight ladder at `03:9e0c` and `src/simcity_mapgen.c` are all three looking at
+weight ladder at `03:9e0c` and `src/sc_mapgen.c` are all three looking at
 one array in the same 10-bit format.
 
 ### The per-tile attribute table, `03:84eb`
@@ -3313,7 +3313,7 @@ work genuinely costs ~1.8M instructions. The graph screen next door is instant
 because it has almost nothing to decompress.
 
 Making it faster therefore means doing the *work* on the host, the way
-`src/simcity_mapgen.c` replaced the generator -- not adjusting timing. The
+`src/sc_mapgen.c` replaced the generator -- not adjusting timing. The
 target is the decompressor at `00:9100`/`00:9200` (31% of the window) and
 whatever `02:8b00` is (35%, and still unidentified -- it holds no
 `JSL $008206`, so it is not part of the upload pacing). That is an HLE with the
@@ -3409,7 +3409,7 @@ wait means doing the decompressor too.
 
 ### `00:90dd` -- the stream decompressor, decompiled and replaced
 
-48% of the overview-map load. `src/simcity_decomp.c` does the same work on the
+48% of the overview-map load. `src/sc_decomp.c` does the same work on the
 host; `SC_DECOMP_FAST` is on by default, `=0` disables it.
 
 The listing came from `tools/dis_cov.py`, and that mattered here: this routine
@@ -4077,7 +4077,7 @@ possible at 8x8 without any new artwork, at one sprite per character.
 
 c5665a1 relocated the donor's records for `$0C $0D $0F $10` instead of
 copying the whole region, which fixed the title but broke the menu: no
-option text, sprites in the wrong places, the SimCity logo gone.
+option text, sprites in the wrong places, the title logo gone.
 
 The indices do not mean the same thing in the two builds:
 
@@ -4139,7 +4139,7 @@ the sheet is a different, smaller face -- an earlier lead, and the wrong one.
 
 ### Still open: which record draws which menu option
 
-`$10` is the SimCity **logo** -- its tiles `$120`-`$12C` are rows 18-19 of the
+`$10` is the title **logo** -- its tiles `$120`-`$12C` are rows 18-19 of the
 sheet, which is logo artwork, not text. That is why dropping the German `$10`
 (their SCHAUPLAETZE) onto it blanked the logo in play. The records that draw
 the option lines have not been identified: an OAM watch reports only changes,
@@ -4159,7 +4159,7 @@ With that, the menu:
 
 | element | y | sprites | tiles |
 |---|---|---|---|
-| SimCity logo | 23, 39 | 14, 16x16 | `$100`-`$10C`, `$120`-`$12C` |
+| Title logo | 23, 39 | 14, 16x16 | `$100`-`$10C`, `$120`-`$12C` |
 | cursor / box | 55-71 | 15, 8x8 | `$0b9`, `$10e`-`$13f` |
 | practice line | 112 | 5 | `$0c2` `$066` `$068` `$06a` `$06c` |
 | start-new-city line | 136 | 7 | `$022` `$06e` `$0c4` `$0c6` `$0c8` `$062` `$064` |
@@ -4192,7 +4192,7 @@ the log is the emitter writing its own scratch; the caller is bank `$02`.
 ```
 02:BC94  LDA #$0080 ; STA $025d ; STA $025f   ; bases 128, 128
 02:BC9D  LDA #$000d ; STA $0261 ; COP         ; record $0D -- box / cursor
-02:BCAA  LDA #$0010 ; STA $0261 ; COP         ; record $10 -- SimCity logo
+02:BCAA  LDA #$0010 ; STA $0261 ; COP         ; record $10 -- title logo
 02:BCB7  LDA #$0088 ; STA $025d               ; x base 136
 02:BCBD  LDA $44 ; BEQ $bcd0                  ; saved-game flag
 02:BCC1    LDA #$000e ; STA $0261 ; COP       ;   record $0E, then falls into
@@ -4559,8 +4559,8 @@ Checked against the French cartridge, which is the one that spends carefully:
 #### The French build
 
 ```
-text_tool.py import  --donor "Sim City (F).sfc" --briefs --out translation_fr.bin
-text_tool.py packets --donor "Sim City (F).sfc" --hud \
+text_tool.py import  --donor fr.sfc --briefs --out translation_fr.bin
+text_tool.py packets --donor fr.sfc --hud \
     --menu-text "ENTRAINE-TOI|NOUVELLE CITE|CHOISIS SCENARIO" \
     --out translation_fr_selector.scpk
 ```
@@ -5089,7 +5089,7 @@ snapshot held the PPU's registers and memories but not its CPU-port latches
 so a state saved while the game was uploading tiles sent the uploads after
 the load to the wrong place. States now carry those latches, the host's
 master clock and its HDMA walker behind a versioned header (taken from the
-adaptive-renderer PR, blackerking/SimCitySNESRecomp#1). A save/restore at
+adaptive-renderer PR, blackerking/UrbanRecomp#1). A save/restore at
 frame 3300 of a San Francisco run matched the uninterrupted run for 300
 frames -- WRAM hash, CPU registers, master clock -- and all 12 captured
 pictures byte for byte. Old states still load, with a warning, and behave as

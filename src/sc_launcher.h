@@ -7,8 +7,8 @@
  * variable set by hand still wins. The launcher itself is optional: builds
  * without recomp-ui, and hosts without OpenGL 3, start the game directly with
  * the saved settings. */
-#ifndef SIMCITY_SC_LAUNCHER_H
-#define SIMCITY_SC_LAUNCHER_H
+#ifndef SC_LAUNCHER_H_INCLUDED
+#define SC_LAUNCHER_H_INCLUDED
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -38,9 +38,27 @@ bool ScSettingsSave(const ScSettings *s, const char *path);
 void ScSettingsApply(const ScSettings *s);
 const char *ScLanguageLabel(int language);
 
+/* FNV-1a 32 of the five known 512 KB images (docs/REGIONS.md). */
+#define SC_ROM_FNV_US 0xec01686aul
+#define SC_ROM_FNV_EU 0xb76b1a0dul
+#define SC_ROM_FNV_FR 0xe1f99069ul
+#define SC_ROM_FNV_DE 0xaeca7623ul
+#define SC_ROM_FNV_JP 0xccb8c347ul
+
+/* The .sfc/.smc file in the working directory whose contents have this
+ * fingerprint, whatever it is called. False when there is none. */
+bool ScFindRom(unsigned long fnv, char *out, size_t out_n);
+
 /* Returns 1 to launch (s->rom holds the ROM), 0 to quit, -1 when no launcher
  * could be shown -- then the caller starts as if it had been skipped. */
 int ScLauncherRun(ScSettings *s, const char *settings_path);
+
+/* The Urban Recomp icon on a window (assets/img/icon.png next to the
+ * executable). Windows builds also carry it as the executable's icon, which
+ * SDL already gives every window; this covers the other platforms. A no-op in
+ * builds without the launcher, which have no image decoder. */
+struct SDL_Window;
+void ScSetWindowIcon(struct SDL_Window *window);
 
 /* The SNES pad through the launcher's keyboard bindings (keybinds.ini).
  * ScKeybindsInit before the first read, once SDL video is up: a first run
@@ -52,4 +70,4 @@ unsigned ScKeybindsRead(const unsigned char *keys);
 /* Whether a scancode is bound to any pad button. */
 bool ScKeybindsUses(int scancode);
 
-#endif /* SIMCITY_SC_LAUNCHER_H */
+#endif /* SC_LAUNCHER_H_INCLUDED */

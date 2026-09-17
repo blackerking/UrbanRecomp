@@ -22,8 +22,8 @@ for byte:
 ```bash
 for F in 0 1; do
   SC_FIBER=$F SC_WIDESCREEN=64 SC_DUMP_DIR=out$F SC_DUMP_INTERVAL=1 \
-    SC_DUMP_START=145 ./SimCitySNESRecomp --load-state savestate_0.bin \
-    --qualify 158 "Sim City (U) [!].sfc"
+    SC_DUMP_START=145 ./UrbanRecomp --load-state savestate_0.bin \
+    --qualify 158 us.sfc
 done
 ```
 

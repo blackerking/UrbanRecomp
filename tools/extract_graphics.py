@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract SimCity (SNES) compressed graphics and dialog text as PNG/bin files.
+"""Extract the game's compressed graphics and dialog text as PNG/bin files.
 
 Decodes the Nintendo compression format used throughout this ROM for the
 font tileset and all advisor/scenario dialog text (sometimes called
@@ -229,11 +229,15 @@ def textscen_convert(textscen):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rom", default=os.path.join(os.path.dirname(__file__), "..", "simcity.sfc"))
+    ap.add_argument("--rom", default=None,
+                    help="the ROM to read (the US one, found by contents, if omitted)")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "extracted_assets"))
     ap.add_argument("--version", default="us", choices=sorted(VERSIONS))
     args = ap.parse_args()
 
+    if args.rom is None:
+        from find_rom import find_rom
+        args.rom = find_rom(args.version)
     if not os.path.exists(args.rom):
         sys.exit("ROM not found at %s -- supply your own legally obtained copy (see SETUP.md)" % args.rom)
     rom = open(args.rom, "rb").read()

@@ -1,7 +1,7 @@
 # Handover to Metal Marines (and any other snesrecomp game repo)
 
 Problems this project solved the expensive way, written down so a sibling repo
-does not pay for them twice. Nothing here is SimCity-specific unless it says
+does not pay for them twice. Nothing here is game-specific unless it says
 so. Ordered by how much time each one cost.
 
 Metal Marines already hit #1 independently, which is why this file exists.
@@ -54,7 +54,7 @@ you want to run compiled code. Then:
 - **Nothing else drives your PPU.** `interp_bridge_run_loop` advances the APU
   and `master_cycles` but never the beam; a fiber freezes it entirely. Any ROM
   loop that waits on a beam-derived register (`$4212` auto-joypad-busy is the
-  classic) deadlocks. SimCity's *boot path* has one, before the first vblank
+  classic) deadlocks. This game's *boot path* has one, before the first vblank
   wait, so no amount of AOT coverage makes a compiled-entry design boot.
 - `interp816_opcode_hook` looks like the escape hatch. It is declared in
   `interp816.h`, defined as a no-op in `interp_bridge.c`, and **never called
@@ -125,7 +125,7 @@ callees returning several widths from one entry variant (branch
 
 Measured here, both counter-intuitive:
 
-- **Run length.** Time-gated code needs long runs. An in-game year in SimCity
+- **Run length.** Time-gated code needs long runs. An in-game year here
   is 9,600 frames; every hunt was 2,600 and therefore *structurally incapable*
   of reaching the annual budget path. Work out what a path costs in frames
   before concluding it is unreachable.
@@ -283,7 +283,7 @@ measurement, before anyone checked whether the pointer was null.
   it at all: push the frame with `cpu_push_interrupt_frame_at()` and point your
   resume PC at the vector, and the handler becomes the next thing your ordinary
   `run_loop` executes -- no nested entry.
-- **Do not expect byte-equal WRAM between two hosts.** SimCity increments `$c7`
+- **Do not expect byte-equal WRAM between two hosts.** The game increments `$c7`
   at the top of its vblank spin, so it counts *how many times the guest went
   round waiting* -- two hosts with different pacing cannot agree on it by
   construction, and it seeds the PRNG. Check whether your game has a counter

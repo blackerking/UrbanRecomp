@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <dirent.h>
+#endif
 
 #include "sc_sdl_compat.h"
 
@@ -11,7 +16,10 @@
 #include "recomp_launcher.h"
 #include "launcher_profile.h"
 #include "common/keybinds.h"   /* recomp-ui's, not the runner's */
+#include "common/launcher_gl.h"  /* launcher_image_load_rgba */
 #endif
+
+static const char kIconAsset[] = "assets/img/icon.png";
 
 const char *const kScSettingsPath = "sc-settings.ini";
 
@@ -40,7 +48,7 @@ static void translation_files(int language, char *blob, size_t blob_n,
 
 void ScSettingsDefaults(ScSettings *s) {
   memset(s, 0, sizeof(*s));
-  snprintf(s->rom, sizeof(s->rom), "%s", "simcity.sfc");
+  s->rom[0] = 0;   /* chosen in the launcher, or found by contents */
   s->window_scale = 3;
   s->enable_audio = 1;
   s->widescreen = 1;
@@ -51,6 +59,66 @@ void ScSettingsDefaults(ScSettings *s) {
   s->language = file_exists(blob) && file_exists(packets) ? SC_LANG_GERMAN
                                                           : SC_LANG_ENGLISH;
 }
+
+static int ascii_casecmp(const char *a, const char *b) {
+  for (;; a++, b++) {
+    int ca = *a >= 'A' && *a <= 'Z' ? *a + 32 : *a;
+    int cb = *b >= 'A' && *b <= 'Z' ? *b + 32 : *b;
+    if (ca != cb || !ca) return ca - cb;
+  }
+}
+
+static unsigned long fnv_of_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return 0;
+  unsigned long h = 2166136261ul;
+  long size = 0;
+  int c;
+  while ((c = fgetc(f)) != EOF) {
+    h = ((h ^ (unsigned long)c) * 16777619ul) & 0xfffffffful;
+    size++;
+  }
+  fclose(f);
+  return size == 0x80000 ? h : 0;
+}
+
+static bool rom_name(const char *name) {
+  const char *dot = strrchr(name, '.');
+  return dot && (!ascii_casecmp(dot, ".sfc") || !ascii_casecmp(dot, ".smc"));
+}
+
+#ifdef _WIN32
+bool ScFindRom(unsigned long fnv, char *out, size_t out_n) {
+  struct _finddata_t fd;
+  intptr_t h = _findfirst("*.*", &fd);
+  if (h == -1) return false;
+  bool found = false;
+  do {
+    if ((fd.attrib & _A_SUBDIR) || !rom_name(fd.name) || fd.size != 0x80000) continue;
+    if (fnv_of_file(fd.name) == fnv) {
+      snprintf(out, out_n, "%s", fd.name);
+      found = true;
+    }
+  } while (!found && _findnext(h, &fd) == 0);
+  _findclose(h);
+  return found;
+}
+#else
+bool ScFindRom(unsigned long fnv, char *out, size_t out_n) {
+  DIR *d = opendir(".");
+  if (!d) return false;
+  bool found = false;
+  struct dirent *e;
+  while (!found && (e = readdir(d)) != NULL) {
+    if (rom_name(e->d_name) && fnv_of_file(e->d_name) == fnv) {
+      snprintf(out, out_n, "%s", e->d_name);
+      found = true;
+    }
+  }
+  closedir(d);
+  return found;
+}
+#endif
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -88,7 +156,7 @@ bool ScSettingsSave(const ScSettings *s, const char *path) {
   snprintf(tmp, sizeof tmp, "%s.tmp", path);
   FILE *f = fopen(tmp, "w");
   if (!f) return false;
-  fprintf(f, "; SimCitySNESRecomp settings, written by the launcher.\n"
+  fprintf(f, "; Urban Recomp settings, written by the launcher.\n"
              "; Environment variables set by hand take precedence.\n"
              "[Launcher]\nrom=%s\nskip_launcher=%d\n"
              "[Display]\nwindow_scale=%d\nfullscreen=%d\nlinear_filter=%d\nwidescreen=%d\n"
@@ -145,8 +213,35 @@ int ScLauncherRun(ScSettings *s, const char *settings_path) {
 bool ScKeybindsInit(void) { return false; }
 unsigned ScKeybindsRead(const unsigned char *keys) { (void)keys; return 0; }
 bool ScKeybindsUses(int scancode) { (void)scancode; return false; }
+void ScSetWindowIcon(SDL_Window *window) { (void)window; (void)kIconAsset; }
 
 #else /* RECOMP_LAUNCHER */
+
+void ScSetWindowIcon(SDL_Window *window) {
+  if (!window) return;
+#if SNESRECOMP_SDL3
+  const char *base = SDL_GetBasePath();
+#else
+  char *base = SDL_GetBasePath();
+#endif
+  char path[1024];
+  snprintf(path, sizeof path, "%s%s", base ? base : "", kIconAsset);
+#if !SNESRECOMP_SDL3
+  SDL_free(base);
+#endif
+  int w = 0, h = 0;
+  unsigned char *pixels = launcher_image_load_rgba(path, &w, &h);
+  if (!pixels) return;
+#if SNESRECOMP_SDL3
+  SDL_Surface *surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, pixels, w * 4);
+  if (surf) { SDL_SetWindowIcon(window, surf); SDL_DestroySurface(surf); }
+#else
+  SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(pixels, w, h, 32, w * 4,
+                                                         SDL_PIXELFORMAT_RGBA32);
+  if (surf) { SDL_SetWindowIcon(window, surf); SDL_FreeSurface(surf); }
+#endif
+  launcher_image_free(pixels);
+}
 
 /* ── keyboard bindings ─────────────────────────────────────────────────── */
 
@@ -213,7 +308,7 @@ static bool gl3_available(void) {
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
   SDL_Window *w = snesrecomp_sdl_create_window(
-      "SimCity", 16, 16, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+      "Urban Recomp", 16, 16, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
   bool ok = false;
   if (w) {
     SDL_GLContext ctx = SDL_GL_CreateContext(w);
@@ -266,7 +361,7 @@ static int package_get(void *ctx, int i, RecompLauncherCModPackage *out) {
   COPY(out->id, "sc-sylt");
   COPY(out->name, "Sylt");
   COPY(out->version, "1");
-  COPY(out->author, "SimCitySNESRecomp contributors");
+  COPY(out->author, "Urban Recomp contributors");
   COPY(out->description, "The island of Sylt as a ninth scenario after Las Vegas.");
   out->enabled = s_mod_settings->sylt;
   return 1;
@@ -281,7 +376,7 @@ static int feature_get(void *ctx, int i, RecompLauncherCModFeature *out) {
   COPY(out->package_version, "1");
   COPY(out->name, "Sylt scenario");
   COPY(out->group, "Scenarios");
-  COPY(out->author, "SimCitySNESRecomp contributors");
+  COPY(out->author, "Urban Recomp contributors");
   COPY(out->description, "Adds Sylt, 2047-2057, as the ninth card on the scenario "
                          "selector. Goal: a city score of 500 and 10,000 people.");
   out->enabled = s_mod_settings->sylt;
@@ -363,7 +458,7 @@ int ScLauncherRun(ScSettings *s, const char *settings_path) {
   RecompLauncherCGameInfo game;
   memset(&game, 0, sizeof game);
   launcher_profile_apply("snes", &game);
-  game.name = "SimCity";
+  game.name = "Urban Recomp";
   game.region = "USA";
   game.platform = "SUPER NINTENDO";
   game.num_players = 1;
@@ -397,9 +492,13 @@ int ScLauncherRun(ScSettings *s, const char *settings_path) {
 #else
   char *base = SDL_GetBasePath();
 #endif
+  char icon[1024];
+  snprintf(icon, sizeof icon, "%s%s", base ? base : "", kIconAsset);
+  game.boxart_path = "assets/img/boxart.jpg";
+  game.window_icon_path = icon;
   char out_rom[sizeof s->rom];
   out_rom[0] = 0;
-  const int rc = recomp_launcher_run_window("SimCity", &io, &game,
+  const int rc = recomp_launcher_run_window("Urban Recomp", &io, &game,
                                             base ? base : ".", s->rom,
                                             out_rom, sizeof out_rom);
 #if !SNESRECOMP_SDL3

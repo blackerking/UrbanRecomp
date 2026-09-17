@@ -252,7 +252,7 @@ it, then the frame the guest reached 0 the margins snapped to 189.3 -- full
 brightness -- and held it for twelve frames.
 
 The per-line margin blank was painting it. It writes the backdrop through
-`brightnessMult`, and SimCity ends a fade by writing `$8f`: force blank on,
+`brightnessMult`, and the game ends a fade by writing `$8f`: force blank on,
 **brightness restored to 15**. So it computed `cgram[0]` at full intensity and
 painted the sky into the margins while the guest was black. The PPU had already
 blanked the line correctly; this painted over it.
@@ -473,7 +473,7 @@ armed, which is why it is the one quoted.
 pixels different because both dumps came from the same binary. Hash the
 executable between the two builds; do not trust an empty error grep.
 
-## Known bug: the title's SimCity sign in the left margin
+## Known bug: the title sign in the left margin
 
 Not fixed, and deliberately left. The sign travels out through the left margin
 correctly, but it then PARKS at x = -32 for about 1026 frames before the

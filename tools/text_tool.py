@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export SimCity (SNES) message text for translation, and pack it back.
+"""Export the game's message text for translation, and pack it back.
 
 The goal is that somebody who does not read 65816 can translate the game.
 `export` writes a UTF-8 JSON file with one entry per message; `pack` turns an
@@ -296,7 +296,8 @@ BRIEF_BODY_MAX = BRIEF_COLS - BRIEF_BODY_COL        # 28
 
 # (uppercase base, lowercase base) per region. NOT "lo = up + 0x30": that is
 # the US layout, and assuming it everywhere put German capitals 16 slots out.
-# Reported from play as "2imSity" for SimCity and "Uin starkes Urdbeben" --
+# Reported from play as a title with its S drawn as "2", and "Uin starkes
+# Urdbeben" --
 # every wrong character a capital, every one off by exactly +16, lower case
 # untouched. Working back: German S rendered as the digit 2, i.e. up+0x20+2,
 # so German S sits at $6c3 and its upper-case bank starts at $6b1.
@@ -410,7 +411,7 @@ def brief_rows_text(data, title_base, body_base, space_alias=None,
 def detect_region(rom_path):
     rom = open(rom_path, "rb").read()
     if len(rom) < 0x8000:
-        sys.exit("%s is too small to be a SimCity ROM" % rom_path)
+        sys.exit("%s is too small to be a supported ROM" % rom_path)
     b = rom[0x7fd9]
     if b not in REGION_BYTE:
         sys.exit("%s: region byte $%02X is not one this tool knows "
@@ -1963,7 +1964,11 @@ def _notices_for(a, us):
 # the 16-wide sheet that holds any unreferenced artwork -- runtime word strips
 # are unreferenced artwork, and their blank padding is on the same rows. The
 # entries are scoped to $14 = $00, so the briefing screen keeps its tiles.
-US_ROM_DEFAULT = "Sim City (U) [!].sfc"
+# The US image, wherever it is and whatever it is called: tools/find_rom.py
+# matches ROMs in the repository root by their contents.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from find_rom import find_rom  # noqa: E402
+US_ROM_DEFAULT = find_rom("us", required=False) or "us.sfc"
 REPORT_CHR = 0x04875C
 REPORT_SCREEN = 0x00
 REPORTS = (("budget", 0x05BF0E), ("evaluation", 0x05C0C9),
@@ -4501,7 +4506,7 @@ def cmd_packets(a):
     tchr = find_twin(pk, uchr)
     if not tmap or not tchr:
         sys.exit("no counterpart for the selector packets in %s -- is this a "
-                 "SimCity ROM of another region?" % os.path.basename(a.donor))
+                 "ROM of the same game from another region?" % os.path.basename(a.donor))
     dmapoff, magree, dmap = tmap
     dchroff, cagree, dchr = tchr
     print("selector tilemap  us $%06X  <-  donor $%06X  (%d/%d bytes agree)"
@@ -5126,7 +5131,7 @@ def main():
     i.set_defaults(fn=cmd_import)
     i.add_argument("--donor", required=True, help="a German/French/European ROM")
     i.add_argument("--out", required=True)
-    i.add_argument("--us-rom", default="Sim City (U) [!].sfc",
+    i.add_argument("--us-rom", default=US_ROM_DEFAULT,
                    help="the US image the blob targets (for briefing layout)")
     # OFF by default: the packet INDEX does not mean the same screen in every
     # region. Measured exactly -- the live German "Advice" screen is German
@@ -5179,7 +5184,7 @@ def main():
     sf.add_argument("--out", required=True)
     pc = sub.add_parser("packets", help="patch the selector at its ROM source")
     pc.set_defaults(fn=cmd_packets)
-    pc.add_argument("--rom", default="Sim City (U) [!].sfc",
+    pc.add_argument("--rom", default=US_ROM_DEFAULT,
                     help="the US image the patch targets")
     pc.add_argument("--donor", help="a translated ROM, for the scenario card "
                     "names and the building labels. Without it only the menu "
@@ -5266,63 +5271,63 @@ def main():
     mt = sub.add_parser("maptitles", help="the map window titles as a PNG to paint")
     mt.set_defaults(fn=cmd_maptitles)
     mt.add_argument("--out", required=True)
-    mt.add_argument("--rom", default="Sim City (U) [!].sfc")
+    mt.add_argument("--rom", default=US_ROM_DEFAULT)
     mt.add_argument("--from", metavar="ROM",
                     help="export this cartridge's titles instead")
 
     sv = sub.add_parser("saveload", help="the save/load dialog as a PNG and a JSON")
     sv.set_defaults(fn=cmd_saveload)
     sv.add_argument("--out", required=True, metavar="DIR")
-    sv.add_argument("--rom", default="Sim City (U) [!].sfc")
+    sv.add_argument("--rom", default=US_ROM_DEFAULT)
     sv.add_argument("--from", metavar="ROM",
                     help="export this cartridge's dialog instead")
 
     ts = sub.add_parser("tilesets", help="the tile-for-tile sets as PNGs to paint")
     ts.set_defaults(fn=cmd_tilesets)
     ts.add_argument("--out", required=True, metavar="DIR")
-    ts.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ts.add_argument("--rom", default=US_ROM_DEFAULT)
     ts.add_argument("--from", metavar="ROM",
                     help="export this cartridge's sets instead")
 
     gx = sub.add_parser("graphics", help="every translatable picture into one folder")
     gx.set_defaults(fn=cmd_graphics)
     gx.add_argument("--out", required=True, metavar="DIR")
-    gx.add_argument("--rom", default="Sim City (U) [!].sfc")
+    gx.add_argument("--rom", default=US_ROM_DEFAULT)
     gx.add_argument("--from", metavar="ROM",
                     help="export this cartridge's pictures instead")
 
     sl = sub.add_parser("selector", help="the scenario selector's words as a PNG to paint")
     sl.set_defaults(fn=cmd_selector)
     sl.add_argument("--out", required=True)
-    sl.add_argument("--rom", default="Sim City (U) [!].sfc")
+    sl.add_argument("--rom", default=US_ROM_DEFAULT)
     sl.add_argument("--from", metavar="ROM",
                     help="export this cartridge's selector instead")
 
     st = sub.add_parser("strips", help="the evaluation's word strips as a PNG to paint")
     st.set_defaults(fn=cmd_strips)
     st.add_argument("--out", required=True)
-    st.add_argument("--rom", default="Sim City (U) [!].sfc")
+    st.add_argument("--rom", default=US_ROM_DEFAULT)
     st.add_argument("--from", metavar="ROM",
                     help="export this cartridge's strips instead")
 
     ms = sub.add_parser("mapselect", help="the map select words as a PNG to paint")
     ms.set_defaults(fn=cmd_mapselect)
     ms.add_argument("--out", required=True)
-    ms.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ms.add_argument("--rom", default=US_ROM_DEFAULT)
     ms.add_argument("--from", metavar="ROM",
                     help="export this cartridge's map select instead")
 
     ac = sub.add_parser("accents", help="the accented glyph sets as a PNG to paint")
     ac.set_defaults(fn=cmd_accents)
     ac.add_argument("--out", required=True)
-    ac.add_argument("--rom", default="Sim City (U) [!].sfc")
+    ac.add_argument("--rom", default=US_ROM_DEFAULT)
     ac.add_argument("--from", metavar="ROM",
                     help="export this cartridge's glyphs instead")
 
     pn = sub.add_parser("panels", help="the in-city panels as a PNG to paint")
     pn.set_defaults(fn=cmd_panels)
     pn.add_argument("--out", required=True)
-    pn.add_argument("--rom", default="Sim City (U) [!].sfc")
+    pn.add_argument("--rom", default=US_ROM_DEFAULT)
     pn.add_argument("--from", metavar="ROM",
                     help="export this cartridge's panels instead")
 
@@ -5330,7 +5335,7 @@ def main():
                         "screens as PNGs to paint")
     rp.set_defaults(fn=cmd_reports)
     rp.add_argument("--out", required=True)
-    rp.add_argument("--rom", default="Sim City (U) [!].sfc")
+    rp.add_argument("--rom", default=US_ROM_DEFAULT)
     rp.add_argument("--from", metavar="ROM",
                     help="export this cartridge's screens instead (German, French)")
 
@@ -5339,7 +5344,7 @@ def main():
     tp.add_argument("--out", required=True)
     tp.add_argument("--from", metavar="ROM",
                     help="seed the strings from this ROM (default: the US one)")
-    tp.add_argument("--us-rom", default="Sim City (U) [!].sfc")
+    tp.add_argument("--us-rom", default=US_ROM_DEFAULT)
 
     tr = sub.add_parser("translate", help="an edited template -> a runnable "
                         "blob and packet")
@@ -5347,7 +5352,7 @@ def main():
     tr.add_argument("--in", required=True)
     tr.add_argument("--out-prefix", required=True,
                     help="writes PREFIX.bin and PREFIX_selector.scpk")
-    tr.add_argument("--us-rom", default="Sim City (U) [!].sfc")
+    tr.add_argument("--us-rom", default=US_ROM_DEFAULT)
     tr.add_argument("--donor", help="lift the message font's accented glyphs "
                     "and the scenario card names from this cartridge")
     tr.add_argument("--hud", action="store_true",
@@ -5380,7 +5385,7 @@ def main():
     lb = sub.add_parser("labels", help="export the main map's building "
                                        "labels as an editable image")
     lb.set_defaults(fn=cmd_labels)
-    lb.add_argument("--rom", default="Sim City (U) [!].sfc")
+    lb.add_argument("--rom", default=US_ROM_DEFAULT)
     lb.add_argument("--out", required=True)
     g = sub.add_parser("glyphs"); g.set_defaults(fn=cmd_glyphs)
     g.add_argument("--rom", required=True); g.add_argument("--version", required=True)

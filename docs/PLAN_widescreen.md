@@ -23,17 +23,17 @@ available this session.
   `256 + 2*extra`.
 - `PpuSetExtraSideSpace(ppu, left, right, bottom)`: asymmetric margin,
   re-applied every frame (for games whose own scroll state should drive
-  the margin dynamically -- probably not needed for SimCity, which likely
+  the margin dynamically -- probably not needed for this game, which likely
   wants a fixed border).
 - `PpuSetWidescreenLayerMask(ppu, bg_layer_mask)`: restrict *which* BG
   layers are allowed to render into the side margins at all.
 - `PpuSetWidescreenLayerClamp(ppu, mask)`: per-layer opt-out, keeping bit
   L's layer authentically 256-wide even when others extend (this is very
-  likely what SimCity wants for its toolbar/HUD layer).
+  likely what the game wants for its toolbar/HUD layer).
 - `PpuSetWidescreenLayerMirror`/`PpuSetWidescreenLayerRepeat`: fill the
   new margin columns by reflecting or repeating the authentic edge
   scanline, for layers that don't have real off-screen tile data to show
-  (may or may not apply to SimCity's map -- see open question below).
+  (may or may not apply to the game's map -- see open question below).
 - `PpuSetWidescreenHudSplit`/`PpuSetWidescreenBg3Widen`: finer-grained
   HUD-specific controls, probably not needed for a first pass.
 
@@ -65,11 +65,11 @@ available this session.
    `docs/INVESTIGATION_hdma.md`) and some other layer (likely BG3, given
    the `ppu.h` comments' generic "BG3 carries the HUD" framing) being the
    toolbar/status readouts -- but this hasn't been confirmed for
-   SimCity specifically. Get this right before wiring up
+   the game specifically. Get this right before wiring up
    `PpuSetWidescreenLayerClamp`, or the toolbar could stretch/tile
    incorrectly into the new margins.
 2. **Does the game's own simulation track tiles beyond the visible
-   256px window at all?** If SimCity's BG tilemap only ever has valid
+   256px window at all?** If the game's BG tilemap only ever has valid
    data for the currently-visible + a small scroll buffer, showing more
    of it via widescreen might reveal garbage/stale tiles at the new
    edges rather than genuine extra city content. This needs visual

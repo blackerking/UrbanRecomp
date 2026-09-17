@@ -4,8 +4,8 @@
  * no hardware-register access, small extent. These are the routines
  * where synthetic entry state is a fair test -- see the tool for why
  * that restriction exists. */
-#define SIMCITY_PURE_LEAF_COUNT 34
-static const struct { unsigned pc24, end; } kSimCityPureLeaves[] = {
+#define SC_PURE_LEAF_COUNT 34
+static const struct { unsigned pc24, end; } kScPureLeaves[] = {
     { 0x00823Eu, 0x00824Au },
     { 0x00824Fu, 0x00825Eu },
     { 0x008436u, 0x008448u },

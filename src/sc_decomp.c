@@ -1,4 +1,4 @@
-/* SimCity (SNES) stream decompressor -- 00:90dd, decompiled.
+/* The game's stream decompressor -- 00:90dd, decompiled.
  *
  * Why this exists: entering the overview map from the menu freezes for ~140
  * frames, and this routine is 48% of that window (docs/ROM_MAP.md). The other
@@ -43,7 +43,7 @@
  * the short form's command already occupies, so both feed one dispatch.
  */
 
-#include "simcity_decomp.h"
+#include "sc_decomp.h"
 
 #include <string.h>
 

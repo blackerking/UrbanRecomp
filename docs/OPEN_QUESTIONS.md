@@ -152,7 +152,7 @@ so rebasing onto upstream lost no work: the regeneration is identical
 (1,625 variants, 1,532 AOT-eligible, 6,705 edges) and all eleven save states
 remain byte-identical between tiers.
 
-The submodule now sits on `simcity-main` = `origin/main` + **two** commits,
+The submodule now sits on a host branch = `origin/main` + **two** commits,
 both genuinely ours and both upstreamable:
 
 | commit | what | status |
@@ -1079,7 +1079,7 @@ the natural-runs union and is the one to extend.
 `tools/gen_align_check.py` is the third check, and the one that would actually
 catch a wrong `exit_mx_at`. The AOT differential cannot: this host still runs
 everything on the interpreter (`src/main.c`, "this host bypasses
-common_rtl.c entirely"), so `SimCitySNESRecompAOT` links the generated banks
+common_rtl.c entirely"), so `UrbanRecompAOT` links the generated banks
 without executing them, and byte-identical WRAM between the two builds says
 nothing about whether the emitted C is right.
 

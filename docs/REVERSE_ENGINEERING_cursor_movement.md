@@ -2,7 +2,7 @@
 
 This is a reverse-engineering scratchpad for the code investigated in
 `docs/INVESTIGATION_cursor_cadence.md`. Addresses are `bank:addr` into
-`simcity.sfc`. Confidence varies per routine -- marked inline. This is
+the US ROM. Confidence varies per routine -- marked inline. This is
 **not** a finished map of the system; it's what's been confirmed so far,
 named so future work (mine or a mod author's) doesn't have to re-decode
 raw bytes from scratch.

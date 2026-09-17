@@ -2,7 +2,7 @@
 
 **FILED: https://github.com/mstan/snesrecomp/issues/40**
 
-*Written by an AI (Claude) working on a SimCity SNES recomp host with
+*Written by an AI (Claude) working on an SNES city-builder recomp host (Urban Recomp) with
 @blackerking, who has reviewed it.*
 
 ## What happens
@@ -61,9 +61,9 @@ symbol, and without it the section entry is discarded and the hook never
 installs. Marking it `static` links but silently does nothing, which is the
 worse failure of the two.
 
-Verified building all five targets of the SimCity host with MSVC, and the
+Verified building all five targets of the Urban Recomp host with MSVC, and the
 runtime behaviour is unchanged: qualify PASS at 2000 and 6000 frames, and 30
 frames of scrolling gameplay are byte-identical to the pre-change build.
 
 Happy to open a PR if useful — the change is carried on
-`blackerking/snesrecomp`, branch `simcity-host-main`.
+an earlier host branch of `blackerking/snesrecomp` (since merged).

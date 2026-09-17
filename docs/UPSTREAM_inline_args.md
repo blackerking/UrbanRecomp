@@ -23,7 +23,7 @@ and the match requires a stack-relative store:
 }
 ```
 
-SimCity expresses the identical semantics the other common way — **pop the
+The game expresses the identical semantics the other common way — **pop the
 return address, adjust it, push it back**:
 
 ```
@@ -159,9 +159,9 @@ a rejected one.
 ## Reproducing
 
 ```bash
-git clone --recurse-submodules https://github.com/blackerking/SimCitySNESRecomp
-cd SimCitySNESRecomp
-# stage your own legally obtained SimCity (USA) as simcity.sfc
+git clone --recurse-submodules https://github.com/blackerking/UrbanRecomp
+cd UrbanRecomp
+# put your own legally obtained US ROM in the repository root (any file name)
 PYTHON=python bash tools/regen.sh --no-tests
 grep -n "L_AFD9_M0X0" src/gen/bank03_v2.c
 ```
@@ -191,7 +191,7 @@ PLX ; INX ... ; PHX                     index form       (00:98a0)
 `x_pulled`/`x_added` track the index form, and a new `mutates_x()` invalidates
 it on any other write to X, mirroring the existing `mutates_y()` treatment.
 
-Result on SimCity:
+Result on this game:
 
 | | before | after |
 |---|---|---|

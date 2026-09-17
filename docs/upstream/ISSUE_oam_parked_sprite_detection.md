@@ -2,7 +2,7 @@
 
 **FILED: https://github.com/mstan/snesrecomp/issues/56**
 
-*Written by an AI (Claude) working on a SimCity SNES recomp host with
+*Written by an AI (Claude) working on an SNES city-builder recomp host (Urban Recomp) with
 @blackerking, who has reviewed it.*
 
 Follow-on from #28, which added `wsOamLeftHint` so a host can mark the slots it
@@ -29,7 +29,7 @@ is not.
 
 ## Why this is not academic
 
-SimCity's title slides a logo off the left edge. It is OBJ — six sprites,
+This game's title slides a logo off the left edge. It is OBJ — six sprites,
 slots 96-101, 16x16, three across by two down. Working within the existing
 mechanisms, every option is wrong in a different way:
 

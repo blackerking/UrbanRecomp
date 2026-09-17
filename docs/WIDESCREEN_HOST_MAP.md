@@ -16,7 +16,7 @@ view's map (BG2) is a 32-column tilemap, so it cannot simply be widened -- 32
 columns is exactly 256 px, and letting it wrap tiles the city sideways. The
 question was what to put in the remaining 192 px.
 
-`SC_HOST_MAP=1` renders the map host-side from WRAM (`src/simcity_mapview.c`),
+`SC_HOST_MAP=1` renders the map host-side from WRAM (`src/sc_mapview.c`),
 which can draw any width. The work was in making that coexist with the guest's
 own picture.
 
@@ -135,7 +135,7 @@ built-up map" reading -- flagged at the time as the suspect one -- was the wrong
 measurement, not the address.
 
 **The real fault was the draw position.** The format note at the top of
-`simcity_mapview.c` and `REFERENCE_map_format.md` both say the overlay is drawn
+`sc_mapview.c` and `REFERENCE_map_format.md` both say the overlay is drawn
 at -1,-1. The code shifted by `cell / 8`, which at the native cell size of 8 is
 a single PIXEL, so every tall building's upper half sat 7 px too low. Reported
 from play as the roof tiles being about a tile below where they belong -- which

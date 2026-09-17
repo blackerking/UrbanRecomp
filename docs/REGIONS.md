@@ -1,6 +1,6 @@
 # Regional ROMs: what is shared, what is not
 
-Five 512KB images: U, E, F, G, J. `simcity.sfc` is byte-identical to the US one.
+Five 512KB images: U, E, F, G, J. The host and tools find each image by its contents (`tools/find_rom.py`), whatever the file is called.
 
 | region | header byte | FNV-1a32 |
 |---|---|---|
@@ -98,7 +98,7 @@ aot_eligible (94.8%), **73364/75333 instructions** (97.4%).
 2. Call-site discovery to seed `func` declarations, the same method
    `recomp/bank00.cfg` documents for the US image.
 3. The exit-M/X fixpoint via `tools/mx_exit_*.py`, all of which take the ROM
-   path as a constant that would need parameterising (`ROM = 'simcity.sfc'`).
+   path as a constant that would need parameterising (`ROM = 'us.sfc'`).
 4. A separate `src/gen-<region>` tree and a build target that links it, plus
    widening the fingerprint guard from one US constant to a per-tree identity.
 

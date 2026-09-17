@@ -49,7 +49,7 @@ a host gets by simply not thinking about it — selects the legacy one.**
 
 ## Measured
 
-SimCity, `PpuSetExtraSpace(96)`, BG layers only (sprites masked off so the
+This game, `PpuSetExtraSpace(96)`, BG layers only (sprites masked off so the
 count is unambiguous), counting non-black pixels in the 96-column left margin:
 
 | renderer | clamp `0x0F` | clamp `0x00` | |

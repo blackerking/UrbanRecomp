@@ -1,10 +1,22 @@
-# SimCitySNESRecomp
+# Urban Recomp
 
-Static recompilation of *SimCity* (SNES) onto [snesrecomp](https://github.com/mstan/snesrecomp),
+<p align="center"><img src="assets/urbanrecomp_logo.png" alt="Urban Recomp" width="320"></p>
+
+Urban Recomp is a static recompilation of the Super Nintendo release of
+*SimCity* (1991) onto [snesrecomp](https://github.com/mstan/snesrecomp),
 the same general-purpose 65816-to-C framework used by
 [MegaManXSNESRecomp](https://github.com/mstan/megamanxsnesrecomp) and the
-other snesrecomp game repositories. This repository is ROM-free: you must
-supply your own legally obtained copy.
+other snesrecomp game repositories. Everywhere else in this repository it
+is simply "the game".
+
+> **Unofficial fan project.** Urban Recomp is not affiliated with, endorsed
+> by or sponsored by Electronic Arts, Maxis or Nintendo. SimCity is a
+> trademark of Electronic Arts Inc., and Super Nintendo is a trademark of
+> Nintendo; they are named only to say which cartridge this project works
+> with. The repository contains no ROM data and no game artwork: you must
+> supply your own legally obtained copy of the US cartridge. Any file name
+> works -- the launcher lets you pick the file, and the tools recognise it
+> by its contents.
 
 **Just want to build and play it?** See [SETUP.md](SETUP.md) for a
 Windows/Linux quick-start. Contributors should read
@@ -21,11 +33,11 @@ left to investigate, with the evidence already gathered for each.
 This bring-up follows snesrecomp's own documented philosophy
 (`snesrecomp/docs/LLE_FIRST_ANALYSIS.md`): the interpreter is the
 correctness baseline for every game, and AOT-compiled banks are layered on
-top only once proven. SimCity currently runs entirely on the shared
+top only once proven. The game currently runs entirely on the shared
 interpreter tier (`interp816` over the real PPU/APU/DMA/cart device models),
 driven by an accurate H/V master-clock frame loop -- the same technique
 snesrecomp's own game-neutral reference driver
-(`snesrecomp/cosim/ref_driver.c`) uses, so no SimCity-specific scheduler or
+(`snesrecomp/cosim/ref_driver.c`) uses, so no game-specific scheduler or
 address knowledge was required to reach this milestone.
 
 `bash tools/regen.sh` already runs the real recompiler pipeline against the
@@ -38,7 +50,7 @@ standalone `interp816` this phase uses directly -- see "Next phase" below.
 
 ### Attract-demo qualification
 
-`build/SimCitySNESRecomp.exe simcity.sfc --qualify N` runs N frames
+`build/UrbanRecomp.exe us.sfc --qualify N` runs N frames
 headless and checks the same generic bar snesrecomp's own per-game status
 entries use for a new bring-up (e.g. the SA-1/Super Mario RPG and
 DSP-1/Super Mario Kart entries in `snesrecomp/README.md`): logic state
@@ -151,7 +163,7 @@ tileset, scenario tileset, and every advisor/scenario dialog text block
 (Nintendo's LC_LZ5-style compression, used throughout this ROM) as PNG
 and raw `.bin` files, for mod support. Needs Pillow (`pip install
 Pillow`); run with `python tools/extract_graphics.py` from the repo
-root once your ROM is staged as `simcity.sfc`. Output goes to
+root once your ROM is in the repository root (any file name). Output goes to
 `extracted_assets/` (gitignored -- it's derived from the copyrighted
 ROM, so it's never committed). Verified against this project's own ROM:
 every dialog text block decompresses and renders as readable English
@@ -163,8 +175,8 @@ text.
 `extracted_assets/maps/` — a raw 24000-byte `.bin` in exactly the layout
 the game keeps live at `$7F0200` (120×100 cells, one little-endian 16-bit
 tile index each), plus a false-colour `.png` preview. No dependencies; run
-`python tools/extract_maps.py` from the repo root with your ROM staged as
-`simcity.sfc`.
+`python tools/extract_maps.py` from the repo root with your ROM in the
+repository root (any file name).
 
 The map format used to be the big open question here — the data is
 compressed and two static guesses had already been tried and rejected. It
@@ -249,6 +261,11 @@ audio, **Widescreen** (Display), **Language** -- English, Deutsch, Francais
 (Controller). The choices are saved to `sc-settings.ini`, the bindings to
 `keybinds.ini`, both next to where the game runs.
 
+- The ROM is found by its contents, never by its name. Without a ROM
+  argument and without the launcher, the game uses the one saved in
+  `sc-settings.ini`, else the first `.sfc`/`.smc` file in the working
+  directory that is the US image; `SC_LANG=E|F|G|J` picks another region's
+  image the same way.
 - `--launcher` shows the launcher even with a ROM argument, or after "skip
   the launcher" was ticked.
 - Every run that is not `--qualify` applies `sc-settings.ini`: widescreen,
@@ -453,7 +470,7 @@ The big step here came from playing the game rather than from reading it:
 
 
 ```bash
-SC_PC_BITMAP_BANK=all SC_PC_BITMAP_PATH=coverage.bin ./build/Release/SimCitySNESRecomp.exe simcity.sfc
+SC_PC_BITMAP_BANK=all SC_PC_BITMAP_PATH=coverage.bin ./build/Release/UrbanRecomp.exe us.sfc
 ```
 
 Play — build, save, load, open every window — then close the window; the
@@ -692,16 +709,16 @@ this repo can fix in a cfg.
 To actually run the AOT-compiled banks `tools/regen.sh` already produces
 (rather than 100% interpretation), the host needs to move from the
 standalone `interp816` driver to the shared `CpuState`/`common_cpu_infra.c`
-runtime and understand how SimCity's own main-loop idiom yields control
+runtime and understand how the game's own main-loop idiom yields control
 back to the host once per frame (`snesrecomp/docs/LLE_SCHEDULER.md`
 describes the general "auto-quiescent" interpreter mechanism every new
 game is meant to use for this, in preference to Mega Man X's older
 per-game cooperative-scheduler/fiber approach).
 
-### SimCity's vblank-wait idiom: found
+### The game's vblank-wait idiom: found
 
 That doc says the only per-game knowledge the LLE scheduler tier needs is
-*"which PCs are the yield/die primitives"*. For SimCity that is
+*"which PCs are the yield/die primitives"*. For this game that is
 **`00:930d`, reached as `COP #$00` with `A = 0`** — the most-used service
 in the ROM at 133 call sites:
 
@@ -732,22 +749,22 @@ stack-corruption problem MMX's yield had.
 
 | step | state |
 |---|---|
-| 1. Does the generated C build at all? | **done** — `SimCityAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
+| 1. Does the generated C build at all? | **done** — `UrbanRecompAOTProbe`, 312,768 lines compile and link, 720 compiled variants across 534 dispatch rows |
 | 2. Can both tiers live in one binary? | **done** — the same `src/main.c` linked with the generated banks and the AOT runtime. While the AOT build was still pure interpreter this produced byte-identical `--qualify` output to the shipping build; now that the fiber drives compiled bodies by default the counters differ, because the work itself differs (see 3e) |
-| 3a. Is any compiled body *correct*? | **8 bodies verified** — `SimCityAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
-| 3b. Declare the frame boundary | **done** — `hle_func 930d SimCity_WaitForVblank` in `recomp/bank00.cfg`, implemented in `src/simcity_hle.c`. The emitter now routes all four M/X variants of `bank_00_930d` through the host function |
-| 3c. Fiber layer for the frame boundary | **done** — `src/simcity_fiber.c`, verified by `tests/fiber_test.c` (stack and FP state preserved across switches) |
+| 3a. Is any compiled body *correct*? | **8 bodies verified** — `UrbanRecompAOTDiff` runs each against the real ROM routine over 8 randomised trials: 64/64 identical WRAM + A/X/Y, zero divergences, every body returns `NORMAL` |
+| 3b. Declare the frame boundary | **done** — `hle_func 930d ScHle_WaitForVblank` in `recomp/bank00.cfg`, implemented in `src/sc_hle.c`. The emitter now routes all four M/X variants of `bank_00_930d` through the host function |
+| 3c. Fiber layer for the frame boundary | **done** — `src/sc_fiber.c`, verified by `tests/fiber_test.c` (stack and FP state preserved across switches) |
 | — | **blocked on a correctness bug**: 28 compiled call sites execute instructions the ROM never runs ([`docs/UPSTREAM_inline_args.md`](docs/UPSTREAM_inline_args.md)) |
-| 3d. Drive the guest inside the fiber | **done** — `src/simcity_fiberdrive.c`, entered at `I_RESET_M1X1`. It is an interpreter-with-bouncing driver, since SimCity has no compiled entry point to start from ([why](docs/MIGRATION_step3.md) §5) |
-| 3e. Replace real work with a compiled body | **done** — `hle_func f1ed SimCity_MapGen` runs the decompiled map generator (`src/simcity_mapgen.c`) instead of the ROM's. Verified bit-exact on three maps across both generator branches: same 12000 cells, same draw count, same final PRNG state. The routine it replaces takes the SNES CPU ~800 frames; the map is now complete the frame after the trigger |
-| 4. Make the AOT tier the default | **done** — when `src/gen` is present, `SimCitySNESRecomp` *is* the AOT build and the fiber drives it. `SC_FIBER=0` restores the pure interpreter, which remains the correctness baseline |
+| 3d. Drive the guest inside the fiber | **done** — `src/sc_fiberdrive.c`, entered at `I_RESET_M1X1`. It is an interpreter-with-bouncing driver, since the game has no compiled entry point to start from ([why](docs/MIGRATION_step3.md) §5) |
+| 3e. Replace real work with a compiled body | **done** — `hle_func f1ed ScHle_MapGen` runs the decompiled map generator (`src/sc_mapgen.c`) instead of the ROM's. Verified bit-exact on three maps across both generator branches: same 12000 cells, same draw count, same final PRNG state. The routine it replaces takes the SNES CPU ~800 frames; the map is now complete the frame after the trigger |
+| 4. Make the AOT tier the default | **done** — when `src/gen` is present, `UrbanRecomp` *is* the AOT build and the fiber drives it. `SC_FIBER=0` restores the pure interpreter, which remains the correctness baseline |
 
 The normal build now links the AOT tier itself, so there is nothing extra to
 build for it:
 
 ```bash
-cmake --build build --target SimCitySNESRecomp        # AOT tier + fiber (default)
-SC_FIBER=0 ./build/Release/SimCitySNESRecomp ...      # pure interpreter
+cmake --build build --target UrbanRecomp        # AOT tier + fiber (default)
+SC_FIBER=0 ./build/Release/UrbanRecomp ...      # pure interpreter
 ```
 
 Two caveats worth stating plainly. The generated code is compiled against the
@@ -760,8 +777,8 @@ builds interpreter-only exactly as it did before.
 The diagnostic targets remain `EXCLUDE_FROM_ALL`:
 
 ```bash
-cmake --build build --target SimCityAOTProbe          # link probe
-cmake --build build --target SimCitySNESRecompAOT     # same content as the
+cmake --build build --target UrbanRecompAOTProbe          # link probe
+cmake --build build --target UrbanRecompAOT     # same content as the
                                                       # default build now;
                                                       # kept for the docs and
                                                       # scripts that name it
@@ -770,7 +787,7 @@ cmake --build build --target SimCitySNESRecompAOT     # same content as the
 Step 2's point is narrow but load-bearing: the two tiers **share one WRAM
 array**. `common_rtl.c` defines `g_ram[0x20000]` with the same `$7E`/`$7F`
 semantics this host already uses, and this host passes `g_ram` straight to
-`snes_init()`, so nothing has to be copied between tiers. `SIMCITY_AOT_TIER`
+`snes_init()`, so nothing has to be copied between tiers. `SC_AOT_TIER`
 in `src/main.c` marks the handful of symbols that move ownership to the
 runtime in that build (`g_ram`, `g_interp_apu_driving`, `ppudma_record_dma`,
 `interp816_opcode_hook`) and the one the runtime expects the game to supply
@@ -827,7 +844,7 @@ interleaving; the host owns the frame boundary and renders through
 declares 1,512 `func` boundaries in bank 00 alone against this project's
 ~500 across all banks.
 
-The mapping to SimCity is direct: `00:930d` (COP service 0, the vblank spin
+The mapping to this game is direct: `00:930d` (COP service 0, the vblank spin
 on `$b9`) is our `WaitForVblank`, and it is a plain `RTS`-returning routine
 rather than a coroutine switch. The one open question is fibers vs the
 framework's newer fiber-free LLE bridge, which `LLE_SCHEDULER.md` says is
@@ -843,15 +860,15 @@ Ninja or Visual Studio, and SDL2 (e.g. via
 
 ```bash
 git clone --recurse-submodules <this repo>
-cd simcity
+cd UrbanRecomp
 bash tools/bootstrap.sh
-# stage your own legally obtained ROM as simcity.sfc, then:
+# put your own legally obtained ROM in the repository root (any file name), then:
 bash tools/regen.sh --no-tests
 cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --target SimCitySNESRecomp
-./build/SimCitySNESRecomp.exe                             # launcher, then the game
-./build/SimCitySNESRecomp.exe simcity.sfc                 # windowed, saved settings
-./build/SimCitySNESRecomp.exe simcity.sfc --qualify 3600  # headless qualification
+cmake --build build --target UrbanRecomp
+./build/UrbanRecomp.exe                             # launcher, then the game
+./build/UrbanRecomp.exe us.sfc                      # windowed, saved settings
+./build/UrbanRecomp.exe us.sfc --qualify 3600       # headless qualification
 ```
 
 See CONTRIBUTING.md for the full checkout/build/PR workflow and how this

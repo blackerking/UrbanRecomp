@@ -254,7 +254,7 @@ Reproduced cleanly across a second, independent burst/gap cycle
 `$01ff`-family gates earlier in this doc are real ROM logic controlling
 *how much* work bank 1 does on its turn; this is a *different* mechanism
 entirely, controlling *how often* bank 1 gets a turn at all, and it
-looks like authentic SimCity engine design (spreading simulation work
+looks like authentic engine design (spreading simulation work
 across multiple frames), not a bug -- the same conclusion this session
 already reached for every other "mysterious timing gap" turned out to
 have a concrete ROM-code explanation once actually traced, rather than

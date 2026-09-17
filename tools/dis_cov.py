@@ -46,7 +46,7 @@ def main():
     ap.add_argument('start')
     ap.add_argument('end')
     ap.add_argument('--mx', required=True, help='SC_MX_BITMAP output')
-    ap.add_argument('--rom', default='Sim City (U) [!].sfc')
+    ap.add_argument('--rom', default=None, help='the US ROM (found by contents if omitted)')
     ap.add_argument('--all-planes', action='store_true',
                     help='list every plane an address ran at, not just the first')
     a = ap.parse_args()
@@ -54,6 +54,9 @@ def main():
     bank = int(a.bank, 16)
     lo = int(a.start, 16)
     hi = int(a.end, 16)
+    if a.rom is None:
+        from find_rom import find_rom
+        a.rom = find_rom('us')
     rom = open(a.rom, 'rb').read()
     planes = load_planes(a.mx)
 

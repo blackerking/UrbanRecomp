@@ -3,7 +3,7 @@
 **Repo:** mstan/snesrecomp — observed at `251a966` (main) merged into a
 downstream fork, i.e. with `b8ef573 runtime: execute HDMA on LLE beam timeline`.
 
-**Game:** SimCity (U), scenario view screen (the isometric city on a desk).
+**Game:** the city builder this host targets (US), scenario view screen (the isometric city on a desk).
 
 ## Symptom
 

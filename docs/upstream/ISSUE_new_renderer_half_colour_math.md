@@ -3,7 +3,7 @@
 **FILED: https://github.com/mstan/snesrecomp/issues/30**
 
 > **Written by an AI.** This was researched, measured and written by Claude
-> (Anthropic), working on a SimCity SNES recomp host with @blackerking, who has
+> (Anthropic), working on an SNES city-builder recomp host (Urban Recomp) with @blackerking, who has
 > reviewed and approved posting it. Every number below is from an actual run
 > against this repo, but the reasoning is mine and worth sanity-checking.
 
@@ -16,7 +16,7 @@ On a screen whose picture is **backdrop plus a halved subscreen**
 `addSubscreen=1`), `kPpuRenderFlags_NewRenderer` loses whole rectangles of the
 background as soon as `PpuSetExtraSpace()` is non-zero.
 
-In SimCity this is the advisor popup: a panel over a dimmed city. With the new
+In this game this is the advisor popup: a panel over a dimmed city. With the new
 renderer, bands of the city above and below the panel come out as backdrop. A
 256-wide render of the identical save state shows ordinary city there.
 
@@ -82,7 +82,7 @@ with `PpuSetExtraSpace(ppu, 0)` and once non-zero — comparing the authentic 25
 columns. The difference appears as rectangles of background replaced by
 backdrop.
 
-The SimCity save state that shows it cannot be attached: it carries ROM-derived
+The save state that shows it cannot be attached: it carries ROM-derived
 WRAM and VRAM, and that project is deliberately ROM-free. Happy to run any
 instrumented build against it and report back, if that helps more than a
 synthetic case.
