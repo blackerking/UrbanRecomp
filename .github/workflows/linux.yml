@@ -43,7 +43,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DSNESRECOMP_SDL_BACKEND=SDL2
-          -DCMAKE_INSTALL_PREFIX=/usr
+          -DCMAKE_INSTALL_PREFIX=/usr/local
 
       - name: Build
         run: cmake --build build --target UrbanRecomp
@@ -54,11 +54,11 @@ jobs:
       - name: Check the desktop integration
         run: |
           find stage -type f | sort
-          desktop-file-validate stage/usr/share/applications/io.github.blackerking.UrbanRecomp.desktop
+          desktop-file-validate stage/usr/local/share/applications/io.github.blackerking.UrbanRecomp.desktop
           appstreamcli validate --no-net --explain \
-            stage/usr/share/metainfo/io.github.blackerking.UrbanRecomp.metainfo.xml || true
+            stage/usr/local/share/metainfo/io.github.blackerking.UrbanRecomp.metainfo.xml || true
           for s in 16 24 32 48 64 128 256 512; do
-            test -f "stage/usr/share/icons/hicolor/${s}x${s}/apps/io.github.blackerking.UrbanRecomp.png"
+            test -f "stage/usr/local/share/icons/hicolor/${s}x${s}/apps/io.github.blackerking.UrbanRecomp.png"
           done
 
       - name: Start without a ROM
@@ -68,14 +68,15 @@ jobs:
         run: |
           set +e
           work="$(mktemp -d)"
-          URBANRECOMP_HOME="$work" stage/usr/bin/urbanrecomp --no-settings 2>&1 | tee "$work/out.txt"
+          URBANRECOMP_HOME="$work" stage/usr/local/bin/urbanrecomp --no-settings 2>&1 | tee "$work/out.txt"
           code=${PIPESTATUS[0]}
           set -e
           grep -q "no ROM" "$work/out.txt"
           test "$code" -eq 1
 
       - name: Pack the staged install
-        run: tar -C stage -czf UrbanRecomp-linux-x64.tar.gz usr
+        # Unpacks into /usr/local:  sudo tar -xzf UrbanRecomp-linux-x64.tar.gz -C /usr/local
+        run: tar -C stage/usr/local -czf UrbanRecomp-linux-x64.tar.gz bin lib share
 
       - uses: actions/upload-artifact@v4
         with:
