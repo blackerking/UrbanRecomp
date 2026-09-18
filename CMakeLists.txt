@@ -110,7 +110,7 @@ endif()
 
 if(NOT MSVC)
     target_compile_options(UrbanRecomp PRIVATE
-        -w -Wno-implicit-function-declaration)
+        -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
 endif()
 
 # Desktop SDL comes from the runner helper rather than a per-game
@@ -280,7 +280,7 @@ if(SC_GEN_SOURCES)
         target_link_options(UrbanRecomp PRIVATE /FORCE:MULTIPLE)
     else()
         target_compile_options(UrbanRecomp PRIVATE
-            -w -Wno-implicit-function-declaration)
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
 endif()
 
@@ -337,7 +337,7 @@ if(SC_GEN_SOURCES)
     )
     if(NOT MSVC)
         target_compile_options(UrbanRecompAOTProbe PRIVATE
-            -w -Wno-implicit-function-declaration)
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
     # config.h -> sdl_compat.h -> SDL.h, so the probe needs SDL's headers even
     # though it opens no window.
@@ -397,7 +397,7 @@ if(SC_GEN_SOURCES)
         target_link_options(UrbanRecompAOT PRIVATE /FORCE:MULTIPLE)
     else()
         target_compile_options(UrbanRecompAOT PRIVATE
-            -w -Wno-implicit-function-declaration)
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
     snesrecomp_target_sdl(UrbanRecompAOT)
     if(WIN32)
@@ -450,7 +450,7 @@ if(SC_GEN_SOURCES)
         target_link_options(UrbanRecompAOTDiff PRIVATE /FORCE:MULTIPLE)
     else()
         target_compile_options(UrbanRecompAOTDiff PRIVATE
-            -w -Wno-implicit-function-declaration)
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
     snesrecomp_target_sdl(UrbanRecompAOTDiff)
 endif()

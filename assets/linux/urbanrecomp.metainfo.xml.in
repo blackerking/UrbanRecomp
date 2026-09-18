@@ -3,6 +3,9 @@
   <id>@SC_APP_ID@</id>
   <name>Urban Recomp</name>
   <summary>A classic SNES city builder, recompiled to run natively</summary>
+  <developer id="io.github.blackerking">
+    <name>blackerking and the Urban Recomp contributors</name>
+  </developer>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT AND LicenseRef-PolyForm-Noncommercial-1.0.0</project_license>
   <description>
