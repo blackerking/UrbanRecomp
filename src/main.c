@@ -1940,8 +1940,8 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  *
  * DEFAULT OFF as of the settings-menu work -- this fired during ordinary
  * gameplay, not just the load screen, and the resulting intermittent 6x
- * bursts made the game feel rough and badly worsened the known
- * fast-forward audio-delay problem (see the revert note in the main loop).
+ * bursts made the game feel rough and badly worsened the fast-forward
+ * audio delay of the time (since fixed: the audio drain trims the backlog).
  * Measured with SC_ADDR_TRACE on the three trigger PCs against real
  * gameplay save states: on the classic map screen it fired sporadically
  * (~4 times in 2000 frames, each arming a 20-frame boost), but on the
@@ -9534,19 +9534,12 @@ int main(int argc, char **argv) {
     SC_PERF_ADD(kPerfEmu, frame_t0, emu_t1);
     ScSram_Tick();
 
-    /* REVERTED (see docs/ROM_MAP.md or git history for the attempt):
-     * fast-forward's audio comment above ("only the last of the batch's
-     * audio gets queued, skipping the rest") describes intent that was
-     * never actually enforced -- during a fast-forward batch, the DSP
-     * ring genuinely accumulates several frames' worth of undrained
-     * audio, which plays back later as an audible delay. Two different
-     * attempts to discard that backlog each frame (a hand-rolled
-     * sampleRead assignment, then the shared runner's own
-     * dsp_trimSamples()) both caused a complete, permanent audio freeze
-     * in live testing instead of just fixing the delay -- root cause not
-     * found. Reverted rather than ship a "fix" that's worse than the
-     * original symptom; the delay remains a known issue (see the sound
-     * investigation thread). */
+    /* A fast-forward batch leaves several frames of audio in the DSP ring;
+     * the audio drain below trims it to one frame, so the sound does not
+     * trail the picture afterwards. Two earlier attempts at that froze the
+     * sound for good, because dsp_getSamples() then consumed a fixed 534
+     * samples whether or not they existed. It now takes exactly what it is
+     * asked for, never more than exists. */
 
     if (frame_time_thresh_env) {
       static uint32_t s_frame_time_hits;

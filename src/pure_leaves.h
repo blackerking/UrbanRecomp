@@ -4,7 +4,7 @@
  * no hardware-register access, small extent. These are the routines
  * where synthetic entry state is a fair test -- see the tool for why
  * that restriction exists. */
-#define SC_PURE_LEAF_COUNT 34
+#define SC_PURE_LEAF_COUNT 37
 static const struct { unsigned pc24, end; } kScPureLeaves[] = {
     { 0x00823Eu, 0x00824Au },
     { 0x00824Fu, 0x00825Eu },
@@ -25,6 +25,7 @@ static const struct { unsigned pc24, end; } kScPureLeaves[] = {
     { 0x01BA24u, 0x01BA3Eu },
     { 0x01C322u, 0x01C38Du },
     { 0x01C4C7u, 0x01C4E4u },
+    { 0x01C660u, 0x01C6C7u },
     { 0x01C7F6u, 0x01C7FCu },
     { 0x01F038u, 0x01F04Cu },
     { 0x02A651u, 0x02A66Du },
@@ -38,6 +39,8 @@ static const struct { unsigned pc24, end; } kScPureLeaves[] = {
     { 0x03BE04u, 0x03BE11u },
     { 0x03C11Au, 0x03C130u },
     { 0x03C50Au, 0x03C547u },
+    { 0x03E1ECu, 0x03E226u },
+    { 0x03E257u, 0x03E291u },
     { 0x0593CBu, 0x0593D3u },
     { 0x059FBBu, 0x059FE5u },
 };

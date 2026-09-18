@@ -409,6 +409,11 @@ no hardware-register access, and no stack manipulation. 34 of 722 AOT bodies
 qualify; 8 of those return cleanly from synthetic state and are compared over
 8 randomised trials each. **64/64 comparisons identical, zero divergences.**
 
+Regenerated on 2026-09-18 against the current analysis: 37 of 1509 AOT-eligible
+nodes qualify (`src/pure_leaves.h`). 8 of them return cleanly and still match
+on all 64 comparisons; 2 of the new entries have no compiled body, and 27
+leaves are skipped for no clean `RTS`.
+
 Getting there meant fixing four harness artefacts, each of which first
 presented as a codegen bug:
 

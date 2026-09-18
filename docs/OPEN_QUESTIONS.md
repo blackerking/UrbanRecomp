@@ -142,7 +142,16 @@ filing-ready. Still open:
   `__declspec(selectany)` is the real fix.
 - Close issue #14 and post the PR-17 reply (`docs/upstream/reply-pr17.md`).
 
-### A5. Repo integrity: the submodule pointer is local-only
+### A5. Repo integrity: the submodule pointer is local-only -- **CLOSED**
+
+**Resolved (checked 2026-09-18).** The pin, `bc2838d`, is the tip of branch
+`merge-upstream-2026-09` on `blackerking/snesrecomp`, and `recomp-ui`'s
+`cb7e54b` is on `RetroPortingToolKit/recomp-ui`. A fresh
+`git clone --recurse-submodules` of this repository checks out every submodule,
+the nested ones included, and `tools/bootstrap.sh` reports ready. The fork
+carries 18 commits over upstream `main` (the two below among them); upstream
+has moved on by 276 commits since. The history of the item follows.
+
 
 **Much reduced.** Upstream merged both of the PRs this repo was carrying
 local versions of — #17 (auto-joypad byte order) and #19 (pop/push inline

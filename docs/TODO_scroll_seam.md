@@ -411,66 +411,36 @@ never `dis65816.py`, which does not track SEP/REP and mis-sizes operands after
 a width change; and do not trust a harness-side number as if it came from the
 emulator -- the audio work below measured the harness twice before noticing.
 
-## OPEN -- audio desynchronises, and has since the project started
+## RESOLVED (2026-09-17) -- audio desynchronises, and has since the project started
 
-Reported from play as long-standing. Investigated 2026-08-30 and **not solved**.
-What follows is mostly a record of two wrong measurements, because both are
-easy to repeat.
+Measured in the interactive path at last (`SC_AUDIO_DEBUG=1`), it was three
+things, fixed in `3d8b7a5`. The full account is in
+`docs/upstream/ISSUE_hdma_line_phase.md` ("Follow-up: sound behind the
+picture").
 
-### `--qualify` cannot measure this. Twice fooled.
+1. **The APU never got the guest time of DMA transfers.** snes.c charges a
+   `$420B` transfer through a hook, and without one it moved the beam past
+   this host's driver -- and past the APU. In a city the DSP made about 94% of
+   its samples; the output ran dry and crackled. `sc_own_the_beam()` walks
+   that time through `handle_pos_stuff()` and the APU.
+2. **This host's `kApuCyclesPerMaster` used 60 fps** -- the same 60.0 ratio
+   this section used to list in the engine: 534 samples a frame against the
+   533.12 played. Once
+   the APU got its full time, the backlog grew by 53 samples a second until
+   the sound was a quarter of a second late. It is now exact
+   (`32040*32 / 21477272`), and the drain takes `kDspSamplesPerFrame`.
+3. **The audio device keeps its own clock.** Over RDP it measured 1-3% slow
+   and varied between sessions. `sc_audio_rate_control()` resamples each frame
+   steered by the device queue; the queue now stays at 2400-4400 samples.
 
-**First attempt.** `--qualify` prints `audio_samples`, and the rate came out at
-533.906 samples/frame across 2000- and 6000-frame runs, stable to three
-decimals. That sits on 60.000 Hz rather than the SNES's 60.0988 (533.122), so
-it looked like a +0.147% drift -- about a second every eleven minutes, the
-right order for the symptom.
+Two lessons from the unsuccessful rounds still hold:
 
-It was the harness. `run_qualification()` drains a hardcoded 534 samples per
-frame (`if (available >= 534) dsp_getSamples(dsp, audio_buf, 534)`).
-
-**Second attempt.** `SC_APU_DIAG=1` prints a per-frame ledger of what the DSP
-actually wrote, which looked like the real thing: 533.908 samples/frame, with
-`avail` steady at ~959.
-
-Also the harness. `dsp_getSamples()` consumes a fixed 534 and the SPC is cycled
-to supply them, so **the consumer dictates production** and the number just
-echoes the drain. Proved by halving `kInterpApuPerMaster` and re-measuring:
-533.913, i.e. no effect at all.
-
-**So: no headless measurement of the audio rate is trustworthy.** The rate has
-to be measured in the interactive path, where consumption is
-`audio.freq / 60.0988` in the SDL loop and the SPC is cycled by the audio
-callback.
-
-### Still true, and still suspicious
-
-Three copies of the same ratio use 60.0 where an NTSC frame is 60.0988:
-
-```
-common_rtl.c:973       kApuPerMaster       = (32040*32) / (1364*262*60.0)
-interp_bridge.c:38     kInterpApuPerMaster = (32040*32) / (1364*262*60.0)
-snes.c:25              apuCyclesPerMaster  = (32040*32) / (1364*262*60.0)   <- UNUSED
-```
-
-That makes the master clock 21,442,080 instead of 21,477,272 -- the constant is
-0.1647% fast. Upstream `origin/main` has them identically, so it is not ours.
-
-**They were corrected and the change reverted**, because nothing could be shown
-to change: the headless rate is harness-dictated, so there was no way to
-demonstrate a benefit, and shipping unverified timing changes is how the
-left/top covers went wrong. The arithmetic is still wrong and worth fixing --
-but only alongside a measurement that can see the difference.
-
-`snes.c`'s copy is referenced by nothing at all; changing it first cost a build
-to discover.
-
-### How to actually measure it
-
-Instrument the interactive path, not `--qualify`: log the audio callback's
-consumption against the DSP's production over a real session, with
-`SC_DUMP_DIR` running so video frames are timestamped alongside. The question
-to answer first is whether production and consumption differ at all in that
-path -- everything above leaves it genuinely unknown.
+- `--qualify` cannot measure the rate: `run_qualification()` drains 534 a
+  frame whenever that many exist, so the harness dictates what it sees.
+- The engine's own copies of the ratio (`common_rtl.c` `kApuPerMaster`,
+  `interp_bridge.c` `kInterpApuPerMaster`) still use 60.0. They only drive the
+  APU on the fiber path (`SC_FIBER=1`); the interpreter path uses this host's
+  corrected constant.
 
 ## OPEN -- title: the publisher and title building parts move wrongly
 
