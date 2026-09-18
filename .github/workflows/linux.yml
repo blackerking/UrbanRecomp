@@ -9,7 +9,7 @@ name: Linux build
 on:
   workflow_dispatch:
   push:
-    branches: [master, widescreen-wood-margins]
+    branches: [main, widescreen-wood-margins]
     tags: ['v*']
     paths:
       - 'src/**'

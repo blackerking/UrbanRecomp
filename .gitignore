@@ -40,8 +40,6 @@ Thumbs.db
 __pycache__/
 *.pyc
 
-# Local-only config overrides (per-developer, applied after config.ini)
-config.local.ini
 # Launcher state (src/sc_launcher.c, recomp-ui)
 sc-settings.ini
 sc-settings.ini.tmp
@@ -84,6 +82,8 @@ logo.png
 coverage*.bin
 wram_map*.bin
 wmap_*.bin
+# snesrecomp tier-2 discovery captures, written by AOT runs
+tier2_*.jsonl
 session_sram.bin
 *_sram.bin
 
@@ -94,23 +94,16 @@ session_sram.bin
 # README.md). Regenerate with SC_MX_BITMAP=<path> on any run.
 mx_*.bin
 
-# Hand-drawn card artwork for the ninth scenario entry, and what
-# tools/make_sylt_card.py derives from it. Kept out for the same reason as
-# everything else here: the repo carries code and findings, not assets. The
-# host loads sylt_card.bin at runtime and falls back to a drawn placeholder
-# when it is missing, so a checkout without this still builds and still shows
-# a ninth entry. Regenerate with:
-#   python tools/make_sylt_card.py sylt_graphics/<your card>.jpg
-# sylt_graphics/ is now COMMITTED -- the Sylt map is used with the written
-# permission of its author, and the card artwork is the project's own. Two
-# exceptions stay out:
+# sylt_graphics/ is committed: the Sylt map is used with the written permission
+# of its author, and the card artwork is the project's own. See
+# sylt_graphics/PROVENANCE.md. Two things stay out:
 #
 #   The "Rio on its own Bank" patch embeds 7605 bytes that are byte-identical
 #   to Rio's map in the ROM (verified: it decompresses to the same 10068 bytes).
 #   That is copyrighted ROM data, which no third-party permission covers, and
 #   this host does not need it -- Rio is never relocated. See docs/ROM_MAP.md.
 #
-#   *_check.png are regenerated previews, not sources.
+#   *_check.png are the check renders tools/make_sylt_card.py writes.
 sylt_graphics/*Rio on its own Bank.ips
 sylt_graphics/*_check.png
 
