@@ -88,6 +88,7 @@ uint8_t    g_ram[0x20000];
 #include "sc_mapview.h"
 #include "sc_launcher.h"
 #include "sc_sram.h"
+#include "sc_icon.h"
 #include "sc_mapgen.h"
 #include "sc_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
@@ -6941,10 +6942,31 @@ static void render_settings_menu(SDL_Renderer *renderer) {
  * its slot, practice keeps its map, the ROM is untouched, and Sylt still loads
  * through the ROM's own path. */
 
+/* A data file shipped with the program (sylt_graphics/...): from the working
+ * directory, where a portable folder keeps it, else from the program's own
+ * directory -- where an installed build keeps it, since there the working
+ * directory is the player's data folder instead. */
+static FILE *sc_fopen_data(const char *rel) {
+  FILE *f = fopen(rel, "rb");
+  if (f) return f;
+#if SNESRECOMP_SDL3
+  const char *base = SDL_GetBasePath();
+#else
+  char *base = SDL_GetBasePath();
+#endif
+  if (!base) return NULL;
+  char path[1024];
+  snprintf(path, sizeof path, "%s%s", base, rel);
+#if !SNESRECOMP_SDL3
+  SDL_free(base);
+#endif
+  return fopen(path, "rb");
+}
+
 static void load_sylt_map(void) {
   const char *path = getenv("SC_SYLT_MAP");
-  if (!path) path = "sylt_graphics/sylt_map.bin";
-  FILE *f = fopen(path, "rb");
+  FILE *f = path ? fopen(path, "rb")
+                 : sc_fopen_data(path = "sylt_graphics/sylt_map.bin");
   if (!f) return;                       /* absent is not an error */
   if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
   const long n = ftell(f);
@@ -7189,8 +7211,8 @@ static void sylt_apply_translated_line(void) {
 
 static void load_sylt_card(void) {
   const char *path = getenv("SC_SYLT_CARD");
-  if (!path) path = "sylt_graphics/sylt_card.bin";
-  FILE *f = fopen(path, "rb");
+  FILE *f = path ? fopen(path, "rb")
+                 : sc_fopen_data(path = "sylt_graphics/sylt_card.bin");
   if (!f) return;                       /* absent is not an error */
   uint16_t hdr[4];
   if (fread(hdr, sizeof hdr, 1, f) != 1) { fclose(f); return; }
@@ -8222,6 +8244,7 @@ int main(int argc, char **argv) {
    * --no-settings, stay exactly as their environment says, so every tool and
    * comparison in tools/ and docs/ keeps meaning what it meant. */
   static ScSettings s_launch_settings;
+  ScSetAppIdentity();   /* before the launcher opens the first window */
   ScSettingsLoad(&s_launch_settings, kScSettingsPath);
   if (!qualify_frames && !no_settings) {
     if (force_launcher || (!rom_given && !s_launch_settings.skip_launcher)) {

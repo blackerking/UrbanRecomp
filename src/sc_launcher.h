@@ -53,13 +53,6 @@ bool ScFindRom(unsigned long fnv, char *out, size_t out_n);
  * could be shown -- then the caller starts as if it had been skipped. */
 int ScLauncherRun(ScSettings *s, const char *settings_path);
 
-/* The Urban Recomp icon on a window (assets/img/icon.png next to the
- * executable). Windows builds also carry it as the executable's icon, which
- * SDL already gives every window; this covers the other platforms. A no-op in
- * builds without the launcher, which have no image decoder. */
-struct SDL_Window;
-void ScSetWindowIcon(struct SDL_Window *window);
-
 /* The SNES pad through the launcher's keyboard bindings (keybinds.ini).
  * ScKeybindsInit before the first read, once SDL video is up: a first run
  * writes this host's own layout, not recomp-ui's defaults. Returns false when

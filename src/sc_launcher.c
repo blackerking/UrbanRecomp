@@ -16,9 +16,10 @@
 #include "recomp_launcher.h"
 #include "launcher_profile.h"
 #include "common/keybinds.h"   /* recomp-ui's, not the runner's */
-#include "common/launcher_gl.h"  /* launcher_image_load_rgba */
 #endif
 
+/* The launcher window shows this file as its icon (GameInfo.window_icon_path);
+ * the game window uses the pixels compiled in by src/sc_icon.c. */
 static const char kIconAsset[] = "assets/img/icon.png";
 
 const char *const kScSettingsPath = "sc-settings.ini";
@@ -213,35 +214,7 @@ int ScLauncherRun(ScSettings *s, const char *settings_path) {
 bool ScKeybindsInit(void) { return false; }
 unsigned ScKeybindsRead(const unsigned char *keys) { (void)keys; return 0; }
 bool ScKeybindsUses(int scancode) { (void)scancode; return false; }
-void ScSetWindowIcon(SDL_Window *window) { (void)window; (void)kIconAsset; }
-
 #else /* RECOMP_LAUNCHER */
-
-void ScSetWindowIcon(SDL_Window *window) {
-  if (!window) return;
-#if SNESRECOMP_SDL3
-  const char *base = SDL_GetBasePath();
-#else
-  char *base = SDL_GetBasePath();
-#endif
-  char path[1024];
-  snprintf(path, sizeof path, "%s%s", base ? base : "", kIconAsset);
-#if !SNESRECOMP_SDL3
-  SDL_free(base);
-#endif
-  int w = 0, h = 0;
-  unsigned char *pixels = launcher_image_load_rgba(path, &w, &h);
-  if (!pixels) return;
-#if SNESRECOMP_SDL3
-  SDL_Surface *surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, pixels, w * 4);
-  if (surf) { SDL_SetWindowIcon(window, surf); SDL_DestroySurface(surf); }
-#else
-  SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(pixels, w, h, 32, w * 4,
-                                                         SDL_PIXELFORMAT_RGBA32);
-  if (surf) { SDL_SetWindowIcon(window, surf); SDL_FreeSurface(surf); }
-#endif
-  launcher_image_free(pixels);
-}
 
 /* ── keyboard bindings ─────────────────────────────────────────────────── */
 

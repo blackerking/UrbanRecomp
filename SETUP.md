@@ -13,7 +13,7 @@ distributes source code.
 | Git | [git-scm.com](https://git-scm.com/) (includes Git Bash, used below) | `sudo apt install git` (or your distro's equivalent) |
 | CMake | [cmake.org](https://cmake.org/download/) (3.16+) | `sudo apt install cmake` |
 | C compiler | Visual Studio 2022 (Desktop C++ workload) | `sudo apt install build-essential` |
-| SDL3 | via [vcpkg](https://github.com/microsoft/vcpkg): `vcpkg install sdl3:x64-windows` | `sudo apt install libsdl2-dev` |
+| SDL | via [vcpkg](https://github.com/microsoft/vcpkg): `vcpkg install sdl3:x64-windows` | `sudo apt install libsdl2-dev libgl-dev` (SDL2; the launcher draws with OpenGL) |
 | Ninja (optional, faster builds) | `winget install Ninja-build.Ninja` | `sudo apt install ninja-build` |
 
 ## 1. Clone
@@ -64,11 +64,20 @@ cmake --build build --config Release
 (No Ninja/vcpkg handy? `cmake -S . -B build` with no extra flags falls back
 to the Visual Studio generator, as long as SDL3 dev files are discoverable.)
 
-**Linux**:
+**Linux** (Ubuntu's `libsdl2-dev` is SDL2, so say so):
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSNESRECOMP_SDL_BACKEND=SDL2 -DCMAKE_INSTALL_PREFIX=$HOME/.local
+cmake --build build --target UrbanRecomp
+cmake --install build      # optional: menu entry with icon, see below
 ```
+
+`cmake --install` puts the game under `~/.local/lib/.../urbanrecomp`, a
+starter `urbanrecomp` in `~/.local/bin`, and a menu entry with the Urban Recomp
+icon (all sizes, hicolor theme). Started from the menu, the game keeps its
+ROM, settings and saves in `~/.local/share/urbanrecomp` -- put the ROM there,
+or pick it in the launcher. Without installing, `build/UrbanRecomp` runs in
+place as on Windows. The prefix is chosen when configuring because the menu
+entry names the starter by its full path.
 
 ## 4. Run
 

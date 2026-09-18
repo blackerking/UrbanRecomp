@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(UrbanRecomp C)
+project(UrbanRecomp VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -51,6 +51,7 @@ add_executable(UrbanRecomp
     src/main.c
     src/sc_launcher.c
     src/sc_sram.c
+    src/sc_icon.c
     src/sc_mapview.c
     src/sc_mapgen.c
         src/sc_decomp.c
@@ -142,9 +143,78 @@ if(SC_HAVE_LAUNCHER)
                 $<TARGET_FILE_DIR:UrbanRecomp>/assets/img/icon.png
         VERBATIM)
 endif()
+target_compile_definitions(UrbanRecomp PRIVATE "SC_VERSION=\"${PROJECT_VERSION}\"")
 # The executable's icon on Windows (Explorer, taskbar, every SDL window).
 if(WIN32)
     target_sources(UrbanRecomp PRIVATE src/urbanrecomp.rc)
+endif()
+
+# ── Linux desktop ───────────────────────────────────────────────────────────
+#
+# Every build sets its window icon from pixels compiled in (src/sc_icon.c).
+# A desktop, though -- and on Wayland ONLY the desktop -- takes the icon of a
+# running window from its desktop entry, matched by application ID. So on
+# Linux `cmake --install` puts the program where it can find its assets, and
+# registers it:
+#
+#   <prefix>/lib/urbanrecomp/          UrbanRecomp, assets/, sylt_graphics/
+#   <prefix>/bin/urbanrecomp           starter; runs the game from the player's
+#                                      data folder, ~/.local/share/urbanrecomp
+#   <prefix>/share/applications/       io.github.blackerking.UrbanRecomp.desktop
+#   <prefix>/share/icons/hicolor/      16x16 ... 512x512 icons
+#   <prefix>/share/metainfo/           AppStream description (software centres)
+#
+# The window carries the same ID (ScSetAppIdentity), so the running game
+# shows the icon in the dock and the task switcher. The desktop entry names
+# the starter by its full path, so choose the prefix when configuring -- for
+# the current user:
+#
+#   cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local ...
+#   cmake --build build --target UrbanRecomp && cmake --install build
+#
+# A build folder run in place still works as before: the game finds its
+# assets next to the executable and keeps its files in the working directory.
+if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
+    set(SC_APP_ID "io.github.blackerking.UrbanRecomp")
+    set(SC_INSTALL_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/urbanrecomp")
+    file(RELATIVE_PATH SC_BIN_TO_GAME "${CMAKE_INSTALL_FULL_BINDIR}" "${SC_INSTALL_DIR}")
+    set(SC_LAUNCH_SCRIPT "${CMAKE_INSTALL_FULL_BINDIR}/urbanrecomp")
+    set(SC_LINUX "${CMAKE_SOURCE_DIR}/assets/linux")
+    configure_file(${SC_LINUX}/urbanrecomp.desktop.in
+                   ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.desktop @ONLY)
+    configure_file(${SC_LINUX}/urbanrecomp.metainfo.xml.in
+                   ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.metainfo.xml @ONLY)
+    configure_file(${SC_LINUX}/urbanrecomp.sh.in
+                   ${CMAKE_BINARY_DIR}/linux/urbanrecomp @ONLY NEWLINE_STYLE UNIX)
+
+    install(TARGETS UrbanRecomp RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp)
+    install(FILES ${CMAKE_SOURCE_DIR}/sylt_graphics/sylt_map.bin
+                  ${CMAKE_SOURCE_DIR}/sylt_graphics/sylt_card.bin
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/sylt_graphics)
+    if(SC_HAVE_LAUNCHER)
+        # The same files recomp_target_launcher_ui() stages next to the build.
+        install(FILES ${_RUI_COMMON_FONT_ASSETS}
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/assets/fonts)
+        install(FILES ${_RUI_COMMON_IMG_ASSETS} ${_RUI_CONSOLE_ASSETS_snes}
+                      ${CMAKE_SOURCE_DIR}/assets/boxart.jpg
+                      ${CMAKE_SOURCE_DIR}/assets/icon.png
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/assets/img)
+    endif()
+    install(PROGRAMS ${CMAKE_BINARY_DIR}/linux/urbanrecomp
+            DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.desktop
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.metainfo.xml
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+    foreach(size 16 24 32 48 64 128 256 512)
+        install(FILES ${SC_LINUX}/icons/${size}.png
+                DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps
+                RENAME ${SC_APP_ID}.png)
+    endforeach()
+    install(FILES ${CMAKE_SOURCE_DIR}/LICENSE ${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md
+                  ${CMAKE_SOURCE_DIR}/README.md
+            DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
 
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
@@ -292,6 +362,7 @@ if(SC_GEN_SOURCES)
         src/main.c
         src/sc_launcher.c
         src/sc_sram.c
+        src/sc_icon.c
         src/sc_mapview.c
         ${SC_GEN_SOURCES}
         src/sc_hle.c
@@ -319,7 +390,7 @@ if(SC_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
     target_compile_definitions(UrbanRecompAOT PRIVATE
-        SC_AOT_TIER)
+        SC_AOT_TIER "SC_VERSION=\"${PROJECT_VERSION}\"")
     if(MSVC)
         # See the note on UrbanRecompAOTProbe: cpu_state.c's weak-marked fallback
         # guard table is a strong definition under MSVC.
