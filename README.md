@@ -139,8 +139,11 @@ audio, **Widescreen** (Display), **Language** -- English, Deutsch, Francais
   already set by hand. `--no-settings` ignores the file; `--qualify` runs
   always do, so tools and comparisons keep their meaning.
 - A language needs `translation_<de|fr>.bin` and
-  `translation_<de|fr>_selector.scpk` (from `tools/text_tool.py`) next to the
-  game; without them it starts in English.
+  `translation_<de|fr>_selector.scpk` next to the game; without them it
+  starts in English. They carry text and artwork from the German or French
+  cartridge, so they are never shipped: with the US ROM and your own German
+  or French ROM in the folder, `python tools/make_translations.py de` (or
+  `fr`) builds them, byte for byte the files this project was tested with.
 - The launcher draws with OpenGL 3.3. Where there is none -- a Hyper-V VM
   without a GPU reports only "GDI Generic" OpenGL 1.1 -- the game skips it and
   starts with the saved settings. (recomp-ui itself does not check and
@@ -293,8 +296,28 @@ cmake --build build --target UrbanRecomp
 ./build/UrbanRecomp.exe us.sfc --qualify 3600       # headless check run
 ```
 
+A release package is built without the generated banks, since they are
+compiled from the ROM, and packed by a script that refuses a binary that
+still carries them:
+
+```bash
+cmake -S . -B build-release -DSC_AOT=OFF -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+cmake --build build-release --config Release --target UrbanRecomp
+python tools/package_release.py v1.0.0
+```
+
 See CONTRIBUTING.md for the full checkout/build/PR workflow and how this
 repository's framework dependency is managed, and
 `docs/INVESTIGATION_dpad.md` for the debugging tools built along the way
 (env-gated tracing, PC-reachability bitmap diffing, synthetic `--input`
 injection, frame dumps).
+
+## License
+
+Urban Recomp's own code, tools, documentation and artwork are under the
+[MIT licence](LICENSE). A program built from this repository includes
+[snesrecomp](https://github.com/mstan/snesrecomp), which is licensed
+PolyForm Noncommercial 1.0.0, so the program itself may be used and passed on
+for noncommercial purposes only. All third-party licences are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Nothing here grants any
+right to the game itself.

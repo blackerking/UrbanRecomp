@@ -126,3 +126,6 @@ translation_*.bin
 # the ROM's artwork, so it is ROM-derived exactly like the blobs above --
 # a translator's edited version is theirs to keep, not this repo's.
 labels_*.png
+
+# Release packages (tools/package_release.py)
+/dist/

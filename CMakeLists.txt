@@ -160,17 +160,25 @@ endif()
 # normal build, and it is skipped entirely when src/gen has not been generated.
 file(GLOB SC_GEN_SOURCES ${CMAKE_SOURCE_DIR}/src/gen/*.c)
 
+# SC_AOT=OFF builds without the generated banks even when src/gen exists.
+# Release packages use it: src/gen is compiled from the ROM, so a binary that
+# links it carries ROM-derived code, and the interpreter -- the default at run
+# time anyway -- needs none of it.
+option(SC_AOT "Link the AOT tier from src/gen when it is present" ON)
+if(NOT SC_AOT)
+    set(SC_GEN_SOURCES "")
+endif()
+
 # ── AOT is the standard build ───────────────────────────────────────────────
 #
 # When the generated banks are present, UrbanRecomp IS the AOT build: the
-# compiled bodies and the HLEs are linked in and the fiber drives them by
-# default. That is what makes the map generator HLE at 01:f1ed actually run,
+# compiled bodies and the HLEs are linked in, and SC_FIBER=1 runs the guest
+# through them. That is what makes the map generator HLE at 01:f1ed run,
 # which is the point of having an AOT tier at all -- it turns ~800 frames of
 # the SNES CPU grinding through 03:d840 into less than one.
 #
-# SC_FIBER=0 still interprets every opcode. That path is unchanged and remains
-# the correctness baseline every --qualify number rests on, so the fallback is
-# always one environment variable away.
+# Without SC_FIBER the interpreter runs every opcode -- the default, and the
+# correctness baseline every --qualify number rests on.
 #
 # Without src/gen -- a fresh clone before tools/regen.sh -- this whole block is
 # skipped and the target builds interpreter-only exactly as it did before.
