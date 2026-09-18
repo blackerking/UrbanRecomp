@@ -83,6 +83,7 @@ logo.png
 # themselves are not.
 coverage*.bin
 wram_map*.bin
+wmap_*.bin
 session_sram.bin
 *_sram.bin
 
