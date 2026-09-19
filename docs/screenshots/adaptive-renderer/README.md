@@ -1,5 +1,22 @@
 # Adaptive Widescreen screenshots
 
+## Regression follow-up and left-aligned controls
+
+Captured from the SDL3 build at `a9cddae`, after integrating main `28c280b`.
+The same running instance was resized from 1440x405 to 600x900. These are
+unscaled logical canvas captures; the game presents them with the selected
+pixel aspect. The toolbar stays at the top left as the map expands.
+
+![Top-left controls in a wide window](left-aligned-wide.png)
+
+<img src="left-aligned-portrait.png" alt="Top-left controls in a portrait window" width="300">
+
+The title lights, scenario cards, fax desk and populated-city roofs:
+
+![Renderer regression captures](regression-checks.png)
+
+## Original draft (historical)
+
 Captured from the Windows SDL3 build of implementation commit `67e98bd`.
 Gameplay images are direct captures of the game window's client area. The
 Mods image comes from the shared launcher's screenshot hook. ROMs and local
@@ -27,6 +44,6 @@ selected and the original view centered.
 
 ![Adaptive Widescreen settings in the shared Mods launcher](mods.png)
 
-These screenshots show the current draft. Dialog centering independent of a
+The images in this historical section show the original draft. Dialog centering independent of a
 top-left gameplay/HUD anchor remains a follow-up; see
 [renderer scope and validation](../../ADAPTIVE_RENDERER.md).
