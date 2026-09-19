@@ -1,5 +1,5 @@
 /*
- * SimCity-local SDL2/SDL3 shims, for the two things the shared
+ * Project-local SDL2/SDL3 shims, for the two things the shared
  * runner/src/desktop/sdl_compat.h does not cover.
  *
  * Everything else this host needs is already in the shared shim -- window and
@@ -19,8 +19,8 @@
  *    SDL_GetScancodeFromKey comment in main.c -- bindings follow the key
  *    labels on a QWERTZ layout, which needs the physical code).
  */
-#ifndef SIMCITY_SC_SDL_COMPAT_H
-#define SIMCITY_SC_SDL_COMPAT_H
+#ifndef SC_SDL_COMPAT_H_INCLUDED
+#define SC_SDL_COMPAT_H_INCLUDED
 
 #include "desktop/sdl_compat.h"
 
@@ -127,4 +127,4 @@ static inline void sc_audio_close(ScAudio *a) {
 #endif
 }
 
-#endif /* SIMCITY_SC_SDL_COMPAT_H */
+#endif /* SC_SDL_COMPAT_H_INCLUDED */

@@ -32,7 +32,7 @@ Nothing in OAM separates the two, and there is no `wsOamLeftHint` to say which.
 
 ## What it looks like
 
-SimCity's scenario selector blinks its green selection cursor by toggling a
+This game's scenario selector blinks its green selection cursor by toggling a
 flag and skipping the draw — and it hides the sprite by **parking it at a
 negative X**. Measured on one save state, identical frames at both widths:
 

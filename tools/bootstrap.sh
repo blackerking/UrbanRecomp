@@ -36,4 +36,4 @@ if [ ! -f "$ROOT/snesrecomp/runner/runner.cmake" ] ||
 fi
 
 printf '\nReady: snesrecomp %s and all nested submodules are initialized.\n' "$actual"
-printf 'Next: stage your legally obtained ROM as simcity.sfc and run bash tools/regen.sh --no-tests\n'
+printf 'Next: put your own legally obtained US ROM (any file name) in the repository root and run bash tools/regen.sh --no-tests\n'

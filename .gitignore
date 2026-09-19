@@ -12,7 +12,7 @@
 # their own map plus the pointer and seed bytes to hook it up -- no ROM
 # content. See sylt_graphics/PROVENANCE.md.
 *.ips
-!sylt_graphics/Sim City Sylt.ips
+!sylt_graphics/sylt.ips
 
 # Active recompiler output -- generated locally per-developer
 src/gen/
@@ -25,6 +25,8 @@ src/gen/
 saves/
 *.sav
 *.srm
+*.srm.bak
+*.srm.tmp
 
 # IDE
 .vs/
@@ -43,6 +45,9 @@ config.local.ini
 sc-video.ini
 sc-video.ini.tmp
 rom.cfg
+# Launcher state (src/sc_launcher.c, recomp-ui)
+sc-settings.ini
+sc-settings.ini.tmp
 keybinds.ini
 imgui.ini
 
@@ -62,8 +67,8 @@ wram_snapshot.bin
 savestate_*.bin
 menu_preview.ppm
 
-# Local visual reference, kept for designing a future project logo. The
-# official SimCity wordmark is Maxis/Nintendo artwork, so it stays local
+# Local visual reference from the design of the project logo. The game's
+# official wordmark is its publisher's artwork, so it stays local
 # and is deliberately not distributed with this repository -- same
 # reasoning as the ROM and the save states above.
 logo.png
@@ -71,7 +76,7 @@ logo.png
 # Third-party reference tool (Brad Smith, rainwarrior.ca) -- no stated
 # licence, so kept local and not redistributed. Findings are recorded in
 # docs/REFERENCE_map_format.md instead.
-SimCity_map.lua
+*_map.lua
 
 # Recorded-session artifacts. Both are derived from the copyrighted ROM --
 # coverage.bin is a map of which ROM addresses executed, session_sram.bin is
@@ -81,6 +86,9 @@ SimCity_map.lua
 # themselves are not.
 coverage*.bin
 wram_map*.bin
+wmap_*.bin
+# snesrecomp tier-2 discovery captures, written by AOT runs
+tier2_*.jsonl
 session_sram.bin
 *_sram.bin
 
@@ -91,22 +99,32 @@ session_sram.bin
 # README.md). Regenerate with SC_MX_BITMAP=<path> on any run.
 mx_*.bin
 
-# Hand-drawn card artwork for the ninth scenario entry, and what
-# tools/make_sylt_card.py derives from it. Kept out for the same reason as
-# everything else here: the repo carries code and findings, not assets. The
-# host loads sylt_card.bin at runtime and falls back to a drawn placeholder
-# when it is missing, so a checkout without this still builds and still shows
-# a ninth entry. Regenerate with:
-#   python tools/make_sylt_card.py sylt_graphics/<your card>.jpg
-# sylt_graphics/ is now COMMITTED -- the Sylt map is used with the written
-# permission of its author, and the card artwork is the project's own. Two
-# exceptions stay out:
+# sylt_graphics/ is committed: the Sylt map is used with the written permission
+# of its author, and the card artwork is the project's own. See
+# sylt_graphics/PROVENANCE.md. Two things stay out:
 #
-#   "Sim City Rio on its own Bank.ips" embeds 7605 bytes that are byte-identical
+#   The "Rio on its own Bank" patch embeds 7605 bytes that are byte-identical
 #   to Rio's map in the ROM (verified: it decompresses to the same 10068 bytes).
 #   That is copyrighted ROM data, which no third-party permission covers, and
 #   this host does not need it -- Rio is never relocated. See docs/ROM_MAP.md.
 #
-#   *_check.png are regenerated previews, not sources.
-sylt_graphics/Sim City Rio on its own Bank.ips
+#   *_check.png are the check renders tools/make_sylt_card.py writes.
+sylt_graphics/*Rio on its own Bank.ips
 sylt_graphics/*_check.png
+
+# Screen-packet patches (tools/text_tool.py packets). Built from a donor
+# ROM and carrying its artwork verbatim, so they are ROM-derived and stay
+# out, exactly like the message and briefing blobs.
+*.scpk
+
+# Translation blobs (tools/text_tool.py import/pack). Same reason: the
+# words and glyphs are lifted out of a donor ROM.
+translation_*.bin
+
+# Building-label sheets (tools/text_tool.py labels). The exported image IS
+# the ROM's artwork, so it is ROM-derived exactly like the blobs above --
+# a translator's edited version is theirs to keep, not this repo's.
+labels_*.png
+
+# Release packages (tools/package_release.py)
+/dist/

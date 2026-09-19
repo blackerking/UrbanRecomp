@@ -1,5 +1,5 @@
 /*
- * Self-test for the fiber layer (src/simcity_fiber.c).
+ * Self-test for the fiber layer (src/sc_fiber.c).
  *
  * Coroutine bugs are miserable to debug once a 65816 interpreter is running
  * on top of them -- a corrupted stack or unswitched FP state shows up as
@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "simcity_fiber.h"
+#include "sc_fiber.h"
 
 static int   s_frames_seen;
 static int   s_stack_corrupt;
@@ -28,7 +28,7 @@ static void deep(int depth) {
     } else {
         s_frames_seen++;
         s_fp_in_game = s_fp_in_game * 1.5 + 0.25;
-        SimCityFiber_YieldToHost();   /* suspend from 8 frames down */
+        ScFiber_YieldToHost();   /* suspend from 8 frames down */
     }
     if (marker != depth * 7 + 1) s_stack_corrupt = 1;
 }
@@ -40,7 +40,7 @@ static void game_entry(void) {
 int main(void) {
     int fails = 0;
 
-    if (!SimCityFiber_Create(game_entry)) {
+    if (!ScFiber_Create(game_entry)) {
         printf("FAIL: could not create fiber\n");
         return 1;
     }
@@ -51,7 +51,7 @@ int main(void) {
 
     for (int i = 1; i <= 5; i++) {
         host_fp = host_fp * 2.0 - 0.5;      /* host FP work around the switch */
-        SimCityFiber_RunOneFrame();
+        ScFiber_RunOneFrame();
         if (s_frames_seen != i) {
             printf("FAIL: frame %d -> game ran %d times\n", i, s_frames_seen);
             fails++;
@@ -81,17 +81,17 @@ int main(void) {
     }
 
     printf("  frames driven      : %d\n", s_frames_seen);
-    printf("  yields recorded    : %lu\n", g_simcity_fiber_yields);
+    printf("  yields recorded    : %lu\n", g_sc_fiber_yields);
     printf("  game stack intact  : %s\n", s_stack_corrupt ? "NO" : "yes");
     printf("  host FP preserved  : %s\n", host_fp == want ? "yes" : "NO");
     printf("  game FP preserved  : %s\n", s_fp_in_game == wantg ? "yes" : "NO");
 
-    if (g_simcity_fiber_yields != 5) {
-        printf("FAIL: %lu yields, want 5\n", g_simcity_fiber_yields);
+    if (g_sc_fiber_yields != 5) {
+        printf("FAIL: %lu yields, want 5\n", g_sc_fiber_yields);
         fails++;
     }
 
-    SimCityFiber_Destroy();
+    ScFiber_Destroy();
     printf("%s\n", fails ? "FIBER TEST FAILED" : "fiber test PASSED");
     return fails ? 1 : 0;
 }

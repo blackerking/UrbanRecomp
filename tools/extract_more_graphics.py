@@ -12,7 +12,8 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from extract_graphics import nintendo_decompress, render_tileset, tileset_reduce
 
-ROM = os.path.join(os.path.dirname(__file__), "..", "simcity.sfc")
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom("us", required=False) or "us.sfc"
 OUT = os.path.join(os.path.dirname(__file__), "..", "extracted_assets")
 
 CANDIDATES = {

@@ -23,7 +23,8 @@ such blind spot: it records what the CPU actually did.
 import collections
 import sys
 
-ROM = 'simcity.sfc'
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom('us', required=False) or 'us.sfc'
 DEFAULT_BITMAP = 'coverage_union.bin'
 CODE_BANKS = range(6)
 MAX_SKIP = 16          # beyond this it is not an inline-argument convention

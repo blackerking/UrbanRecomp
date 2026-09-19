@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'snesrecomp'))
 from recompiler.snes65816 import MODE_STR, IMM, REL, REL16, ABS, ABS_X, ABS_Y  # noqa: E402
 from recompiler.v2.decoder import decode_insn  # noqa: E402
 
-ROM = 'simcity.sfc'
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom('us', required=False) or 'us.sfc'
 
 # Callees that consume bytes embedded after the call and adjust their own
 # return address, so the caller resumes past them. Established empirically in

@@ -4,7 +4,7 @@
 
 **Sylt map by lytron**, released 25 October 2014.
 
-`Sim City Sylt.ips` and the `sylt_map.bin` extracted from it are lytron's work,
+`sylt.ips` and the `sylt_map.bin` extracted from it are lytron's work,
 included here **with the author's written permission**. Please keep this credit
 with the files; if you fork this repo and do not have that permission yourself,
 remove them and regenerate from your own copy of the patch.
@@ -20,23 +20,38 @@ patch and the view fix.
 
 Regenerate with:
 
-    python tools/make_sylt_map.py "sylt_graphics/Sim City Sylt.ips"
+    python tools/make_sylt_map.py "sylt_graphics/sylt.ips"
 
 ## What is deliberately NOT here
 
-`Sim City Rio on its own Bank.ips` is **not committed**. It carries 7605 bytes
+The "Rio on its own Bank" patch is **not committed**. It carries 7605 bytes
 that decompress to exactly the same 10068 bytes as Rio's map in the ROM, so it
 is a verbatim copy of copyrighted ROM data — something no third-party
 permission covers. This host never relocates Rio, so it is not needed.
 
 ## The card
 
-`sylt_card_preview.png` is the card artwork and is the source of record;
-`Untitled.jpg` is the earlier hand-drawn version it came from. `sylt_card.bin`
-is generated:
+The card artwork is this project's own.
 
-    python tools/make_sylt_card.py sylt_graphics/sylt_card_preview.png
+| file | what |
+|---|---|
+| `sylt_card.png` | the card as it ships -- the source of record |
+| `sylt_card_sketch.jpg` | the hand drawing the card was made from |
+| `sylt_card.bin` | 2bpp tiles the game loads, generated from `sylt_card.png` |
 
-The tool writes its check render as `<source>_check.png`, which is gitignored —
-the preview doubles as a re-importable source once touched up by hand, so
-overwriting it would destroy the edit.
+Regenerate with:
+
+    python tools/make_sylt_card.py sylt_graphics/sylt_card.png
+
+The tool also writes a check render, `sylt_card_check.png`, which is
+gitignored. It is named after the source rather than overwriting it, because
+the card is touched up by hand and re-imported.
+
+## Everything in this folder
+
+| file | from | used by |
+|---|---|---|
+| `sylt.ips` | lytron, with permission | `tools/make_sylt_map.py` |
+| `sylt_map.bin` | generated from `sylt.ips` | the game, at run time |
+| `sylt_card.png`, `sylt_card_sketch.jpg` | this project | `tools/make_sylt_card.py` |
+| `sylt_card.bin` | generated from `sylt_card.png` | the game, at run time |

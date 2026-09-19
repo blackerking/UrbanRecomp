@@ -32,7 +32,7 @@ excluded (`yield_pc && !auto_quiescent`).
 
 ## Evidence
 
-Driving SimCity's guest through `interp_bridge_run_loop`:
+Driving this game's guest through `interp_bridge_run_loop`:
 
 ```
 before: frame 1 enters at 008000 and never returns

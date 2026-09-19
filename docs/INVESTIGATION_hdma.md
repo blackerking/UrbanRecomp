@@ -84,7 +84,7 @@ be added game-side using primitives the submodule already exposes.
 
 ## Caveat: other games sharing this engine
 
-This gap is almost certainly not specific to SimCity -- any other
+This gap is almost certainly not specific to this game -- any other
 interpreter-only (non-AOT) recomp project built on this same `snesrecomp`
 checkout would have the identical no-op HDMA problem for any ROM that uses
 HDMA for anything (fades, gradients, split-scroll, window effects, etc.).

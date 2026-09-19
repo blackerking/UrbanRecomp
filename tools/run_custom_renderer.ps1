@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $repo 'build-custom'
-$exe = Join-Path $build 'SimCitySNESRecomp.exe'
+$exe = Join-Path $build 'UrbanRecomp.exe'
 if ($Rom) { $Rom = (Resolve-Path -LiteralPath $Rom).Path }
 if (-not $SkipBuild) {
     if (-not (Test-Path -LiteralPath $CMake)) { throw "CMake not found: $CMake" }

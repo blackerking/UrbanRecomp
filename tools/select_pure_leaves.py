@@ -26,7 +26,8 @@ import json
 import sys
 
 MANIFEST = 'src/gen/program_manifest.json'
-ROM = 'simcity.sfc'
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom('us', required=False) or 'us.sfc'
 
 # Opcodes that leave the routine or call out of it.
 TRANSFER = {
@@ -134,8 +135,8 @@ def main():
     print(' * no hardware-register access, small extent. These are the routines')
     print(' * where synthetic entry state is a fair test -- see the tool for why')
     print(' * that restriction exists. */')
-    print('#define SIMCITY_PURE_LEAF_COUNT %d' % len(kept))
-    print('static const struct { unsigned pc24, end; } kSimCityPureLeaves[] = {')
+    print('#define SC_PURE_LEAF_COUNT %d' % len(kept))
+    print('static const struct { unsigned pc24, end; } kScPureLeaves[] = {')
     for lo, hi in kept:
         print('    { 0x%06Xu, 0x%06Xu },' % (lo, hi))
     print('};')

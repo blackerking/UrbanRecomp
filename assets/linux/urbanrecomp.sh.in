@@ -1,0 +1,25 @@
+#!/bin/sh
+# Starts an installed Urban Recomp (see CMakeLists.txt, "Linux desktop").
+#
+# The game keeps its ROM, settings, key bindings and saves in the working
+# directory. Installed, the program and its assets live next to this script's
+# bin/ folder (@SC_BIN_TO_GAME@), so this runs it from the player's own data
+# folder instead:
+#
+#     ${URBANRECOMP_HOME:-${XDG_DATA_HOME:-~/.local/share}/urbanrecomp}
+#
+# Put the ROM there (any file name), or pick it in the launcher.
+
+data="${URBANRECOMP_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/urbanrecomp}"
+
+# A ROM given as a relative path must survive the change of directory.
+if [ $# -gt 0 ] && [ -f "$1" ]; then
+    rom="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+    shift
+    set -- "$rom" "$@"
+fi
+
+here="$(dirname "$(readlink -f "$0")")"
+game="$here/@SC_BIN_TO_GAME@/UrbanRecomp"
+mkdir -p "$data" && cd "$data" || exit 1
+exec "$game" "$@"

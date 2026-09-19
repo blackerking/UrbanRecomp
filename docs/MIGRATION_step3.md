@@ -140,7 +140,7 @@ refutation in `LLE_FIRST_ANALYSIS.md` describes.
    game's frame boundary visible to the host, and both designs need it.
 3. Then either yield a fiber from that HLE (ar-recomp's model), or drive the
    frame through `interp_bridge_run_scheduler(cpu, entry, 0x009313,
-   0x00b9)` — SimCity's yield primitive is `00:930d` spinning on `$b9`, and it
+   0x00b9)` — the game's yield primitive is `00:930d` spinning on `$b9`, and it
    is a plain `RTS`-returning primitive, so it should not need MMX's
    coroutine-switch handling. Note the **auto-quiescent** variant is wrong for
    this game: the spin does `INC $c7` every iteration, so the state is not
@@ -188,9 +188,9 @@ Two details worth stealing if we go this way: the fiber is created with
 and the coroutine does use FP), and the watchdog gets a *yield* hook rather
 than a `longjmp`, because longjmp out of a fiber is undefined behaviour.
 
-### The mapping to SimCity is unusually direct
+### The mapping to this game is unusually direct
 
-| ar-recomp | SimCity |
+| ar-recomp | this game |
 |---|---|
 | `hle_func 8418 ActRaiser_WaitForVblank` | `00:930d` — COP service 0, spins on `$b9` |
 | HLE yields the fiber | plain `RTS`-returning; simpler than a coroutine switch |
@@ -211,7 +211,7 @@ and states the framework is retiring it in favour of the fiber-free LLE bridge
 
 - **ar-recomp's path** — proven, copyable, and the pattern is on disk.
 - **The framework's stated direction** — newer, aligned with upstream, and
-  SimCity's `RTS`-returning primitive suits it better than MMX's coroutine
+  the game's `RTS`-returning primitive suits it better than MMX's coroutine
   switch did (which is what forced the NLR-unwind machinery in the first
   place).
 
@@ -220,10 +220,10 @@ Either way the first concrete step is identical: declare
 game's frame boundary visible to the host, and it is required by both designs.
 
 
-## 5. Decision: fibers — and the one way SimCity differs from ar-recomp
+## 5. Decision: fibers — and the one way this game differs from ar-recomp
 
-Fibers chosen. `src/simcity_fiber.c` implements the coroutine layer
-(`SimCityFiber_Create` / `_RunOneFrame` / `_YieldToHost`), with
+Fibers chosen. `src/sc_fiber.c` implements the coroutine layer
+(`ScFiber_Create` / `_RunOneFrame` / `_YieldToHost`), with
 `tests/fiber_test.c` as a standalone self-test: it drives five frames, yields
 from eight stack frames down, and checks that every level's local survives the
 switch and that floating-point state is preserved on both sides. Coroutine
@@ -232,14 +232,14 @@ bugs are far cheaper to find there than underneath a running 65816.
 `FIBER_FLAG_FLOAT_SWITCH` is mandatory, as ar-recomp documents — without it x86
 FP state is not switched between fibers, and both sides here use FP.
 
-### SimCity cannot start inside compiled code
+### The game cannot start inside compiled code
 
 This is the one place the ar-recomp transplant breaks, and it shapes
 everything after it.
 
 ar-recomp's game coroutine begins with `ResetHandler_M1X1(&g_cpu)` and never
 returns: the whole game runs as compiled C inside that single call, and the
-fiber exists only to suspend it. SimCity has no compiled entry point to hand
+fiber exists only to suspend it. The game has no compiled entry point to hand
 the fiber, because **both architectural entry points are `lle_only`**:
 
 | entry | blocked by |
@@ -259,9 +259,9 @@ at all, and it means the eventual driver looks more like
 
 ### Not yet wired, deliberately
 
-`g_simcity_yield_to_host` is still NULL. Installing
-`SimCityFiber_YieldToHost` before a host frame driver exists would yield into
-a host that is not inside `SimCityFiber_RunOneFrame`, which crashes. The
+`g_sc_yield_to_host` is still NULL. Installing
+`ScFiber_YieldToHost` before a host frame driver exists would yield into
+a host that is not inside `ScFiber_RunOneFrame`, which crashes. The
 remaining work is that driver: run the guest inside the fiber, bounce
 JSR/JSL into compiled bodies where one exists, and let the vblank HLE suspend.
 
@@ -269,7 +269,7 @@ JSR/JSL into compiled bodies where one exists, and let the vblank HLE suspend.
 ## 6. The tiers agree on logic but not on cycle counts
 
 Measured while checking whether a device-advance-by-cycle-delta driver is
-viable. `SimCityAOTDiff` now compares `cpu->master_cycles` against the
+viable. `UrbanRecompAOTDiff` now compares `cpu->master_cycles` against the
 interpreter's summed opcode cycles over the same routine and inputs:
 
 ```
@@ -319,7 +319,7 @@ problem beyond this game.
 ## 7. Step 3d attempted: the guest does run inside the fiber, and then deadlocks
 
 `SC_FIBER=1` on the AOT build now creates the game fiber, installs the vblank
-yield, and runs the guest inside it. `src/simcity_fiberdrive.c` is the driver;
+yield, and runs the guest inside it. `src/sc_fiberdrive.c` is the driver;
 it is strictly opt-in and the default path is untouched, verified byte-identical
 between tiers on five save states with the fiber code linked in but inert.
 
@@ -368,13 +368,13 @@ that happens naturally; inside the fiber it never does.
 ### What that means for the design
 
 ar-recomp gets away with a pure coroutine because its waits are vblank-shaped
-and HLE'd. SimCity has at least one hardware-status spin *before* the first
+and HLE'd. The game has at least one hardware-status spin *before* the first
 vblank wait, so the pure transplant cannot boot no matter how good the
 coverage gets. Three ways forward, and the first is the cheapest:
 
 1. **HLE the status spins too.** `hle_func 927c` and any siblings, the same
    way `hle_func 930d` handles the vblank wait. ar-recomp declares 13 HLEs
-   and calls most of them optimisations; SimCity would need a few as
+   and calls most of them optimisations; the game would need a few as
    *necessities*. Requires finding them all -- a missed one is another
    deadlock, and it will look exactly like this one.
 2. **Let the fiber yield on device reads.** Any read of a status register
@@ -398,7 +398,7 @@ than it gave.
 
 §7 ended by recommending `interp_bridge_run_loop` -- the framework's own
 model, which restores the execution bound and keeps compiled bodies live. It
-was implemented (`src/simcity_fiberdrive.c`) with SimCity's wait mapped
+was implemented (`src/sc_fiberdrive.c`) with the game's wait mapped
 exactly:
 
 ```
@@ -685,7 +685,7 @@ So the whole sequence is now visible:
 4. that body returns `0x40000000`, a yield-unwind,
 5. the bridge begins unwinding to `$008D65`,
 6. **control never returns to the host driver** -- `run_loop` does not return,
-   so `SimCityFiberDrive_RunGuestFrame` never prints its `c:` marker.
+   so `ScFiberDrive_RunGuestFrame` never prints its `c:` marker.
 
 ### The deadline is not the cause
 
@@ -752,7 +752,7 @@ boot bounces into after the deadline has already expired.
 ### The actual defect
 
 The unwind is correct; it just does not come home. `interp_bridge_run_loop`
-never returns to `SimCityFiberDrive_RunGuestFrame` after
+never returns to `ScFiberDrive_RunGuestFrame` after
 `interp_bridge_lle_yield_unwind()` propagates out of the bounce, so the host
 never gets the chance to re-arm the deadline and resume. That is the one thing
 left to fix, and it is squarely in the bridge rather than in this game.
@@ -1095,7 +1095,7 @@ project, because every access went through the interpreter -- and fatal the
 moment the bridge routes a hardware write through `WriteReg`, where `$4300`
 lands in `dma_write(g_dma, ...)`.
 
-`src/simcity_fiberdrive.c` now publishes them. One subtlety cost a cycle:
+`src/sc_fiberdrive.c` now publishes them. One subtlety cost a cycle:
 they have to be published on the **first frame**, not in `Init()`, because
 `Init()` runs during env parsing and `g_snes` does not exist yet.
 
@@ -1111,7 +1111,7 @@ they have to be published on the **first frame**, not in `Init()`, because
 ```
 
 The guest executes inside the bridge, frame after frame, with the resume PC
-advancing through real boot code. **`SimCity_WaitForVblank` fires**, so the
+advancing through real boot code. **`ScHle_WaitForVblank` fires**, so the
 guest reaches its frame boundary in compiled code -- the thing this whole
 migration exists to make happen.
 
@@ -1121,7 +1121,7 @@ migration exists to make happen.
 `nmi_serviced=0`, and the HLE warns that no yield target is installed. All
 expected, none mysterious:
 
-- `g_simcity_yield_to_host` is NULL. It was the fiber's hook, and the
+- `g_sc_yield_to_host` is NULL. It was the fiber's hook, and the
   `run_loop` driver replaced the fiber -- but *compiled* `00:930d` still calls
   the HLE directly, so it returns immediately instead of pacing. Either point
   it at a run_loop-aware yield, or drop the `hle_func` and let the bridge's
@@ -1144,13 +1144,13 @@ was the only way to hand a frame back from arbitrary call depth. Under
 (`00:9311` on `$b9`) -- but only in **interpreted** code. An HLE'd `00:930d`
 inside a compiled body returned immediately and the frame was never paced, so
 the HLE was actively defeating the mechanism meant to replace it. Commented out
-in `recomp/bank00.cfg`; `src/simcity_hle.c` is kept, since the fiber design is
+in `recomp/bank00.cfg`; `src/sc_hle.c` is kept, since the fiber design is
 still a live option if the bridge route stalls.
 
 **Mirrored the guest clock.** `--qualify` and the APU pacing read
 `g_master_cycles`, which only the per-opcode loop increments, so the frame path
 reported `master=0` and every cycle-derived check read as dead. The driver now
-exposes `SimCityFiberDrive_MasterCycles()` and the frame path advances the host
+exposes `ScFiberDrive_MasterCycles()` and the frame path advances the host
 counter by the guest's own delta:
 
 ```

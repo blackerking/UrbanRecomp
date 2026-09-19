@@ -18,11 +18,15 @@ Output, little-endian:
     u16 tiles_wide, u16 tiles_high, u16 reserved, u16 reserved
     tiles_wide*tiles_high * 16 bytes   2bpp tile data, row-major
 
-The repo stays asset-free: this writes next to the source image and the host
-loads it at runtime, falling back to a drawn placeholder when it is absent.
+It writes sylt_card.bin next to the source image; both are committed in
+sylt_graphics/. The host loads it at run time and draws a placeholder when it
+is absent.
 
 Usage:
-    python tools/make_sylt_card.py sylt_graphics/Untitled.jpg
+    python tools/make_sylt_card.py sylt_graphics/sylt_card.png
+
+sylt_card.png is the card as it ships; sylt_card_sketch.jpg is the hand
+drawing it was made from, which imports too.
 """
 import os
 import struct

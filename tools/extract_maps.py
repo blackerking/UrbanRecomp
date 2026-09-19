@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Decode the eight scenario maps out of the ROM.
 
-Run from the repo root with your own ROM staged as `simcity.sfc`:
+Run from the repo root with your own US ROM there (any file name; it is
+found by its contents, see tools/find_rom.py):
 
     python tools/extract_maps.py
 
@@ -192,7 +193,11 @@ def preview_rgb(cells):
 
 
 def main():
-    rom_path = sys.argv[1] if len(sys.argv) > 1 else 'simcity.sfc'
+    if len(sys.argv) > 1:
+        rom_path = sys.argv[1]
+    else:
+        from find_rom import find_rom
+        rom_path = find_rom('us')
     if not os.path.exists(rom_path):
         sys.exit('%s not found -- stage your own ROM there first' % rom_path)
     with open(rom_path, 'rb') as f:

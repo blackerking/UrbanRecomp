@@ -10,7 +10,7 @@ instructions the ROM never executes.
 
 The AOT differential cannot catch it here, because this host still runs
 everything on the interpreter (`src/main.c`: "this host bypasses common_rtl.c
-entirely"). The `SimCitySNESRecompAOT` binary links the generated banks but
+entirely"). The `UrbanRecompAOT` binary links the generated banks but
 does not execute them, so byte-identical WRAM between the two builds says
 nothing about whether the emitted C is right.
 
@@ -37,7 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from recompiler.v2.decoder import decode_insn          # noqa: E402
 from mx_exit_check import Bitmap, PLANE                # noqa: E402
 
-ROM = 'simcity.sfc'
+from find_rom import find_rom  # noqa: E402  (tools/ is sys.path[0])
+ROM = find_rom('us', required=False) or 'us.sfc'
 LABEL = re.compile(r'^\s*L_([0-9A-Fa-f]{4})_M([01])X([01]):', re.M)
 
 

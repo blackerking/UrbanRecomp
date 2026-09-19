@@ -3,7 +3,7 @@
 **This is a wrong-code bug, not a coverage limit.** The emitter produces
 `aot_eligible` bodies that execute instructions the real CPU never executes.
 
-Found in SimCity (SNES, USA); the idiom is general 65816, so other titles are
+Found in the US city-builder ROM this host targets; the idiom is general 65816, so other titles are
 likely affected. A tested patch is at the bottom.
 
 ## The gap
@@ -23,7 +23,7 @@ and the match requires a stack-relative store:
 }
 ```
 
-SimCity expresses identical semantics two other ways — **pop the return
+The game expresses identical semantics two other ways — **pop the return
 address, adjust it, push it back**. The stack pointer ends where it started, so
 these are equivalent, just written with stack instructions instead of
 stack-relative addressing:
@@ -154,9 +154,9 @@ clean costs far more than a rejected one.
 ## Reproducing
 
 ```bash
-git clone --recurse-submodules https://github.com/blackerking/SimCitySNESRecomp
-cd SimCitySNESRecomp
-# stage your own legally obtained SimCity (USA) as simcity.sfc
+git clone --recurse-submodules https://github.com/blackerking/UrbanRecomp
+cd UrbanRecomp
+# put your own legally obtained US ROM in the repository root (any file name)
 PYTHON=python bash tools/regen.sh --no-tests
 ```
 

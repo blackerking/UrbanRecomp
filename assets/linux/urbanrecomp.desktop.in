@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Urban Recomp
+GenericName=City Builder
+GenericName[de]=Städtebau
+Comment=A classic SNES city builder, recompiled to run natively (bring your own ROM)
+Comment[de]=Ein klassischer SNES-Städtebau, nativ rekompiliert (eigene ROM nötig)
+Exec=@SC_LAUNCH_SCRIPT@
+Icon=@SC_APP_ID@
+Terminal=false
+Categories=Game;Simulation;
+Keywords=city;simulation;snes;recomp;widescreen;
+StartupNotify=true
+StartupWMClass=@SC_APP_ID@

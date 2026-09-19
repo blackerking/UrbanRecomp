@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regen pipeline driver for SimCitySNESRecomp.
+# Regen pipeline driver for UrbanRecomp.
 #
 # Regenerates banks from recomp/*.cfg and the verified ROM, then syncs
 # recomp/funcs.h.
@@ -31,7 +31,7 @@ cd "$ROOT"
 
 SNESRECOMP_ROOT="${SNESRECOMP_ROOT:-snesrecomp}"
 TESTS="$SNESRECOMP_ROOT/tests/run_tests.py"
-ROM="simcity.sfc"
+ROM="${ROM:-}"   # the US ROM; found by its contents when unset
 CFG_DIR="recomp"
 OUT_DIR="src/gen"
 FUNCS_H="recomp/funcs.h"
@@ -41,15 +41,18 @@ if [ ! -f "$SNESRECOMP_ROOT/tools/v2_emit.py" ]; then
   exit 1
 fi
 
-if [ ! -f "$ROM" ]; then
-  echo "regen.sh: $ROM not found - stage the verified SimCity ROM at the repo root first." >&2
-  exit 1
-fi
-
 # Python interpreter: prefer python3 (macOS / most Linux have no bare `python`).
 PYTHON="${PYTHON:-$(command -v python3 || command -v python || true)}"
 if [ -z "$PYTHON" ]; then
   echo "regen.sh: no python3/python interpreter found on PATH" >&2
+  exit 1
+fi
+
+if [ -z "$ROM" ]; then
+  ROM="$("$PYTHON" tools/find_rom.py us)" || exit 1
+fi
+if [ ! -f "$ROM" ]; then
+  echo "regen.sh: $ROM not found - pass ROM=<your US ROM>, or put it (any file name) in the repository root." >&2
   exit 1
 fi
 

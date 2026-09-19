@@ -1,10 +1,10 @@
-/* main.c -- SimCitySNESRecomp desktop host.
+/* main.c -- UrbanRecomp desktop host.
  *
  * Phase-1 bring-up: drives the ROM entirely through the shared runner's
  * standalone 65816 interpreter (interp816) over the real device models
  * (snes.c/ppu.c/apu.c/dma.c/cart.c), exactly the "LLE-first" correctness
  * baseline snesrecomp/docs/LLE_FIRST_ANALYSIS.md describes as authoritative
- * for every game before any AOT bank is layered on top. No SimCity-specific
+ * for every game before any AOT bank is layered on top. No game-specific
  * addresses or scheduler knowledge are required for this milestone: the
  * host runs a fixed number of accurate H/V master-clock ticks per video
  * frame and pauses, the same frame-boundary technique snesrecomp's own
@@ -12,7 +12,7 @@
  *
  * Wiring the AOT/CpuState hybrid tier (common_cpu_infra.c's SnesInit /
  * RtlRegisterGame contract, interp_bridge.c's compiled<->interpreted
- * bouncing) is the documented next step once SimCity's own scheduler idiom
+ * bouncing) is the documented next step once the game's own scheduler idiom
  * is understood well enough to declare it safely -- see README.md.
  */
 #include <stdio.h>
@@ -68,8 +68,8 @@ typedef SDL_Rect ScRect;
 #include "types.h"
 
 /* ── globals the shared runner device sources reference ─────────────────── */
-/* SIMCITY_AOT_TIER: built as part of the AOT/CpuState migration (see
- * src/aot_probe.c and the SimCitySNESRecompAOT target). In that build the
+/* SC_AOT_TIER: built as part of the AOT/CpuState migration (see
+ * src/aot_probe.c and the UrbanRecompAOT target). In that build the
  * shared runtime is linked in, and it already defines several of the symbols
  * this file provides for the standalone interpreter build. They are the same
  * objects with the same meaning -- common_rtl.c's g_ram is a 0x20000 array
@@ -77,10 +77,10 @@ typedef SDL_Rect ScRect;
  * snes_init(), so both tiers end up sharing one WRAM array rather than
  * needing any copying between them. Defining them here too would just be a
  * duplicate symbol, so the AOT build defers to the runtime's copies. */
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 #include "common_rtl.h"
 #include "common_rtl.h"          /* extern uint8 g_ram[0x20000]; */
-#include "simcity_fiberdrive.h"
+#include "sc_fiberdrive.h"
 #else
 uint8_t    g_ram[0x20000];
 #endif
@@ -89,8 +89,21 @@ uint8_t    g_ram[0x20000];
  * and read all of EAX where the callee had only set AL -- so a function that
  * returned false was observed as true, and the US-only gate silently passed on
  * a German ROM. It compiled and linked without a word. */
-#include "simcity_mapview.h"
-#include "sc_lle_adapter.h"
+#include "sc_mapview.h"
+#include "sc_launcher.h"
+#include "sc_sram.h"
+#include "sc_icon.h"
+#include "sc_mapgen.h"
+#include "sc_decomp.h"
+/* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
+ * collides with the interp816 core this target actually builds against.
+ * Only present in a build configured with SNESRECOMP_TRACE=1. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+void cpu_trace_set_wram_watch(uint8_t bank, uint16_t addr, int width,
+                              int match_value, uint8_t value, int enabled);
+void cpu_trace_clear_wram_watches(void);
+void cpu_trace_dump_wram(const char *tag, int scan_n);
+#endif
 #include "sc_renderer.h"
 #ifdef RECOMP_LAUNCHER
 #include "sc_mods.h"
@@ -100,7 +113,6 @@ static ScRenderer s_custom_renderer;
 static const char *s_video_config = "sc-video.ini";
 static int s_window_width = 1024, s_window_height = 768;
 static ScVideoRect s_destination;
-static bool s_fullscreen, s_linear_filter;
 Snes      *g_snes;
 Ppu       *g_ppu;
 static Interp816 *g_cpu;
@@ -109,7 +121,7 @@ static uint64_t   g_master_cycles;
 /* ── RTL glue the device sources call. This host bypasses common_rtl.c (the
  * AOT/CpuState runtime) entirely for Phase 1, so these are the same
  * minimal no-op/direct implementations snesrecomp's own reference driver
- * uses (cosim/ref_driver.c) rather than a SimCity-specific reinterpretation. */
+ * uses (cosim/ref_driver.c) rather than a game-specific reinterpretation. */
 void RtlApuLock(void)   {}
 void RtlApuUnlock(void) {}
 void rtl_sync_apu_to_cpu_locked(void) {}
@@ -122,7 +134,7 @@ bool g_fail = false;
 uint8 g_snesrecomp_last_hdmaen;
 /* Referenced by snes.c/interp_bridge.c; only meaningful once the AOT/
  * CpuState hybrid tier (interp_bridge.c) is wired in. 0 = not driving. */
-#ifndef SIMCITY_AOT_TIER
+#ifndef SC_AOT_TIER
 /* All three are provided by the shared runtime in the AOT build:
  * g_interp_apu_driving and ppudma_record_dma by common_rtl.c /
  * ppu_dma_trace.c, interp816_opcode_hook by interp_bridge.c. */
@@ -132,6 +144,19 @@ void ppudma_record_dma(int ch, int fromB, uint8_t aBank, uint16_t aAdr,
   (void)ch; (void)fromB; (void)aBank; (void)aAdr; (void)bAdr; (void)size;
 }
 int interp816_opcode_hook(uint32_t addr) { (void)addr; return 0; }
+/* Upstream's snes.c now logs every direct WRAM write through
+ * wlog_addr_note_direct(), which lives in cpu_state.c -- and this target
+ * deliberately builds the interp816 core WITHOUT the CpuState runtime (see the
+ * SC_DEVICE_SOURCES note in CMakeLists.txt).
+ *
+ * Stubbing it is safe here in a way that stubbing sc_advance_until_input_ready
+ * would NOT have been: wlog_addr_note_via() returns immediately unless a WRAM
+ * write-address log has been configured, so the real function is a diagnostic
+ * and nothing else. This only means SNESRECOMP_WLOG_ADDR is unavailable in
+ * this target; no emulation behaviour changes. */
+void wlog_addr_note_direct(uint32_t wa, uint8_t v, const char *via) {
+  (void)wa; (void)v; (void)via;
+}
 #else
 /* Conversely, the runtime expects the GAME to supply these. The desktop
  * hosts define them in their host_main include; this host defines them here.
@@ -163,6 +188,10 @@ void dsp_shadow_verify_echo(const int16_t *l, const int16_t *r, const int8_t *co
 }
 
 static uint64_t s_frames;
+/* From sc-settings.ini (src/sc_launcher.c): 0 window, 1 borderless, 2 exclusive. */
+static int  s_fullscreen;
+static bool s_linear_filter;
+static bool s_enable_audio = true;
 static uint64_t s_nmi_requests;
 static uint64_t s_nmi_serviced;
 
@@ -577,15 +606,21 @@ static void bus_write(void *mem, uint32_t adr, uint8_t v) {
       s_gfx_trace_hits++;
     }
   }
-#ifdef SIMCITY_AOT_TIER
   snes_write(g_snes, adr, v);
-#else
-  ScLleWrite(adr, v);
-#endif
 }
 
-/* SPC cycles per master clock (LakeSnes: (32040*32)/(1364*262*60)). */
-static const double kApuCyclesPerMaster = (32040.0 * 32.0) / (1364.0 * 262.0 * 60.0);
+/* SPC cycles per master clock: 32 per DSP sample at 32040 Hz, over the NTSC
+ * master clock of 21477272 Hz -- 533.12 samples per frame at 60.0988 fps.
+ *
+ * LakeSnes writes it as (32040*32)/(1364*262*60), with 60 fps, which is 534
+ * samples a frame. While a DMA transfer's time never reached the APU nobody
+ * noticed; once it did (sc_own_the_beam), the DSP made 534 a frame against
+ * the 533.12 the output plays, and the backlog grew by 53 samples a second
+ * until the ring was full: sound a quarter of a second behind the picture. */
+static const double kApuCyclesPerMaster = (32040.0 * 32.0) / 21477272.0;
+/* What that makes per frame (1364 x 262 master clocks): 533.125. The audio
+ * drain takes exactly this many, so the DSP ring neither fills nor starves. */
+static const double kDspSamplesPerFrame = 1364.0 * 262.0 * 32040.0 / 21477272.0;
 
 /* SC_WIDESCREEN=<pixels per side>: widen the rendered picture.
  *
@@ -623,19 +658,43 @@ static bool s_ws_oam_strict = true;   /* SC_WS_OAM=0 for the permissive decode *
 static bool s_ws_obj_clip;
 static bool s_ws_widen_menu = true;   /* SC_WS_MENU=0 to leave the main menu narrow */
 static bool s_ws_widen_title = true;  /* SC_WS_TITLE=0 to clamp the title's sky */
-static int  s_menu_settled;           /* consecutive frames on the main menu */
 static bool s_ws_widen_lights = true;   /* SC_WS_LIGHTS=0 to leave it alone */
 /* One bit per OAM slot, published to the PPU each frame. A sprite this host
  * places at X >= 256 is a GENUINE right-margin sprite, so it must be marked
  * or the strict decode wraps it negative and hides it -- which is exactly
  * what happened to the extra lights on the right. */
 static uint8_t s_oam_right_hints[16];
-static bool s_bg3_widened;            /* set by widen_menu_bg() for this frame only */
+/* Same idea for the LEFT margin. A sprite the authentic 256-wide viewport
+ * clips entirely is hardware-hidden there, so the lights this host places at
+ * negative X never appeared -- 0 px in the left margin against 1293 in the
+ * right, on every title frame. Marking the slots opts them back in. */
+static uint8_t s_oam_left_hints[16];
+static bool s_bg3_widened;            /* set by widen_wood_bg() for this frame only */
+static uint8_t s_ws_clamp_now = 0x0f;  /* the mask actually pushed this frame */
+static bool s_wood_widened;           /* BG3 carries real wood into the margins */
+/* Wood-only stand-in map, for screens with no VRAM to relocate into. Armed by
+ * widen_wood_bg(), swapped in around the margin pass only. */
+static uint16_t s_wood_pass_map[0x400];
+static int      s_wood_pass_layer = -1;
+static unsigned s_wood_pass_src;
+static bool     s_wood_pass_ready;    /* a usable map has been built at least once */
 static bool s_ws_bg_margins;          /* margins come from a backdrop-only pass */
 static int  s_ws_margin_layer;        /* which BG that pass draws */
 static uint8_t s_ws_mirror;           /* SC_WS_MIRROR: layers padded by mirroring */
 static bool s_ws_margin_fill = true;  /* SC_WS_FILL=0 to leave empty margins black */
 static uint8_t *s_ws_scratch;
+/* A SECOND scratch surface, for the backdrop/wood margin pass.
+ *
+ * It cannot share the sprite-clip one. Both render a line into scratch
+ * before the picture is drawn and both copy margins out of it afterwards, so
+ * with one buffer the second render overwrites the first's result and both
+ * copies take the same pixels. Harmless while no screen ran both -- and then
+ * View Mode did, and its margins came out as the city's black wrapping in
+ * rather than the wood the pass had drawn. */
+static uint8_t *s_ws_scratch_bg;
+/* OBJ-only re-render, so the host-map margins can carry sprites. */
+static uint8_t *s_ws_obj_layer;
+static int s_margin_obj_on = 1;   /* SC_WS_MARGIN_OBJ */
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
  *
@@ -662,7 +721,7 @@ static uint8_t s_video_pixels[kVideoPitchMax * kVideoHeight];
  *                    bit3=Up bit2=Down bit1=Left bit0=Right
  *
  * -- the constants below are what must be set in input1_currentState;
- * verified empirically against SimCity itself (holding each direction moves
+ * verified empirically against the game itself (holding each direction moves
  * exactly one cursor axis in the right direction: Left drives $01EB down,
  * Right up, Up drives $01ED down, Down up). Do not "simplify" these to the
  * naive hardware bit order -- that was the original bug.
@@ -777,16 +836,48 @@ static void hdma_do_line(HdmaChanState *c) {
 /* Defined with the host-map block far below; used from the frame loop here. */
 static void host_map_arm_captures(void);
 static void host_map_compose(void);
+static void ws_fix_scroll_seam(void);
 static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
-static void widen_menu_bg(void);
+static void widen_wood_bg(void);
 static void widen_title_lights(void);
+static void title_ws_update(void);
+static bool title_ws_live(void);
 static void ws_fill_margins(void);
+static void ws_fill_flat_margins(void);
 static void ws_hide_backdrop_furniture(void);
 static void sylt_place_card(void);
 static void sylt_write_brief_tilemap(void);
-static bool     s_host_map;
+/* Briefing page geometry -- up here because the composer is called from the
+ * opcode loop, which comes earlier in this file than the composer itself. */
+#define SC_BRIEF_COLS 32
+#define SC_BRIEF_ROWS 64
+#define SC_BRIEF_BLANK 0x3FFu
+static bool brief_compose_page(uint32_t src, uint8_t *dst);
+static void place_translated_cards(void);
+static void apply_surfaces(void);
+/* OFF by default, still. The compositor it depends on works now, but the gate
+ * that decides WHICH screen it may draw on does not separate cleanly: the
+ * tax, evaluation, overview and history pages all sit at $14 == 0 alongside
+ * the city view, and turning this on by default painted terrain across all
+ * of them. SC_HOST_MAP=1 to use it. */
+/* ON by default.
+ *
+ * It was off while the compositor took the guest's picture apart and tried to
+ * reassemble it, which never worked. It now keeps the guest's 256 columns
+ * verbatim -- measured 0 pixels different from what the game draws, on every
+ * screen -- and host terrain is only ever seen past the guest's right edge.
+ * SC_HOST_MAP=0 turns it off. */
+static bool     s_host_map = true;
 static uint8_t *s_hud_pixels;
+static uint8_t *s_guest_pixels;  /* the guest's finished frame, kept verbatim */
+/* Host map render target, deliberately larger than the frame: the sub-cell
+ * shift below reads up to 8 px right of and below the visible window. */
+static uint8_t *s_hostmap_px;
+static int      s_hostmap_pitch;
+/* The host loop's own frame index, which is what SC_DUMP_AT counts -- not
+ * s_frames, which after --load-state resumes at the saved state's number. */
+static unsigned long long s_loop_frame;
 /* Layers taken into the HUD pass. SC_HUD_MASK overrides it: bit0 BG1,
  * bit1 BG2, bit2 BG3, bit3 BG4, bit4 OBJ. Adjustable because "every layer
  * except BG2" also drags in whatever BG1 paints behind the toolbar, which
@@ -822,33 +913,32 @@ static void handle_pos_stuff(void) {
       /* Same $14 == 0 gate as host_map_compose(): this pass exists only to
        * feed it, and rendering every line twice on screens the compose
        * will not touch changes their picture for nothing. */
-      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0) {
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch_bg && snes->vPos > 0) {
+        /* Where widen_wood_bg() could not relocate the map, swap a wood-only
+         * copy in for the length of this pass, so the margins get the desk
+         * without the furniture standing on it. Restored immediately after,
+         * before the picture proper is drawn from the same map. */
+        static uint16_t held[0x400];
+        const bool swap = s_wood_pass_layer >= 0;
+        if (swap) {
+          memcpy(held, &g_ppu->vram[s_wood_pass_src], sizeof held);
+          memcpy(&g_ppu->vram[s_wood_pass_src], s_wood_pass_map, sizeof held);
+        }
         g_snes_ppu_dbg_layer_mask = (uint8_t)(1u << s_ws_margin_layer);
-        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        PpuBeginDrawing(g_ppu, s_ws_scratch_bg, (size_t)s_video_pitch, s_render_flags);
         ppu_runLine(g_ppu, snes->vPos);
         g_snes_ppu_dbg_layer_mask = 0xff;
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+        if (swap) memcpy(&g_ppu->vram[s_wood_pass_src], held, sizeof held);
       }
-      if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
-        /* Everything EXCEPT BG2, not just BG3|OBJ.
-         *
-         * BG2 is the map -- the only layer being replaced. Capturing every
-         * other layer means anything the guest draws wins over the host map
-         * automatically: the HUD, sprites, AND any menu, including the ones
-         * that open *inside* the city view without changing $01df. Reported
-         * from play: savestate_3 opens such a menu and $01df stays 3
-         * throughout, so no screen-mode gate could ever have caught it.
-         *
-         * Self-correcting by construction, which is why it beats hunting for
-         * a "menu is open" flag -- a search through the WRAM delta across the
-         * B press turned up only transient direct-page scratch. */
-        g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
-        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, s_render_flags);
-        ppu_runLine(g_ppu, snes->vPos);
-        g_snes_ppu_dbg_layer_mask = 0xff;
-        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      /* Both diagnostics below are read once: this runs every scanline, and
+       * getenv() is a locked scan of the whole environment on Windows. */
+      static int ws_diag = -1, pass_diag;
+      if (ws_diag < 0) {
+        ws_diag = getenv("SC_WS_DIAG") != NULL;
+        pass_diag = getenv("SC_PASS_DIAG") != NULL;
       }
-      if (getenv("SC_WS_DIAG") && snes->vPos == 100) { static int n;
+      if (ws_diag && snes->vPos == 100) { static int n;
         if (n < 3) { n++;
           fprintf(stderr, "[wsdiag] clamp=%02x widenMask=%02x extraL=%u extraR=%u budget=%u\n",
                   g_ppu->wsLayerClamp, g_ppu->wsLayerWidenMask,
@@ -868,7 +958,7 @@ static void handle_pos_stuff(void) {
        * OBJ reaches the margins however the backgrounds are clamped -- measured
        * on the title, BG2 and BG3 clamp to zero margin pixels while OBJ still
        * puts 1623 there. What shows up is the off-screen half of sprites the
-       * hardware clips at the screen edge: the SIMCITY billboard and the row of
+       * hardware clips at the screen edge: the title billboard and the row of
        * blinking lights along the bottom, reported from play as a blinking
        * rope. The strict OAM decode does not help -- that governs the right
        * band [256, 256+extraRight), and these are all on the left.
@@ -883,15 +973,120 @@ static void handle_pos_stuff(void) {
         g_snes_ppu_dbg_layer_mask |= 0x10;
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
+      /* Margin sprites for the host-map view.
+       *
+       * host_map_compose() builds the picture as the guest's 256 columns
+       * followed by host-rendered map, and the host map draws BG tiles only,
+       * so any sprite past the guest's edge is discarded however it decodes.
+       * Render the line again with OBJ alone and hand that to the compositor.
+       *
+       * SC_WS_MARGIN_OBJ=0 disables it. */
+      if (s_ws_extra > 0 && s_ws_obj_layer && snes->vPos > 0 &&
+          snes->vPos <= kVideoHeight && s_margin_obj_on && host_map_screen_live()) {
+        g_snes_ppu_dbg_layer_mask = 0x10;          /* OBJ alone */
+        PpuBeginDrawing(g_ppu, s_ws_obj_layer, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
+      /* SC_PASS_DIAG: render the SAME line twice into two surfaces, with
+       * nothing changed between them, and see whether the pixels match. The
+       * seam repair's re-render approach assumes they do; its measured result
+       * (cloning got WORSE, not better) says they may not. */
+      if (pass_diag && s_ws_scratch) {
+        /* Compare an EXTRA pass against the MAIN one -- the comparison that
+         * matters. Diffing two extra passes against each other, as this first
+         * did, cannot catch a difference between the first render of a line and
+         * later ones, because neither of them is the first. */
+        PpuBeginDrawing(g_ppu, s_ws_scratch, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
       ppu_runLine(g_ppu, snes->vPos);
       if (s_custom_video.enabled && snes->vPos > 0 && snes->vPos <= 224)
         ScRendererLine(&s_custom_renderer, g_ppu, g_ram, snes->vPos - 1,
           (const uint32_t *)(s_video_pixels + (size_t)(snes->vPos - 1) * s_video_pitch));
-      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch && snes->vPos > 0 &&
+      /* Blank the margins when nothing is entitled to draw there.
+       *
+       * Clamping only governs the four backgrounds on the MAIN screen. The
+       * subscreen is not covered, so a screen that shows the city through
+       * colour math puts it in the margins whatever the clamp says -- which is
+       * what the advice popup and the graphs page were doing: city map either
+       * side, at full brightness, while the authentic 256 showed it dimmed
+       * behind the panel.
+       *
+       * Clearing BEFORE the render does not help, because those pixels are
+       * genuinely drawn, not left over. (An earlier reading called them stale
+       * on the evidence that the margins changed by 0 pixels between frames --
+       * which proves nothing on a screen that is standing still.) So it is
+       * done after, and only when every background is clamped: if not one of
+       * them may reach the margins, whatever arrived there came in past the
+       * clamp and does not belong. Screens that legitimately fill their
+       * margins -- the title, the selector, anything the wood pass or the host
+       * map is handling -- always leave at least one layer unclamped and are
+       * never touched. */
+      if (s_ws_extra > 0 && snes->vPos >= 1 && snes->vPos <= kVideoHeight &&
+          (s_ws_clamp_now & 0x0fu) == 0x0fu &&
+          !(s_host_map && host_map_screen_live())) {
+        /* Force blank paints BLACK, not the backdrop.
+         *
+         * brightnessMult covers a fade, and misses the other way a SNES shows
+         * nothing. The game ends a fade by writing $8f -- force blank on,
+         * brightness restored to 15 -- so this computed cgram[0] at FULL
+         * intensity and painted the sky into the margins while the guest was
+         * black. Leaving the loan screen that is twelve frames of bright sky
+         * either side of a black picture, reported from play as the
+         * transition back to the map not fading correctly.
+         *
+         * Found by probing one margin pixel through the line: after
+         * ppu_runLine it is 000000, and after this block adbdce. The PPU had
+         * already blanked the line correctly; this painted over it.
+         *
+         * The same fault the compositor handles with its own `blanked` test,
+         * on the path that runs when the compositor does not. */
+        const uint16_t bd = g_ppu->cgram[0];
+        const uint32_t back = PPU_forcedBlank(g_ppu) ? 0xFF000000u : (0xFF000000u
+            | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
+            | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
+            | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f]);
+        uint32_t *row = (uint32_t *)(s_video_pixels +
+                                     (size_t)(snes->vPos - 1) * (size_t)s_video_pitch);
+        for (int x = 0; x < s_ws_extra; x++) row[x] = back;
+        for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) row[x] = back;
+      }
+      /* AFTER the real render, not before.
+       *
+       * Every extra ppu_runLine for the same scanline disturbs what the next
+       * one produces -- measured on the city view, turning the host map on
+       * changed the GUEST's own frame: the status bar's dark background at
+       * authentic (60,8) went from $311000 to the map's own colour, with no
+       * change to the guest's code path other than this pass existing. The
+       * overlay is taken from the guest's finished frame, so that frame has to
+       * be drawn from clean state; the capture can have whatever is left. */
+      if (s_host_map && s_hud_pixels && snes->vPos > 0 && host_map_screen_live()) {
+        /* Everything EXCEPT BG2, not just BG3|OBJ.
+         *
+         * BG2 is the map -- the only layer being replaced. Capturing every
+         * other layer means anything the guest draws wins over the host map
+         * automatically: the HUD, sprites, AND any menu, including the ones
+         * that open *inside* the city view without changing $01df. Reported
+         * from play: savestate_3 opens such a menu and $01df stays 3
+         * throughout, so no screen-mode gate could ever have caught it.
+         *
+         * Self-correcting by construction, which is why it beats hunting for
+         * a "menu is open" flag -- a search through the WRAM delta across the
+         * B press turned up only transient direct-page scratch. */
+        g_snes_ppu_dbg_layer_mask = s_hud_mask;   /* default: all but BG2 */
+        PpuBeginDrawing(g_ppu, s_hud_pixels, (size_t)s_video_pitch, s_render_flags);
+        ppu_runLine(g_ppu, snes->vPos);
+        g_snes_ppu_dbg_layer_mask = 0xff;
+        PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
+      }
+      if (s_ws_bg_margins && s_ws_extra > 0 && s_ws_scratch_bg && snes->vPos > 0 &&
           snes->vPos <= kVideoHeight) {
         const size_t row = (size_t)(snes->vPos - 1) * (size_t)s_video_pitch;
         uint32_t *dst = (uint32_t *)(s_video_pixels + row);
-        const uint32_t *src = (const uint32_t *)(s_ws_scratch + row);
+        const uint32_t *src = (const uint32_t *)(s_ws_scratch_bg + row);
         for (int x = 0; x < s_ws_extra; x++) dst[x] = src[x];
         for (int x = s_video_w - s_ws_extra; x < s_video_w; x++) dst[x] = src[x];
       }
@@ -933,7 +1128,25 @@ static void handle_pos_stuff(void) {
        * BG1 is genuinely 64 columns, so widening it unclamped is correct. */
       if (g_ppu && s_ws_extra > 0) {
         const bool mode0 = PPU_mode(g_ppu) == 0;
-        s_render_flags = (!mode0 && !s_force_legacy) ? 1u : 0u;
+        /* The new renderer gets HALVED colour math wrong. Use the legacy one
+         * whenever the guest is dimming a scene behind an overlay.
+         *
+         * Measured on the advice popup, comparing the authentic 256 columns
+         * against a plain 256-wide run of the same state: the new renderer is
+         * wrong on 8736 pixels, the legacy one on 0. It loses whole rectangles
+         * of the map -- the black bands above and below the panel, which a
+         * 256-wide render shows as ordinary city.
+         *
+         * It is not a geometry effect: 8, 32 and 96 pixels of extra space
+         * corrupt exactly the same 8736 pixels, so any widescreen at all
+         * switches the path and the width is irrelevant.
+         *
+         * Nothing is lost by dropping to legacy here. The new renderer is
+         * chosen for its widescreen layer policies, and a screen dimming
+         * behind an overlay has every background clamped anyway, so there are
+         * no policies left to apply. */
+        const bool dim_overlay = PPU_halfColor(g_ppu) && PPU_addSubscreen(g_ppu);
+        s_render_flags = (!mode0 && !s_force_legacy && !dim_overlay) ? 1u : 0u;
         /* Lift the per-scanline sprite limit while widened.
          *
          * The title's light row is four 64 px sprites, which is already 32
@@ -996,10 +1209,12 @@ static void handle_pos_stuff(void) {
             if ((g_ppu->screenEnabled[0] >> L) & 1) { s_ws_margin_layer = L; break; }
         PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
       }
+      title_ws_update();
       memset(s_oam_right_hints, 0, sizeof s_oam_right_hints);
-      widen_menu_bg();
-      /* AFTER widen_menu_bg(), which clears the flag for the frame. */
-      if (g_ram[0x14] == 0x01 && s_ws_widen_title && s_ws_extra > 0)
+      memset(s_oam_left_hints, 0, sizeof s_oam_left_hints);
+      widen_wood_bg();
+      /* AFTER widen_wood_bg(), which clears the flag for the frame. */
+      if (title_ws_live() && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
       widen_title_lights();
       /* BG3 is hard-clamped independent of wsLayerClamp:
@@ -1012,7 +1227,7 @@ static void handle_pos_stuff(void) {
        * its margins stayed at 0 pixels with the tilemap already 64 columns and
        * the clamp mask showing BG3 clear.
        *
-       * Set EVERY frame, not once inside widen_menu_bg(): the field is sticky
+       * Set EVERY frame, not once inside widen_wood_bg(): the field is sticky
        * and PpuResetLayerPolicies() does not clear it, so opening it on the
        * menu would leave BG3 widened on the gameplay HUD afterwards -- exactly
        * the tiling this default exists to prevent. */
@@ -1046,8 +1261,14 @@ static void handle_pos_stuff(void) {
          * Clamping them stops the gradient dead at the authentic edge, which
          * is exactly what it did once the flags below started reaching the PPU
          * per frame and the clamp became live for the first time. */
-        if (s_ws_clamp_auto && g_ram[0x14] == 0x01 && s_ws_widen_title)
+        if (s_ws_clamp_auto && title_ws_live() && s_ws_widen_title)
           clamp &= (uint8_t)~0x06;   /* BG2 | BG3 */
+        /* The wood-only margin pass needs its layer to REACH the margins, or
+         * the pass renders 256 px of desk and nothing beyond. Its own map
+         * wraps seamlessly, and the frame the player sees is taken from the
+         * pass rather than from this one, so unclamping costs nothing here. */
+        if (s_ws_clamp_auto && s_wood_pass_layer >= 0)
+          clamp &= (uint8_t)~(1u << s_wood_pass_layer);
         /* SC_WS_MIRROR=<mask>: pad those layers by mirroring the authentic
          * 256 into the margins instead of clamping them. Needs no VRAM, which
          * matters on the screens that have none free -- map select and name
@@ -1056,6 +1277,7 @@ static void handle_pos_stuff(void) {
         clamp &= (uint8_t)~s_ws_mirror;
         PpuSetWidescreenLayerMirror(g_ppu, s_ws_mirror);
         PpuSetWidescreenLayerClamp(g_ppu, clamp);
+        s_ws_clamp_now = clamp;
         /* Sprites are NOT covered by that mask -- PpuWidescreenLayerExtra()
          * only consults it for layer < 4 -- so they reach the margins however
          * the BGs are clamped. Measured on the title: BG2 and BG3 clamp to 0
@@ -1078,11 +1300,171 @@ static void handle_pos_stuff(void) {
          * A zeroed hint array is therefore "strict, nothing marked": every
          * ambiguous slot wraps negative exactly as hardware does.
          * SC_WS_OAM=0 restores the permissive decode. */
+        /* THE TITLE HAS NO AMBIGUOUS PARKED SPRITES, so the strict wrap costs
+         * it something for nothing.
+         *
+         * A raw OAM X in [256, 256+extraRight) is normally ambiguous: either a
+         * sprite entering the right margin, or one parked off-screen-LEFT at
+         * x-512. Strict assumes parked and wraps it negative, so an object
+         * arriving from the right stays hidden until it crosses x=256 and then
+         * appears all at once -- reported from play as the sign "stepping" in
+         * on the right while it now leaves smoothly on the left.
+         *
+         * Dumping the title's OAM settles which it is here: exactly ONE sprite
+         * is in the band (slot 125, raw 277, tile 120 -- the row of blinking
+         * lights along the bottom), and every parked entry sits at raw 384 or
+         * beyond, outside it. So on this screen the positive decode is the
+         * right one for everything in the band.
+         *
+         * Marked per-slot rather than by turning strict off, so the decode
+         * stays strict everywhere else -- the scenario selector's parked
+         * sprites DO land in the band, which is what the strict default is
+         * for. SC_WS_TITLE_OAM_RIGHT=0 restores the wrap. */
+        /* The city view wants the positive decode as well.
+         *
+         * Traffic really does enter the right margin: slot 109 runs raw X
+         * 256 -> 348 at 4 px a frame, about 24 frames inside the ambiguous
+         * band, before going on to 352..396 which decodes to -160..-116 and
+         * is correctly invisible. Strict wraps the whole run away, which is
+         * the locomotive missing from the margin.
+         *
+         * This is only half of it -- host_map_compose() fills those columns
+         * from a BG-only render, so the margin OBJ pass below is the other
+         * half. Neither shows anything alone.
+         *
+         * SC_WS_CITY_OAM_RIGHT=0 restores the wrap. */
+        if (s_ws_oam_strict && g_ram[0x14] == 0x00 && host_map_screen_live()) {
+          static int on = -1;
+          if (on < 0) { const char *e = getenv("SC_WS_CITY_OAM_RIGHT");
+                        on = (e && *e) ? (*e != '0') : 1; }
+          /* Only the slots that are MOVING.
+           *
+           * Hinting the whole band was too coarse: the city view parks HUD
+           * sprites there too, and the blanket hint decoded them positive
+           * and printed the date -- "1902 JA" -- across the right margin.
+           * That is exactly the ambiguity the strict default exists for.
+           *
+           * The classifier already separates the two: traffic steps 4 px a
+           * frame and carries motion grace, while parked HUD text does not
+           * move at all. So hint per slot on that. */
+          if (on && g_ppu) {
+            for (int s = 0; s < 128; s++)
+              if (g_ppu->wsOamMotionGrace[s])
+                s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+          }
+        }
+        if (s_ws_oam_strict && title_ws_live() && s_ws_widen_title) {
+          static int on = -1;
+          if (on < 0) {
+            const char *e = getenv("SC_WS_TITLE_OAM_RIGHT");
+            on = (e && *e) ? (*e != '0') : 1;
+          }
+          if (on) memset(s_oam_right_hints, 0xff, sizeof s_oam_right_hints);
+          /* NOT the left. Hinting the left slots too was tried and reverted:
+           * it let the sign leave at the true edge, but it also let it SIT
+           * there -- reported from play as sticking to the left border for a
+           * whole round until the sequence came back for it.
+           *
+           * The reasoning that looked sound was that the title parks unused
+           * sprites at x = -128, outside a 64 px margin, so nothing parked
+           * could show. That is true of the PARK SLOTS and false of the sign,
+           * which stops inside the margin rather than at the park position.
+           *
+           * And the measurement that seemed to confirm it did not: off-vs-on
+           * deltas that ramp and return to zero show objects leaving, but a
+           * sign sitting still while other content moves around it also gives
+           * a drifting delta, which is what I read as "not parked". Whatever
+           * is tried next needs to test the SIGN's own pixels over time, not
+           * the margin's total. */
+        }
+        /* SC_WS_SCEN_OAM_LEFT=1 (experiment): release the left hints on the
+         * scenario selector ($14 = 0b). Widescreen reveals two card columns
+         * the authentic 256 view never shows, and the game parks their won-
+         * mark sprites at negative X (slots seen at rawX 472/480, tile 76 --
+         * the same X tiles the on-screen marks use). Hardware clips those
+         * entirely; a 96 px margin does not. Whether they land on the right
+         * cards is the thing to look at. */
+        /* The scenario selector's margin sprites are NOT a job for the
+         * motion classifier.
+         *
+         * The won-mark drawer at 03:ded0 puts each mark at $df30,Y MINUS the
+         * smooth-scroll $16. Scrolled to the ninth column, $16 is $50, so the
+         * marks for bits 0 and 3 -- column 0, San Francisco and Detroit --
+         * land at x = 14 - 80 = -66, inside the left margin. They are genuine
+         * margin content, and with the classifier deciding, they appeared
+         * only while the screen was moving and vanished when it stopped.
+         * Reported from play exactly that way. The same grace also let the
+         * parked second selection bracket back in as fragments during a
+         * scroll -- the ghost this file already fought once.
+         *
+         * So on this screen the fallback is switched off and the marks are
+         * hinted by name instead. Their positions are not a guess: they are
+         * recomputed from the ROM's own two tables and the live scroll, and
+         * matched against OAM. Nothing else in the margins is claimed. */
+        if (s_ws_oam_strict && g_ram[0x14] == 0x0b && g_ppu) {
+          static const unsigned kMarkX[8] =
+              { 0x0e, 0x5e, 0xae, 0x0e, 0x5e, 0xae, 0xfe, 0xfe };
+          static const unsigned kMarkY[8] =
+              { 0x14, 0x14, 0x14, 0x6c, 0x6c, 0x6c, 0x14, 0x6c };
+          g_ppu->wsOamMotionGraceOn = 0;
+          const unsigned scroll = g_ram[0x16] | ((unsigned)g_ram[0x17] << 8);
+          const unsigned mask   = g_ram[0x42] | ((unsigned)g_ram[0x43] << 8);
+          for (int b = 0; b < 8; b++) {
+            if (!((mask >> b) & 1u)) continue;
+            const unsigned ex = (kMarkX[b] - scroll) & 0x1ffu;
+            const unsigned ey = kMarkY[b] & 0xffu;
+            if (ex < 256u) continue;          /* on screen; needs no hint */
+            for (int s = 0; s < 128; s++) {
+              const unsigned lo = g_ppu->oam[s * 2];
+              const unsigned hb = g_ppu->highOam[s >> 2];
+              const unsigned x9 =
+                  (lo & 0xffu) | (((hb >> ((s & 3) * 2)) & 1u) << 8);
+              if (x9 != ex || ((lo >> 8) & 0xffu) != ey) continue;
+              /* Past the ambiguous band it decodes negative, so it is the
+               * LEFT hint that admits it; inside the band it is the right. */
+              if (x9 >= 256u + (unsigned)g_ppu->extraRightCur)
+                s_oam_left_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+              else
+                s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+              if (getenv("SC_MARK_DIAG"))
+                fprintf(stderr, "[mark] bit=%d slot=%d x9=%u y=%u tile=%u"
+                                " attr=%02x scroll=%u\n",
+                        b, s, x9, ey, g_ppu->oam[s * 2 + 1] & 0xff,
+                        (g_ppu->oam[s * 2 + 1] >> 8) & 0xff, scroll);
+            }
+          }
+        } else if (g_ppu) {
+          g_ppu->wsOamMotionGraceOn = 1;
+        }
+        /* The scenario selector's missing won-marks CANNOT be fixed here.
+         *
+         * Reported from play: widescreen reveals two card columns the
+         * authentic 256 view never shows (San Francisco/Detroit left, the
+         * ninth scenario right), and those cards carry no red X.
+         *
+         * Releasing the left hints here was tried, and it is wrong. Dumped
+         * OAM ($14=0b, SC_OAM_BAND=2) shows exactly two slots decoding
+         * negative -- 2 and 11 -- and they are not marks. Slots 8-21 are one
+         * selection bracket built from tiles 76/78/96 repeated with flip
+         * bits (attr 34 = none, 74 = H, b4 = V, f4 = both), and 2/11 are a
+         * second such bracket parked off-screen-left. Hardware clips it;
+         * releasing it just paints a stray green bracket in the margin.
+         * Measured: the ONLY pixels the release adds are #63ff00/#21bd00 at
+         * x=16..71, entirely outside any card. Not one red pixel.
+         *
+         * So the marks for the revealed columns are not in OAM at all -- the
+         * game only emits them for cards inside its own 256 px view. Drawing
+         * them would mean synthesising them host-side from the win flags at
+         * $700007 (which apply_unlock_all already reads), which is a new
+         * feature and not a decode fix. */
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
+          PpuWsSetOamLeftHints(g_ppu, s_oam_left_hints);
+
         } else {
           PpuWsSetOamRightHints(g_ppu, NULL);
+          PpuWsSetOamLeftHints(g_ppu, NULL);
         }
       }
       /* SC_PPU_LAYOUT=1: one line per screen, printed when $14 changes.
@@ -1090,10 +1472,105 @@ static void handle_pos_stuff(void) {
        * whether that tilemap has anything in the columns the extra width
        * would expose -- the same question SC_SELECTOR_PPU answered for the
        * scenario screen, asked everywhere. */
+      /* SC_TITLE_DUMP=<path>: write BG1's two tilemap pages plus the live
+       * hScroll, once, for offline analysis of which cells hold what. */
+      if (getenv("SC_TITLE_DUMP") && g_ppu && g_ram[0x14] == 0x01) {
+        static int dumped = 0;
+        if (!dumped && s_frames > 8) {
+          dumped = 1;
+          const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+          FILE *f = fopen(getenv("SC_TITLE_DUMP"), "wb");
+          if (f) {
+            uint16_t hdr[3];
+            hdr[0] = (uint16_t)g_ppu->hScroll[0];
+            hdr[1] = (uint16_t)m;
+            hdr[2] = (uint16_t)PPU_bgTileAdr(g_ppu, 0);
+            uint16_t hdr2[3];
+            hdr2[0] = (uint16_t)PPU_objTileAdr1(g_ppu);
+            hdr2[1] = (uint16_t)PPU_objTileAdr2(g_ppu);
+            hdr2[2] = (uint16_t)PPU_objSize(g_ppu);
+            fwrite(hdr, 2, 3, f);
+            fwrite(hdr2, 2, 3, f);
+            fwrite(g_ppu->vram, 2, 0x8000, f);   /* whole VRAM */
+            fwrite(g_ppu->oam, 2, 0x100, f);     /* OAM low  */
+            fwrite(g_ppu->highOam, 1, 32, f);    /* OAM high */
+            fclose(f);
+          }
+        }
+      }
+      /* SC_OAM_BAND=1: list every OAM slot whose raw X lands in the
+       * ambiguous band [256, 256+extraRight), for whatever screen is up.
+       *
+       * That band is the whole question the strict decode answers by
+       * assuming "parked". On the title the assumption is wrong and the
+       * slots are hinted permissive; on the scenario selector it is right
+       * for some slots and wrong for others, which is why the selector needs
+       * this rather than a blanket switch either way. Y is printed because
+       * a parked sprite is usually parked in Y as well (>= 224), which
+       * separates the two cases without guessing. */
+      /* High OAM packs FOUR sprites per byte, two bits each: byte i>>2,
+       * shift (i&3)*2. Read as i>>3 with shift (i&7)*2 -- as this did --
+       * the shift runs off the end of the byte and the 9th X bit comes
+       * back as zero for most slots. That is not cosmetic: it made every
+       * sprite look confined to x < 256 and produced a confident, wrong
+       * conclusion that the game culls its objects at the view edge. */
+      if (getenv("SC_OAM_BAND") && g_ppu) {
+        static int done = 0;
+        if (!done && s_frames > 20) {
+          done = 1;
+          fprintf(stderr, "[oamband] $14=%02x extraRight=%d\n",
+                  g_ram[0x14], s_ws_extra);
+          for (int i = 0; i < 128; i++) {
+            const unsigned lo = g_ppu->oam[i * 2];
+            const unsigned hi = g_ppu->oam[i * 2 + 1];
+            const unsigned hbits = g_ppu->highOam[i >> 2];
+            const unsigned x9 = (lo & 0xff) | (((hbits >> ((i & 3) * 2)) & 1) << 8);
+            const unsigned y = (lo >> 8) & 0xff;
+            const unsigned tile = hi & 0xff;
+            const unsigned attr = (hi >> 8) & 0xff;
+            const int all = atoi(getenv("SC_OAM_BAND"));
+            if (y < 224 && (all > 1 ||
+                (x9 >= 256 && x9 < 256u + (unsigned)s_ws_extra)))
+              fprintf(stderr, "  slot %3d  rawX=%3u y=%3u tile=%3u attr=%02x\n",
+                      i, x9, y, tile, attr);
+          }
+        }
+      }
+      /* SC_HDMA_DIAG=1: which HDMA channels are live, per frame. The merge
+       * moved HDMA onto the LLE beam timeline (upstream b8ef573), so when a
+       * screen glitches one frame in four the first question is whether HDMA
+       * is involved at all. */
+      if (getenv("SC_HDMA_DIAG") && g_snes && g_snes->dma) {
+        unsigned mask = 0;
+        for (int i = 0; i < 8; i++)
+          if (g_snes->dma->channel[i].hdmaActive) mask |= (1u << i);
+        fprintf(stderr, "[hdma] f=%llu active=%02x\n",
+                (unsigned long long)s_frames, mask);
+      }
+      /* SC_OAM_TRACK=1: every frame, every OAM slot that is on-screen
+       * vertically and sits anywhere near the right edge. The question it
+       * answers is whether the game CULLS its sprites at x=255: if it does,
+       * slots walk up to the edge and vanish; if it does not, a slot keeps
+       * moving smoothly through [256, 352) and widescreen could show it. */
+      if (getenv("SC_OAM_TRACK") && g_ppu) {
+        for (int i = 0; i < 128; i++) {
+          const unsigned lo = g_ppu->oam[i * 2];
+          const unsigned hi = g_ppu->oam[i * 2 + 1];
+          const unsigned hb = g_ppu->highOam[i >> 2];
+          const unsigned x9 = (lo & 0xff) | (((hb >> ((i & 3) * 2)) & 1) << 8);
+          const unsigned y = (lo >> 8) & 0xff;
+          if (y < 224 && x9 >= 180 && x9 < 400)
+            fprintf(stderr, "[oamtrk] f=%llu slot=%d x=%u y=%u tile=%u\n",
+                    (unsigned long long)s_frames, i, x9, y, hi & 0xff);
+        }
+      }
       if (getenv("SC_PPU_LAYOUT")) {
         static uint8_t last = 0xff;
         if (g_ram[0x14] != last) {
           last = g_ram[0x14];
+          fprintf(stderr, "[layout]   obsel=%02x objbase1=%04x objbase2=%04x size=%d\n",
+                  g_ppu->obsel, (unsigned)PPU_objTileAdr1(g_ppu),
+                  (unsigned)PPU_objTileAdr2(g_ppu), (int)PPU_objSize(g_ppu));
           fprintf(stderr, "[layout] $14=%02x $01df=%u mode=%d main=%02x sub=%02x\n",
                   g_ram[0x14], g_ram[0x1df], (int)PPU_mode(g_ppu),
                   g_ppu->screenEnabled[0], g_ppu->screenEnabled[1]);
@@ -1124,8 +1601,269 @@ static void handle_pos_stuff(void) {
     }
     if (startingVblank) {
       ppu_handleVblank(g_ppu);
+      /* SC_VRAM_DUMP=<path>: one snapshot of VRAM plus the BG1 tilemap
+       * address, taken at vblank. Written to settle the font mapping --
+       * which byte the dialog renderer turns into which CHR tile -- by
+       * correlation against the offline tileset, rather than by guessing
+       * a stride. One-shot: the first frame that asks for it. */
+      /* SC_VRAM_DUMP_ON=<screen id> waits for that screen instead of firing
+       * on the first frame, so a capture of the scenario selector ($0b)
+       * does not depend on hitting a key at the right moment. */
+      { static int done; const char *vd = getenv("SC_VRAM_DUMP");
+        const char *von = getenv("SC_VRAM_DUMP_ON");
+        const int want = von && *von ? (int)strtol(von, NULL, 16) : -1;
+        /* SC_VRAM_DUMP_WAIT=<n> holds the capture n frames past the first
+         * frame the screen matches. Screens that draw their own text after
+         * the transition -- the main menu writes its word strips a few
+         * frames in -- otherwise get captured empty, which is how the first
+         * menu capture came back as an untextured panel. */
+        { const char *vw = getenv("SC_VRAM_DUMP_WAIT");
+          const int wait = vw && *vw ? atoi(vw) : 0;
+          static int seen = -1;
+          if (vd && *vd && !done && g_ppu &&
+              (want < 0 || g_ram[0x14] == (uint8_t)want)) {
+            if (seen < 0) seen = 0; else seen++;
+          }
+          if (vd && *vd && !done && g_ppu && seen >= 0 && seen < wait)
+            goto vram_dump_done;
+        }
+        if (vd && *vd && !done && g_ppu &&
+            (want < 0 || g_ram[0x14] == (uint8_t)want)) {
+          done = 1;
+          FILE *f = fopen(vd, "wb");
+          if (f) {
+            fwrite(g_ppu->vram, 2, 0x8000, f);
+            fclose(f);
+            /* A sidecar, so a capture describes itself. The surface tool
+             * needs each layer's map and CHR base, and hand-passing those
+             * is exactly how a donor and a target get mismatched. */
+            { char meta[520];
+              snprintf(meta, sizeof meta, "%s.info", vd);
+              FILE *mf = fopen(meta, "w");
+              if (mf) {
+                fprintf(mf, "screen=%02x\nscroll=%04x\nscenario=%u\n"
+                            "bgmode=%d\n",
+                        g_ram[0x14],
+                        (unsigned)(g_ram[0x16] | (g_ram[0x17] << 8)),
+                        (unsigned)(g_ram[0x40] | (g_ram[0x41] << 8)),
+                        (int)PPU_mode(g_ppu));
+                for (int L = 0; L < 4; L++)
+                  fprintf(mf, "bg%dmap=%04x\nbg%dchr=%04x\n",
+                          L + 1, (unsigned)PPU_bgTilemapAdr(g_ppu, L),
+                          L + 1, (unsigned)PPU_bgTileAdr(g_ppu, L));
+                fclose(mf);
+              } }
+            fprintf(stderr, "[vram] dumped 64KB to %s  screen=$%02x scroll=$%04x "
+                            "$40=%u bg1map=$%04x "
+                            "bg1chr=$%04x bg3map=$%04x bg3chr=$%04x\n",
+                    vd, g_ram[0x14],
+                    (unsigned)(g_ram[0x16] | (g_ram[0x17] << 8)),
+                    (unsigned)(g_ram[0x40] | (g_ram[0x41] << 8)),
+                    (unsigned)PPU_bgTilemapAdr(g_ppu, 0),
+                    (unsigned)PPU_bgTileAdr(g_ppu, 0),
+                    (unsigned)PPU_bgTilemapAdr(g_ppu, 2),
+                    (unsigned)PPU_bgTileAdr(g_ppu, 2));
+          }
+        } }
+      vram_dump_done:
+      /* SC_OAM_DUMP=<path> -- every sprite once, when SC_OAM_DUMP_ON names
+       * the screen (hex $14), SC_OAM_DUMP_WAIT frames after it appears.
+       *
+       * SC_OAM_WATCH reports CHANGES, which is the wrong shape for a screen
+       * that is composed once and then sits there: the main menu sets its
+       * sprites on screen $02 and they persist unchanged into $03, so a
+       * change-triggered capture of $03 sees nothing at all. A snapshot says
+       * what is on screen rather than what just moved.
+       *
+       * X bit 8 and the size bit come from the high table at highOam[], two
+       * bits per sprite, four sprites to a byte. */
+      { static int done; const char *od = getenv("SC_OAM_DUMP");
+        const char *oon = getenv("SC_OAM_DUMP_ON");
+        const char *ow = getenv("SC_OAM_DUMP_WAIT");
+        const int want = oon && *oon ? (int)strtol(oon, NULL, 16) : -1;
+        const int wait = ow && *ow ? atoi(ow) : 0;
+        static int seen;
+        if (od && *od && !done && g_ppu &&
+            (want < 0 || g_ram[0x14] == (uint8_t)want)) {
+          if (seen++ >= wait) {
+            done = 1;
+            FILE *f = fopen(od, "w");
+            if (f) {
+              fprintf(f, "# screen=%02x frame=%llu obsel=%02x objbase1=%04x objbase2=%04x\n",
+                      g_ram[0x14], (unsigned long long)s_frames, g_ppu->obsel,
+                      (unsigned)PPU_objTileAdr1(g_ppu),
+                      (unsigned)PPU_objTileAdr2(g_ppu));
+              fprintf(f, "# spr x y tile attr size\n");
+              for (int i = 0; i < 128; i++) {
+                const uint16_t lo = g_ppu->oam[i * 2], hi = g_ppu->oam[i * 2 + 1];
+                const uint8_t hb = g_ppu->highOam[i >> 2];
+                const int sh = (i & 3) * 2;
+                const unsigned x = (unsigned)(lo & 0xff) |
+                                   (((hb >> sh) & 1) ? 0x100u : 0u);
+                fprintf(f, "%3d %4u %3u $%03x $%02x %d\n", i, x,
+                        (unsigned)(lo >> 8), (unsigned)(hi & 0x1ff),
+                        (unsigned)((hi >> 8) & 0xfe),
+                        ((hb >> (sh + 1)) & 1));
+              }
+              fclose(f);
+              fprintf(stderr, "[oamdump] 128 sprites -> %s  screen=$%02x\n",
+                      od, g_ram[0x14]);
+            }
+          }
+        }
+      }
+      /* SC_OAM_WATCH=1 -- per-frame diff of OAM, as sprite entries.
+       *
+       * The main map's building labels turned out not to be on any
+       * background at all. In game the PPU runs mode 0 with CHR bases at
+       * $2000 and $0000, and the label artwork sits at VRAM word $6600 --
+       * which no background can reach, since the tile index would be 2240
+       * and the field is ten bits. Cycling every tool in the toolbar changed
+       * not one tilemap cell, which agrees. They are sprites, so this is
+       * where the per-label tile runs have to be read from. */
+      { static uint16_t shadow_oam[0x100]; static uint8_t shadow_hi[0x20];
+        static int on = -1, primed;
+        if (on < 0) { const char *e = getenv("SC_OAM_WATCH");
+                      on = (e && *e && *e != '0'); }
+        if (on && g_ppu) {
+          int shown = 0, changed = 0;
+          for (int i = 0; i < 0x80; i++) {
+            const uint16_t lo = g_ppu->oam[i * 2], hi = g_ppu->oam[i * 2 + 1];
+            if (lo == shadow_oam[i * 2] && hi == shadow_oam[i * 2 + 1]) continue;
+            changed++;
+            if (primed && shown < 24) {
+              fprintf(stderr, "[oam] f%llu $%02x  spr%-3d x=%-3u y=%-3u tile=$%03x attr=$%02x\n",
+                      (unsigned long long)s_frames, g_ram[0x14], i,
+                      (unsigned)(lo & 0xff), (unsigned)(lo >> 8),
+                      (unsigned)(hi & 0x1ff), (unsigned)((hi >> 8) & 0xfe));
+              shown++;
+            }
+            shadow_oam[i * 2] = lo; shadow_oam[i * 2 + 1] = hi;
+          }
+          for (int i = 0; i < 0x20; i++) shadow_hi[i] = g_ppu->highOam[i];
+          if (primed && changed > shown)
+            fprintf(stderr, "[oam] f%llu  ... and %d more sprites\n",
+                    (unsigned long long)s_frames, changed - shown);
+          primed = 1;
+        }
+      }
+      /* SC_VRAM_WATCH=<hex word addr>[+<count>] -- per-frame diff of a VRAM
+       * range, plus every layer's scroll when it moves.
+       *
+       * Written for the main menu, where the usual routes all came up dry:
+       * its tilemap ($05ABF1) and its artwork are both packets, both already
+       * identified, and the German artwork renders correct German words
+       * against the very same map. What differs between the regions is
+       * therefore WHERE each line is taken from, and that is neither in a
+       * packet nor in any text table -- so the thing to watch is the writes
+       * and the scroll, not the data. SNESRECOMP_DMA_LOG is inert in this
+       * target (ppudma_record_dma is stubbed off the AOT tier), which is why
+       * this exists rather than reusing it. */
+      { static uint16_t *shadow; static int wcount = -1; static unsigned wbase;
+        static uint16_t last_h[4], last_v[4]; static int scroll_seen;
+        if (wcount < 0) {
+          const char *e = getenv("SC_VRAM_WATCH");
+          wcount = 0;
+          if (e && *e) {
+            char *end = NULL;
+            wbase = (unsigned)strtoul(e, &end, 16);
+            wcount = (end && *end == '+') ? atoi(end + 1) : 64;
+            if (wbase + (unsigned)wcount > 0x8000u) wcount = (int)(0x8000u - wbase);
+            shadow = (uint16_t *)calloc((size_t)(wcount > 0 ? wcount : 1),
+                                        sizeof(uint16_t));
+            if (!shadow) wcount = 0;
+            else fprintf(stderr, "[watch] VRAM $%04x..$%04x\n",
+                         wbase, wbase + (unsigned)wcount - 1);
+          }
+        }
+        /* The cap was 12, which hid exactly the interesting part: a label
+         * redraw is ~16 cells, so the bulk arrived as "... and N more".
+         * SC_VRAM_WATCH_MAX raises it. */
+        static int cap = -1;
+        if (cap < 0) { const char *e = getenv("SC_VRAM_WATCH_MAX");
+                       cap = (e && *e) ? atoi(e) : 40; if (cap < 1) cap = 1; }
+        if (wcount > 0 && g_ppu && shadow) {
+          int shown = 0;
+          for (int i = 0; i < wcount; i++) {
+            const uint16_t now = g_ppu->vram[wbase + (unsigned)i];
+            if (now == shadow[i]) continue;
+            if (shown < cap)
+              fprintf(stderr, "[watch] f%llu $%02x  $%04x: $%04x -> $%04x\n",
+                      (unsigned long long)s_frames, g_ram[0x14],
+                      wbase + (unsigned)i, shadow[i], now);
+            shadow[i] = now; shown++;
+          }
+          if (shown > cap)
+            fprintf(stderr, "[watch] f%llu  ... and %d more cells\n",
+                    (unsigned long long)s_frames, shown - cap);
+          /* Scroll is opt-in. Left on it buried the cell changes: a run
+           * came back 5780 lines long with 240 of them the ones I wanted. */
+          if (!getenv("SC_VRAM_WATCH_SCROLL")) { scroll_seen = 1; goto watch_done; }
+          for (int L = 0; L < 4; L++) {
+            const uint16_t h = g_ppu->hScroll[L], v = g_ppu->vScroll[L];
+            if (scroll_seen && h == last_h[L] && v == last_v[L]) continue;
+            fprintf(stderr, "[watch] f%llu $%02x  BG%d scroll h=%u v=%u\n",
+                    (unsigned long long)s_frames, g_ram[0x14], L + 1, h, v);
+            last_h[L] = h; last_v[L] = v;
+          }
+          scroll_seen = 1;
+        watch_done: ;
+        }
+      }
+      apply_surfaces();
+      /* Every frame the selector is up, not once on entry: the game draws
+       * its own cards as the screen fades in, so a single placement at
+       * entry is painted over. Reported from play as the cards being right
+       * for a moment and then gone. */
       ws_hide_backdrop_furniture();
+      ws_fill_flat_margins();
       ws_fill_margins();
+      if (getenv("SC_PASS_DIAG") && s_ws_scratch) {
+        static int nf;
+        long long diff = 0, tot = 0;
+        int first_y = -1, first_x = -1;
+        for (int y = 0; y < kVideoHeight; y++) {
+          const uint32_t *a =
+              (const uint32_t *)(s_ws_scratch + (size_t)y * s_video_pitch);
+          const uint32_t *b =
+              (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          for (int x = 0; x < s_video_w; x++) {
+            tot++;
+            if (a[x] != b[x]) {
+              diff++;
+              if (first_y < 0) { first_y = y; first_x = x; }
+            }
+          }
+        }
+        if (++nf % 30 == 0)
+          fprintf(stderr,
+                  "[pass] f=%d extra pass vs MAIN render differ on %lld of %lld px"
+                  " first at (%d,%d)\n",
+                  nf, diff, tot, first_x, first_y);
+      }
+      /* SC_MAPGEN_VERIFY=1: sample the guest's PRNG state once per frame.
+       *
+       * There is no per-opcode hook in this target -- the interp816 core does
+       * not call interp816_opcode_hook, and interp_bridge.c (which owns the
+       * coverage hooks) is not compiled here. Both were tried and produced no
+       * output at all.
+       *
+       * Sampling per frame is enough anyway: the state is 32 bits, so if
+       * sc_mapgen_prng_step() is correct then consecutive samples must be
+       * joined by a small number of iterations. A wrong step lands on the next
+       * sample essentially never. $59/$5b are direct page in bank 0. */
+      if (getenv("SC_MAPGEN_VERIFY")) {
+        static uint16_t p0, p1;
+        static int have;
+        const uint16_t g0 = (uint16_t)(g_ram[0x59] | (g_ram[0x5a] << 8));
+        const uint16_t g1 = (uint16_t)(g_ram[0x5b] | (g_ram[0x5c] << 8));
+        if (!have || g0 != p0 || g1 != p1) {
+          fprintf(stderr, "[prng] f=%llu %04X %04X\n",
+                  (unsigned long long)s_frames, g0, g1);
+          p0 = g0; p1 = g1; have = 1;
+        }
+      }
+      ws_fix_scroll_seam(); /* before compose: it copies the guest columns */
       host_map_compose();   /* all 224 visible lines are drawn by now */
       snes->inVblank = true;
       snes->inNmi = true;
@@ -1219,8 +1957,8 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  *
  * DEFAULT OFF as of the settings-menu work -- this fired during ordinary
  * gameplay, not just the load screen, and the resulting intermittent 6x
- * bursts made the game feel rough and badly worsened the known
- * fast-forward audio-delay problem (see the revert note in the main loop).
+ * bursts made the game feel rough and badly worsened the fast-forward
+ * audio delay of the time (since fixed: the audio drain trims the backlog).
  * Measured with SC_ADDR_TRACE on the three trigger PCs against real
  * gameplay save states: on the classic map screen it fired sporadically
  * (~4 times in 2000 frames, each arming a 20-frame boost), but on the
@@ -1251,32 +1989,26 @@ static uint8_t s_addr_trace_last_ed = 0xff;
  * advice is "leave it alone" is worse than no setting, so the row and the flag
  * are gone.
  *
- * What it existed for survives as MAPGEN TURBO, which uses the same two
- * load-specific triggers but only inside the generation/decompression window,
- * where nothing is being listened to either. */
-static bool s_generating;
+ * What it existed for became MAPGEN TURBO, and the WHOLE FAMILY is now gone.
+ * The decompiled map generator (SC_MAPGEN_FAST, hooked at 01:f1ed) removes the
+ * wait these were collapsing: measured, the map completes at frame 90 whether
+ * the boost is 16x or off. The decompressor half went with it -- 00:90dd fires
+ * on screen transitions and loads during ordinary play, so boosting it
+ * advanced the SIMULATION, which is how the whole thing was noticed ("seems to
+ * speed up the simulation, on the normal map, not the map generation").
+ *
+ * Nothing host-side now runs the guest faster except Tab-held fast-forward and
+ * DRAG TURBO, both of which are explicit, held gestures. */
 static unsigned long s_gen_trigger_hits;
-static unsigned long s_gen_boost_frames;
-static int s_gen_loop_active_frames; /* counts down; >0 means "recently seen" */
-
-/* Guest frames per host frame while the map-generation / decompression loop is
- * active. This is how the generation wait is removed WITHOUT moving generation
- * host-side.
- *
- * Generating the map host-side would cross the line docs/PLAN_renderer.md sets
- * out: the map is state, not presentation. It is genuinely procedural --
- * 03:d840 seeds the PRNG a seed-dependent 1-32 times, then JSL $01f1ed runs
- * five distinct terrain-feature routines -- so a host implementation would have
- * to match it bit-for-bit, and any divergence would produce a different city
- * with nothing to detect it. The guest stays authoritative; it just runs
- * faster while nobody is looking at the screen.
- *
- * Separate from AUTO TURBO, which stays off by default for its own reasons
- * (it fired during ordinary gameplay and made the game feel rough). This only
- * engages on the two load-specific triggers. */
-static int s_mapgen_turbo = 16;   /* 1 = off */
-static const int kMapgenTurbos[] = { 1, 4, 8, 16, 32, 64 };
-#define SC_GEN_LOOP_HOLDOFF 20 /* frames to keep boosting after the last hit */
+static int s_bank_profile;
+static unsigned long long s_bank_ops[256];
+static unsigned long long s_b3_page[256];
+/* Which bank the per-page breakdown covers. Default 03 (the simulation),
+ * but the overview-map load lives in banks 00/02, and a breakdown nailed
+ * to one bank cannot see that. SC_BANK_PROFILE_PAGE=02. */
+static int s_bank_page_sel = 3;
+static unsigned long long s_tick_count, s_tick_frames_total, s_tick_ops_total;
+static unsigned long long s_tick_frames_max, s_tick_start_frame, s_tick_start_ops;
 
 /* Post-load power dropout fix.
  *
@@ -1334,6 +2066,50 @@ static void apply_power_fix(void) {
  * bitmaps through the bridge PC hook. Takes the PC and widths as arguments
  * rather than reading g_cpu, because in fiber mode g_cpu never executes. */
 static void sc_note_executed_pc(uint32_t pc24, int mf, int xf) {
+  /* SC_INTERP_PROFILE=1: where does interpreted time actually go?
+   *
+   * With SC_FIBER the AOT tier runs compiled bodies, but a 600-frame qualify
+   * still interprets ~2.8M opcodes against 5263 bounces -- so the interpreter
+   * carries most of the work, and that mass is what a native HLE would remove.
+   * This buckets interpreted PCs by 256 bytes so the hot routines can be
+   * ranked and picked off. Only fires in AOT-linked targets; the interp816
+   * build never calls this hook. */
+  {
+    static int prof = -1;
+    if (prof < 0) { const char *e = getenv("SC_INTERP_PROFILE"); prof = (e && *e) ? 1 : 0; }
+    if (prof) {
+      static uint32_t bucket[256 * 256];   /* bank<<8 | (addr>>8) */
+      static unsigned long long total;
+      const unsigned idx = ((pc24 >> 16) & 0xffu) << 8 | ((pc24 >> 8) & 0xffu);
+      bucket[idx]++;
+      if (++total % 2000000ULL == 0) {
+        /* Pick the top 12 by repeated max, EXCLUDING what is already picked.
+         * The insertion version this replaced never excluded, so one hot
+         * bucket filled most of the list -- a profile showing the same page
+         * and the same count a dozen times, which is nonsense that looks like
+         * data. */
+        unsigned top[12];
+        int ntop = 0;
+        for (int k = 0; k < 12; k++) {
+          unsigned best = 0; uint32_t bestv = 0;
+          for (unsigned i = 0; i < 256u * 256u; i++) {
+            if (!bucket[i]) continue;
+            int taken = 0;
+            for (int j = 0; j < ntop; j++) if (top[j] == i) { taken = 1; break; }
+            if (taken) continue;
+            if (bucket[i] > bestv) { bestv = bucket[i]; best = i; }
+          }
+          if (!bestv) break;
+          top[ntop++] = best;
+        }
+        fprintf(stderr, "[profile] %llu interpreted opcodes; hottest 256-byte pages:\n", total);
+        for (int k = 0; k < ntop; k++)
+          fprintf(stderr, "   %02X:%02Xxx  %9u  %5.1f%%\n",
+                  top[k] >> 8, top[k] & 0xff, bucket[top[k]],
+                  100.0 * (double)bucket[top[k]] / (double)total);
+      }
+    }
+  }
   const uint8_t bank = (uint8_t)((pc24 >> 16) & 0xff);
   const uint16_t pc  = (uint16_t)(pc24 & 0xffff);
   if (s_pc_bitmap_bank >= 0 && bank == s_pc_bitmap_bank && pc >= 0x8000 &&
@@ -1381,10 +2157,10 @@ static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
   s_aot_variant_count++;
 }
 
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 /* ── SC_FIBER=1: run the guest inside the fiber (migration step 3d) ───────
  *
- * The driver itself lives in src/simcity_fiberdrive.c, because it needs
+ * The driver itself lives in src/sc_fiberdrive.c, because it needs
  * cpu_state.h and that header declares a global `CpuState g_cpu` which
  * collides with this file's `Interp816 *g_cpu`. Keeping it in its own
  * translation unit is cheaper than renaming a symbol used several hundred
@@ -1394,12 +2170,23 @@ static void sc_note_aot_entry(uint32_t pc24, int mf, int xf) {
  * because that path is this project's correctness baseline and every
  * `--qualify` number rests on it. */
 static bool s_fiber_mode;
+#endif
+/* SC_BEAM_LEGACY=1: leave the beam to snes.c's own DMA and $4212 steps, as
+ * before sc_own_the_beam() -- for A/B comparisons only. */
+static bool s_own_beam = true;
+#ifdef SC_AOT_TIER
+/* What was asked for, and whether a human asked. The difference matters
+ * only on a non-US ROM: an explicit SC_FIBER=1 there is an error worth
+ * stopping for, while the mere default quietly steps down to the
+ * interpreter so every region stays playable. */
+static int  s_fiber_want;
+static int  s_fiber_explicit;
 
 /* One host frame in the fiber model: advance the PPU and devices for a whole
  * frame (so raster effects still work line by line, per MIGRATION_step3 §4),
  * release the vblank wait the way the NMI handler would, then let the guest
  * run until its vblank HLE hands the frame back. */
-/* Beam advance, exposed to the frame driver (src/simcity_fiberdrive.c).
+/* Beam advance, exposed to the frame driver (src/sc_fiberdrive.c).
  * handle_pos_stuff() is static and deeply tied to this file, so the driver
  * calls in rather than duplicating the device model. */
 /* One beam step, catching the APU up on the same cadence the per-opcode path
@@ -1479,36 +2266,97 @@ static void sc_catch_missed_vblank(void) {
   if (snes->nmiEnabled) { g_cpu->nmiWanted = true; s_nmi_requests++; }
   if (snes->autoJoyRead) snes->autoJoyTimer = 4224;
 }
+/* Master cycles from the current beam position to the frame boundary.
+ * 1364 per scanline, 262 lines per frame. */
+static uint64_t sc_cycles_to_frame_end(void) {
+  int64_t c = (int64_t)(262 - (int)g_snes->vPos) * 1364 - (int64_t)g_snes->hPos;
+  return c > 0 ? (uint64_t)c : 0;
+}
+
+/* One host frame.
+ *
+ * The frame boundary -- the instant that decides what gets presented -- must
+ * fall while the guest is STOPPED. That is the whole content of this function,
+ * and it took three attempts to get right.
+ *
+ * The bridge advances the beam by the guest's own master cycles as it runs
+ * (interp_bridge.c's per-opcode snes_sync_master_clock moves the same
+ * hPos/vPos this host's beam loop does). So the original shape -- run the beam
+ * all the way round, present, then hand the guest a flat 357368 cycles -- let
+ * vPos WRAP MID-BURST, presenting a screen sampled from part-way through the
+ * guest's update. Those are frames the per-opcode host never renders, because
+ * it interleaves guest writes across the scanlines as they are drawn, and they
+ * are what made already-fixed widescreen defects appear to come back.
+ *
+ * Two things that did NOT work, both measured, both recorded in
+ * docs/TODO_fiber_rendering.md: resizing the flat budget (worse in both
+ * directions, 0/17 frames identical at every value tried against 9/17 at
+ * exactly one frame), and an earlier two-slice split that double-counted the
+ * guest clock and fired vblank detection twice (0/17, master cycles nearly
+ * doubled).
+ *
+ * What works is to size each slice from the ACTUAL BEAM POSITION rather than
+ * guess, and to cross the boundary in between:
+ *
+ *   park at vblank entry, guest stopped   -> active display rendered cleanly
+ *   NMI
+ *   slice A, bounded by cycles-to-wrap    -> guest cannot carry the beam over
+ *   host crosses the boundary, guest stopped  -> THE PRESENT
+ *   slice B, the rest of the frame budget -> guest's main-loop work
+ *
+ * The guest still receives one frame of cycles per host frame, so pacing is
+ * unchanged. It simply is not holding the CPU at the instant that matters. */
 static bool run_one_frame_fiber(void) {
   uint64_t before = s_frames;
+  bool ok = true;
+  const uint64_t kFrameCycles = 357368u;
 
-  unsigned guard = 0;
-  while (s_frames == before && guard++ < 400000) {
-    sc_beam_step();
-  }
-  snes_catchupApu(g_snes);
+  /* Render the active display with the guest quiescent in its 00:9311 wait,
+   * which is the hardware order: scan out, then vblank, then let the game
+   * write the PPU while nothing is being scanned. */
+  { unsigned guard = 0;
+    while (!g_snes->inVblank && s_frames == before && guard++ < 400000)
+      sc_beam_step();
+    snes_catchupApu(g_snes); }
 
-  /* Hand the host's NMI request to the guest instead of faking its effect.
-   * handle_pos_stuff() raises NMI on g_cpu, the Interp816 -- which never
-   * executes in fiber mode, so the request used to sit there unconsumed
-   * while this line forged the handler's INC $b9:
-   *
-   *     g_ram[0xb9] = 1;
-   *
-   * That released 00:930d's wait and skipped the rest of 00:80B2, i.e. the
-   * per-frame PPU work. The driver now delivers a real interrupt. */
+  /* Hand the host's NMI request to the guest rather than faking its effect --
+   * handle_pos_stuff() raises it on g_cpu, the Interp816, which never executes
+   * in fiber mode. Forging g_ram[$b9]=1 released 00:930d's wait but skipped
+   * the rest of 00:80B2, i.e. the per-frame PPU work. */
   sc_catch_missed_vblank();
   bool nmi_pending = false;
   if (g_cpu->nmiWanted) { g_cpu->nmiWanted = false; nmi_pending = true; }
 
-  {
-    static uint64_t last_guest_master;
-    bool ok = SimCityFiberDrive_RunGuestFrame(s_frames, nmi_pending);
-    s_nmi_serviced = SimCityFiberDrive_NmiDelivered();
-    /* Mirror the guest clock into the host counter the qualify bar and the
-     * APU pacing read. Without this the frame path reports master=0 and every
-     * cycle-derived check reads as dead. */
-    uint64_t now = SimCityFiberDrive_MasterCycles();
+  { static uint64_t last_guest_master;
+    const uint64_t guest_start = ScFiberDrive_MasterCycles();
+
+    /* Slice A: bounded so the beam stops short of the wrap. */
+    { uint64_t a = sc_cycles_to_frame_end();
+      if (a > kFrameCycles) a = kFrameCycles;
+      if (a < 1364u) a = 1364u;
+      ok = ScFiberDrive_RunGuestSlice(s_frames, nmi_pending, a); }
+
+    /* Cross the boundary with the guest stopped. This is the present. */
+    { unsigned guard = 0;
+      while (s_frames == before && guard++ < 400000) sc_beam_step();
+      snes_catchupApu(g_snes); }
+
+    /* Slice B: the remainder of this frame's budget, capped so the beam
+     * cannot reach the NEXT boundary either. No NMI -- one per frame. */
+    { const uint64_t used = ScFiberDrive_MasterCycles() - guest_start;
+      if (used < kFrameCycles) {
+        uint64_t b = kFrameCycles - used;
+        uint64_t room = sc_cycles_to_frame_end();
+        if (room && b > room) b = room;
+        if (b >= 1364u)
+          ok = ScFiberDrive_RunGuestSlice(s_frames, false, b) && ok;
+      } }
+
+    s_nmi_serviced = ScFiberDrive_NmiDelivered();
+
+    /* Mirror the guest clock into the host counter ONCE per frame. Doing this
+     * per slice is how the earlier attempt double-counted. */
+    uint64_t now = ScFiberDrive_MasterCycles();
     if (now > last_guest_master) {
       uint64_t delta = now - last_guest_master;
       g_master_cycles += delta;
@@ -1543,15 +2391,15 @@ static bool run_one_frame_fiber(void) {
         delta -= chunk;
       }
     }
-    last_guest_master = now;
-    sc_catch_missed_vblank();
-    return ok;
-  }
+    last_guest_master = now; }
+
+  sc_catch_missed_vblank();
+  return ok;
 }
-#endif /* SIMCITY_AOT_TIER */
+#endif /* SC_AOT_TIER */
 
 /* s_fiber_mode only exists in the AOT build. */
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
 static bool sc_fiber_active(void) { return s_fiber_mode; }
 #else
 static bool sc_fiber_active(void) { return false; }
@@ -1616,6 +2464,70 @@ static const int kDragTurbos[] = { 1, 2, 3, 4, 6 };
  * Done with PC hooks rather than ROM patches: each of the three sites is a
  * value the host can simply overwrite the instant the ROM has written it,
  * which needs no free ROM space and leaves every byte of the image intact. */
+/* Exact-fingerprint match against the pristine US image. Every ROM-address
+ * hook in this file is a US address, so all of them have to be gated on it:
+ * the other four regions are the same game at different offsets, where the
+ * same PC is some unrelated instruction. */
+static bool s_rom_is_us = true;
+static uint32_t s_rom_fnv;      /* FNV-1a of the ROM file, see main() */
+static uint32_t s_tr_off, s_tr_len;  /* SC_TRANSLATION, for the recheck */
+/* Translated scenario briefings, keyed by the address they decompress FROM.
+ * The game unpacks each briefing through 00:90dd, so the substitution goes
+ * in at the decompressor's exit -- the same hook Sylt's own briefing has
+ * used all along, generalised from one address to the twelve. */
+enum { kMaxBriefs = 16 };
+static uint32_t s_brief_src[kMaxBriefs], s_brief_len[kMaxBriefs];
+static uint8_t *s_brief_data[kMaxBriefs];
+static int      s_brief_count;
+static uint32_t s_brief_decomp_src, s_brief_out;
+/* Scenario picture tiles -- the cards and the HUD word-strips. Artwork, not
+ * text, so a translation of them is a different set of pixels rather than a
+ * different string. Substituted at the same decompressor exit. */
+static uint8_t *s_scen_tiles; static uint32_t s_scen_tiles_len;
+/* Accent glyphs the US font has no drawing for. Each is a tile index into
+ * the decompressed font plus its 16 stored bytes; the dialog renderer
+ * indexes that font by character code, so the index IS the code. */
+enum { kMaxGlyphs = 32, kFontTile = 16 };
+static uint16_t s_glyph_idx[kMaxGlyphs];
+static uint8_t  s_glyph_px[kMaxGlyphs][kFontTile];
+static int      s_glyph_count;
+/* Translated briefing pages, carried as STRINGS and composed here the way
+ * sylt_write_brief_tilemap() composes Sylt's. Nothing about the donor's
+ * tilemap travels: bases, space aliases, punctuation layout and page
+ * pairing all stop mattering, because this side does the drawing.
+ *
+ * The title uses a different glyph bank than the body ($000/$030 against
+ * $690/$6c0) -- that is what makes it a different colour on screen. */
+enum { kBpPages = 16, kBpLines = 56, kBpChars = 33 };
+static uint32_t s_bp_src[kBpPages];
+static char     s_bp_title[kBpPages][kBpChars];
+static uint8_t  s_bp_nlines[kBpPages];
+static uint8_t  s_bp_row[kBpPages], s_bp_col[kBpPages];
+static char     s_bp_line[kBpPages][kBpLines][kBpChars];
+static int      s_bp_count;
+/* Accented glyphs for the BRIEFING bank -- a different typeface from the
+ * dialog font, so separate from the 16 font accents. */
+static uint16_t s_sg_idx[kMaxGlyphs];
+static uint8_t  s_sg_px[kMaxGlyphs][16];
+static int      s_sg_count;
+/* Translated scenario cards. Each is an 8x9 tilemap rectangle plus the art
+ * of every tile it references -- the shipped cards, unlike Sylt's, are not
+ * a consecutive run. Placed at the selector, the same moment and the same
+ * way sylt_place_card() places the ninth. */
+enum { kMaxCards = 12, kCardTiles = 64 };
+static uint8_t  s_card_col[kMaxCards], s_card_row[kMaxCards];
+static uint8_t  s_card_w[kMaxCards], s_card_h[kMaxCards];
+static uint16_t s_card_map[kMaxCards][72];
+static uint16_t s_card_tid[kMaxCards][kCardTiles];
+static uint8_t  s_card_px[kMaxCards][kCardTiles][32];
+static uint8_t  s_card_nt[kMaxCards];
+static int      s_card_count;
+/* Surfaces: the general form of the card placement -- a tilemap region plus
+ * the art of every tile it uses, written when a given screen appears. Kept
+ * as the raw file and walked at apply time. */
+enum { kMaxSurf = 4 };
+static uint8_t *s_surf[kMaxSurf]; static uint32_t s_surf_len[kMaxSurf];
+static int      s_surf_count;
 static bool s_ninth_scenario;
 /* Declared here rather than beside load_sylt_map(): the arm is set from the
  * selector hook and the swap runs in the opcode loop, both of which come
@@ -1623,12 +2535,22 @@ static bool s_ninth_scenario;
 static uint8_t *s_sylt_map;
 static long s_sylt_map_len;
 static bool s_sylt_map_armed;   /* only when the ninth column is confirmed */
+/* Set once Sylt's map is actually in place, cleared on the way back to the
+ * selector. Index 8 is the practice map as well, so "$0040 == 8" alone
+ * cannot tell the two apart after the arm has been consumed. */
+static bool s_sylt_city;
 static int  s_ninth_scroll = 0xA0;   /* $22 target for the new column.
                                       * Past the tilemap's own 359 px, which
                                       * selector_extend_tilemap() fills in. */
 
+/* One character of the stored city name, for SC_SCEN_DIAG. */
+static char nmc(unsigned i) {
+  const unsigned v = g_ram[0x0b5b + 1 + i];
+  return (v >= 0x0a && v <= 0x23) ? (char)(0x41 + v - 0x0a) : 0x2e;
+}
+
 static void ninth_scenario_hook(unsigned bank, unsigned pc) {
-  if (!s_ninth_scenario || bank != 0x03) return;
+  if (!s_ninth_scenario || !s_rom_is_us || bank != 0x03) return;
   switch (pc) {
     case 0xddb6:   /* selector entry, before anything reads the cursor.
                     * Coming back from a scenario the ROM re-derives $52/$54
@@ -1645,7 +2567,12 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
        * same routine if the ninth column is confirmed. Backing out of Sylt
        * without starting it therefore cannot leave it armed for the tutorial. */
       s_sylt_map_armed = false;
+      s_sylt_city = false;
       selector_extend_tilemap();
+      /* Cards first, Sylt second. The donor cards reference tiles that fall
+       * in Sylt's CHR run at $2e0, so placing them after sylt_place_card()
+       * overwrote its art -- reported from play as Sylt going black. */
+      place_translated_cards();
       sylt_place_card();
       break;
     case 0xde4d:   /* B accepted on the selector (03:de4d is the JSR $e574 /
@@ -1705,6 +2632,116 @@ static void ninth_scenario_hook(unsigned bank, unsigned pc) {
       if (g_ram[0x52] == 4) {
         g_ram[0x22] = (uint8_t)(s_ninth_scroll & 0xff);
         g_ram[0x23] = (uint8_t)((s_ninth_scroll >> 8) & 0xff);
+      }
+      break;
+    /* ---- The ninth scenario's win/lose rules ------------------------
+     *
+     * Every per-scenario table the ROM indexes with $0040 has EIGHT entries,
+     * and they are laid out back to back, so index 8 reads the first entry of
+     * whatever table follows. 03:cec8 below already repairs the seed. These
+     * three cases repair the rest, all of it reached only in scenario mode --
+     * $3e == 3, which 03:c502 and 03:e2f5 test for themselves. The practice
+     * map shares index 8 and is excluded by that same test.
+     *
+     * Reported from play as "Sylt is losing after a short time", and it was
+     * losing every time, immediately and unavoidably. */
+    case 0xce2e:   /* entry to the map loader, for EVERY map */
+      /* Clear the latch here, not just on the way to the selector.
+       *
+       * It was cleared at 03:ddb6 alone, which the tutorial never reaches --
+       * it is started from the main menu, not the scenario selector. So a
+       * latch left set by a Sylt session survived into the next practice map
+       * and renamed it. Reported from play: "now the Practice map shows
+       * Sylt".
+       *
+       * Both maps load through here, so clearing on entry and setting again
+       * at the swap below makes the latch describe THIS load and nothing
+       * earlier -- and it does so whichever way round the seed and the swap
+       * happen to run. */
+      s_sylt_city = false;
+      break;
+    case 0xcf31:   /* 03:cf19 has just copied the city name to $0b5b */
+      /* The name table at $03cf32 is one of the few tables indexed by $0040
+       * that is NOT short -- it has a real ninth entry, $cf79, and that entry
+       * is the practice map's own name. So Sylt loads correctly named
+       * PRACTICE, and that name is what the fast-travel minimap and the view
+       * mode draw. Reported from play.
+       *
+       * $0b5b holds a length byte then the characters, in the same A = 0x0a
+       * alphabet the briefing uses. Rewritten in place; the table itself is
+       * ROM and repointing it would change the fingerprint.
+       *
+       * Gated on the arm OR the latch so the order of the seed against the
+       * map swap does not matter: whichever ran first, one of the two is set
+       * for Sylt and neither is for the tutorial, which shares index 8 and
+       * has to keep its own name. */
+      if ((g_ram[0x40] | (g_ram[0x41] << 8)) == 8 &&
+          (s_sylt_map_armed || s_sylt_city)) {
+        static const uint8_t kSylt[] = { 0x04, 0x1c, 0x22, 0x15, 0x1d };  /* SYLT */
+        for (unsigned i = 0; i < sizeof kSylt; i++)
+          g_ram[0x0b5b + i] = kSylt[i];
+        /* Blank what the longer name left behind. The length byte is
+         * what gets drawn, so this is not visible either way, but a
+         * buffer reading SYLTTICE is a trap for the next reader. */
+        for (unsigned i = sizeof kSylt; i <= 8; i++)
+          g_ram[0x0b5b + i] = 0;
+      }
+      break;
+    case 0xc518:   /* 03:c515 LDA $c5b3,Y has just read the deadline year */
+      /* The deadline table at $03c5b3 ends at index 7 (the $ffff free-play
+       * sentinel); index 8 falls into the countdown table at $03c5c3 and
+       * reads 5. Against a start year of 2047 the SBC at 03:c519 borrows,
+       * 03:c51e clamps the remainder to 0, and the countdown at $0ccb walks
+       * all six of its steps in six calls -- so the scenario reaches its
+       * verdict almost at once. $0deb is 1 there against the CMP #$0004 at
+       * 03:c54b, so the verdict is always a loss.
+       *
+       * 2057 is Rio's deadline, which is the right one to borrow: the Sylt
+       * patch repoints index 5, so the rest of its seed is Rio's too, and it
+       * matches the ten-year limit Las Vegas uses. */
+      if (g_cpu && g_ram[0x3e] == 3 &&
+          (g_ram[0x40] | (g_ram[0x41] << 8)) == 8)
+        g_cpu->a = 2057;
+      break;
+    case 0xc548:   /* the countdown has expired: verdict time */
+      /* Sylt decides its own, ahead of the ROM's gate.
+       *
+       * 03:c54b applies CMP #$0004 to $0deb before any per-scenario objective
+       * is looked at, and the ladder at 03:81d8 prices city class 4 at
+       * 100,000 inhabitants. So every stock scenario secretly requires 100k.
+       * Sylt starts at 3,400 on a small island -- the real one holds about
+       * 18,000 -- so under that gate it could never be won at all, whatever
+       * objective it was given, and a score test bolted on afterwards would
+       * only have been strictly harder.
+       *
+       * Its rule instead: the city score back to where it started, and a
+       * size floor an island can actually reach. $0ded is the score, set to
+       * exactly 500 at 03:b485 when the evaluation counters are cleared, and
+       * three stock scenarios already win on ">= 500". Class 2 is 10,000
+       * people. Both are the ROM's own measures, not invented ones.
+       *
+       * Jumping straight to the ROM's own store keeps the result in one
+       * place: c5a7 loads 2 (win), c5ac loads 1 (lose), both fall into the
+       * STA $0d87 at c5af. */
+      if (g_cpu && (g_ram[0x40] | (g_ram[0x41] << 8)) == 8 && g_ram[0x3e] == 3) {
+        const unsigned cls   = g_ram[0x0deb] | ((unsigned)g_ram[0x0dec] << 8);
+        const unsigned score = g_ram[0x0ded] | ((unsigned)g_ram[0x0dee] << 8);
+        g_cpu->pc = (cls >= 2u && score >= 500u) ? 0xc5a7 : 0xc5ac;
+      }
+      break;
+    case 0xe30a:   /* the win-mark setter, ORA $e334,Y */
+      /* Its mask table is eight entries as well; index 8 reads 0xbb22, which
+       * 03:e326 would commit to SRAM $700007 -- scattering win marks across
+       * scenarios that were never played and setting bit 15, the game's own
+       * "every scenario beaten" flag. Bit 8 is free: the six scenarios own
+       * bits 0-5, Las Vegas and free play 6-7, and the all-beaten flag is 15.
+       *
+       * Do the OR here and step over the instruction. The ROM's own drawer at
+       * 03:ded0 walks only eight bits, so bit 8 paints no mark on the card --
+       * a cosmetic gap, against corrupting the six that do. */
+      if (g_cpu && g_cpu->y == 16 && g_ram[0x3e] == 3) {
+        g_cpu->a = (uint16_t)(g_cpu->a | 0x0100u);
+        g_cpu->pc = 0xe30d;
       }
       break;
     case 0xcec8:   /* 03:ce8b has just seeded from its 8-entry tables */
@@ -1857,8 +2894,496 @@ static void sc_maybe_trigger_disaster(void) {
   s_disaster_bit = -1;
 }
 
+/* ── 00:90dd, the stream decompressor ──────────────────────
+ *
+ * 48% of the overview-map load (docs/ROM_MAP.md). src/sc_decomp.c does
+ * the same work on the host.
+ *
+ * SC_DECOMP_VERIFY=1 is the important mode, and it exists because the map
+ * generator taught the lesson: that generator was WRONG for a whole session
+ * while looking plausible, and what caught it was comparing against the
+ * guest rather than eyeballing output. So this runs the C into a scratch
+ * copy of WRAM, lets the ROM run as normal, and compares at the RTS. It
+ * changes nothing -- it only reports. Only once it reports clean is
+ * SC_DECOMP_FAST worth turning on.
+ */
+static uint8_t sc_decomp_bus_read(void *ctx, uint32_t addr) {
+  (void)ctx;
+  return (uint8_t)snes_read(g_snes, addr);
+}
+
+static uint8_t *s_dec_ref;             /* scratch WRAM image for verify */
+static ScDecompResult s_dec_exp;       /* what the C predicted */
+static int      s_dec_pending;         /* a call is in flight */
+static int      s_dec_armed;           /* 00:90dd seen, 00:90ee not yet */
+static int      s_dec_trace = -1;      /* SC_DECOMP_TRACE, resolved once */
+static uint16_t s_dec_start_x;
+static unsigned long s_dec_ok, s_dec_mismatch, s_dec_declined, s_dec_fast;
+
+static int sc_decomp_mode(void) {
+  static int mode = -1;                /* 0 off, 1 verify, 2 replace */
+  if (mode < 0) {
+    const char *f = getenv("SC_DECOMP_FAST");
+    const char *v = getenv("SC_DECOMP_VERIFY");
+    /* On by default, like SC_MAPGEN_FAST, and for the same reason: the
+     * substitution is verified byte-exact against the guest rather than
+     * judged by eye. SC_DECOMP_FAST=0 turns it off; SC_DECOMP_VERIFY=1
+     * re-runs the comparison instead of replacing anything. */
+    if (v && *v && *v != '0')   mode = 1;
+    else if (f && *f)           mode = (*f != '0') ? 2 : 0;
+    else                        mode = 2;
+  }
+  return mode;
+}
+
+/* -- screen-packet patches (SC_PACKET_PATCH) ------------------------------
+ *
+ * The scenario selector keeps its whole 64x32 tilemap and its card artwork
+ * as two compressed packets in ROM ($05A5A1 and $0444DB), unpacked through
+ * 00:90DD like everything else. A patch file (tools/text_tool.py packets)
+ * carries spans to lay over the DECOMPRESSED bytes, so the translated screen
+ * is uploaded by the game's own DMA at the game's own moment.
+ *
+ * That is the whole point of doing it here. Five earlier attempts wrote the
+ * cards into VRAM from the host -- at the selector hook, at the frame top,
+ * before and after Sylt -- and every one lost a race with the NMI DMA that
+ * follows: names came out fragmented, one card's text continuing onto the
+ * next. An offline replay of those same writes reproduced the German screen
+ * exactly (384 name cells, zero differing), which ruled the DATA correct and
+ * left only the timing. Patching the source removes the timing question
+ * instead of trying to win it. */
+typedef struct ScpkSpan { uint32_t off; uint16_t len; uint8_t *data; } ScpkSpan;
+typedef struct ScpkEntry { uint32_t src, outlen; uint16_t nspans;
+                           int reported; ScpkSpan *spans;
+                           uint8_t nscreens, screens[8]; } ScpkEntry;
+static ScpkEntry *s_scpk;
+static int s_scpk_count = -1;          /* -1 = not looked for yet */
+static uint32_t s_scpk_src, s_scpk_out;
+
+static uint8_t *read_file(const char *path, uint32_t *size_out);
+
+static void scpk_load(void) {
+  s_scpk_count = 0;
+  const char *path = getenv("SC_PACKET_PATCH");
+  if (!path || !*path) return;
+  uint32_t n = 0;
+  uint8_t *b = read_file(path, &n);
+  if (!b) { fprintf(stderr, "packet patch: cannot read %s\n", path); return; }
+  if (n < 8 || memcmp(b, "SCPK", 4) != 0 || b[4] < 1 || b[4] > 2) {
+    fprintf(stderr, "packet patch: %s is not an SCPK v1 or v2 file\n", path);
+    free(b); return;
+  }
+  const int cnt = b[6] | (b[7] << 8);
+  s_scpk = (ScpkEntry *)calloc((size_t)(cnt ? cnt : 1), sizeof(ScpkEntry));
+  if (!s_scpk) { free(b); return; }
+  uint32_t p = 8;
+  for (int i = 0; i < cnt; i++) {
+    if (p + 4 > n) break;
+    ScpkEntry *e = &s_scpk[s_scpk_count];
+    e->src = ((uint32_t)b[p] << 16) | b[p + 1] | ((uint32_t)b[p + 2] << 8);
+    /* v2 carries the screens an entry is for, right after the address; an
+     * empty list means every screen, which is all v1 could say. */
+    uint32_t q = p + 3;
+    e->nscreens = 0;
+    if (b[4] >= 2) {
+      const uint8_t ns = b[q++];
+      if (q + ns > n) break;
+      for (uint8_t s = 0; s < ns; s++)
+        if (e->nscreens < sizeof e->screens) e->screens[e->nscreens++] = b[q + s];
+      q += ns;
+    }
+    if (q + 6 > n) break;
+    e->outlen = (uint32_t)b[q] | ((uint32_t)b[q + 1] << 8) |
+                ((uint32_t)b[q + 2] << 16) | ((uint32_t)b[q + 3] << 24);
+    e->nspans = (uint16_t)(b[q + 4] | (b[q + 5] << 8));
+    p = q + 6;
+    e->spans = (ScpkSpan *)calloc((size_t)(e->nspans ? e->nspans : 1),
+                                  sizeof(ScpkSpan));
+    if (!e->spans) break;
+    int ok = 1;
+    for (int k = 0; k < e->nspans; k++) {
+      if (p + 6 > n) { ok = 0; break; }
+      const uint32_t off = (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8) |
+                           ((uint32_t)b[p + 2] << 16) | ((uint32_t)b[p + 3] << 24);
+      const uint16_t len = (uint16_t)(b[p + 4] | (b[p + 5] << 8));
+      p += 6;
+      if (p + len > n) { ok = 0; break; }
+      uint8_t *d = (uint8_t *)malloc(len ? len : 1);
+      if (!d) { ok = 0; break; }
+      memcpy(d, b + p, len); p += len;
+      e->spans[k].off = off; e->spans[k].len = len; e->spans[k].data = d;
+    }
+    if (!ok) break;
+    s_scpk_count++;
+  }
+  free(b);
+  for (int i = 0; i < s_scpk_count; i++)
+    fprintf(stderr, "packet patch: $%02x:%04x  %u bytes out, %u spans\n",
+            (unsigned)(s_scpk[i].src >> 16), (unsigned)(s_scpk[i].src & 0xffff),
+            s_scpk[i].outlen, (unsigned)s_scpk[i].nspans);
+  for (int i = 0; i < s_scpk_count; i++)
+    if (s_scpk[i].nscreens)
+      fprintf(stderr, "packet patch: $%02x:%04x  only while $14 = $%02x%s\n",
+              (unsigned)(s_scpk[i].src >> 16), (unsigned)(s_scpk[i].src & 0xffff),
+              s_scpk[i].screens[0], s_scpk[i].nscreens > 1 ? " (and more)" : "");
+}
+
+/* `out` is where the ROM put the packet: $8000 + X, in bank $7E. */
+static void scpk_apply(uint32_t src, uint32_t out) {
+  if (s_scpk_count < 0) scpk_load();
+  for (int i = 0; i < s_scpk_count; i++) {
+    ScpkEntry *e = &s_scpk[i];
+    if (e->src != src) continue;
+    /* The menu's sprite artwork ($09:A571) is not the menu's alone. The
+     * scenario selector unpacks it again on screen $0a and draws its win marks
+     * from it -- record $29, tiles $1B0 $1B2 $1D0 $1D2 -- and the new-city
+     * screens unpack it on $04. A patch keyed only by source reached all of
+     * them, so the composed menu letters landed on the marks: reported from
+     * play as the red X turned into coloured fragments of STADT. An entry
+     * that names its screens is applied on those screens only. */
+    if (e->nscreens) {
+      int hit = 0;
+      for (int s = 0; s < e->nscreens; s++) hit |= e->screens[s] == g_ram[0x14];
+      if (!hit) continue;
+    }
+    for (int k = 0; k < e->nspans; k++) {
+      const uint32_t at = out + e->spans[k].off;
+      if (at + e->spans[k].len > 0x20000u) continue;
+      memcpy(&g_ram[at], e->spans[k].data, e->spans[k].len);
+    }
+    /* Once per ENTRY, not once overall: a single shared flag reported only
+     * the first packet to be patched and left the others looking silent. */
+    if (!e->reported) {
+      e->reported = 1;
+      fprintf(stderr, "packet patch: applied at $%02x:%04x\n",
+              (unsigned)(src >> 16), (unsigned)(src & 0xffff));
+    }
+  }
+}
+
+/* The main map's building labels are not in a packet: they sit uncompressed
+ * at file $034C00 and are copied to VRAM byte $CC00 one for one. So they are
+ * patched in the cart IMAGE, the same way SC_TRANSLATION patches the message
+ * block -- and for the same reason it does it here: after the fingerprint has
+ * been taken, so a translated run keeps the host map renderer, SC_FIBER, the
+ * cursor cadence patch and the view fix. */
+static uint32_t s_scpk_rom_off, s_scpk_rom_len;   /* a witness for the recheck */
+static void scpk_apply_rom(uint8_t *rom, uint32_t size) {
+  if (s_scpk_count < 0) scpk_load();
+  for (int i = 0; i < s_scpk_count; i++) {
+    if (s_scpk[i].src != 0xfeffffu) continue;
+    uint32_t n = 0;
+    for (int k = 0; k < s_scpk[i].nspans; k++) {
+      const uint32_t at = s_scpk[i].spans[k].off;
+      if (at + s_scpk[i].spans[k].len > size) continue;
+      memcpy(rom + at, s_scpk[i].spans[k].data, s_scpk[i].spans[k].len);
+      if (!s_scpk_rom_len) { s_scpk_rom_off = at; s_scpk_rom_len = s_scpk[i].spans[k].len; }
+      n += s_scpk[i].spans[k].len;
+    }
+    fprintf(stderr, "packet patch: %u bytes laid over the cart image\n", n);
+  }
+}
+
+static int scpk_active(void) {
+  if (s_scpk_count < 0) scpk_load();
+  return s_scpk_count > 0;
+}
+
+static void sc_decomp_hook(Interp816 *cpu) {
+  const int mode = sc_decomp_mode();
+  if (!mode) return;
+
+  /* Enter at 00:90ee, not 00:90dd, and leave via 00:9106 rather than by
+   * emulating the RTS. Both details are load-bearing: the Sylt scenario
+   * hack hooks PCs INSIDE this routine -- 00:90eb to capture the source
+   * address, and 00:9106 to write its briefing tilemap. Skipping 90dd to
+   * the return jumped straight over both, and Sylt vanished from the
+   * scenario list. Reported from play; nothing in the qualify harness
+   * would have caught it, because Sylt is this project's own addition.
+   *
+   * 00:90ee is the first instruction after setup (DB set from $000b, X
+   * from $000e, $0011 cleared) and before any stream byte is consumed, so
+   * the ROM does its own prologue and 90eb fires naturally. Setting PC to
+   * 9106 lets the ROM run its real PLB/PLP/RTS, which also means the stack
+   * unwinds itself instead of being unwound by hand.
+   *
+   * 90ee is also the loop-back target, so the arm flag keeps a declined
+   * call from re-entering this on every command the ROM then decodes. */
+  if (s_dec_trace < 0) {
+    const char *t = getenv("SC_DECOMP_TRACE");
+    s_dec_trace = (t && *t && *t != '0');
+  }
+  if (cpu->pc == 0x90dd) { s_dec_armed = 1; return; }
+
+  if (cpu->pc == 0x90ee) {
+    if (!s_dec_armed) return;
+    s_dec_armed = 0;
+    const uint8_t  sb = g_ram[0x0b];
+    const uint16_t sy = (uint16_t)(g_ram[0x09] | (g_ram[0x0a] << 8));
+    const uint16_t dx = (uint16_t)(g_ram[0x0e] | (g_ram[0x0f] << 8));
+
+    if (mode == 2) {
+      /* Decompress into scratch first, not straight into WRAM. That buys
+       * the ability to BACK OUT: $e0 is the one command no capture has
+       * ever exercised (see the cmd-hit counters), so if a stream uses it
+       * this hands the work back to the ROM rather than trusting code no
+       * measurement has ever confirmed. Everything else here is verified
+       * byte-exact against the guest across a load and a cold boot. */
+      if (!s_dec_ref) s_dec_ref = (uint8_t *)malloc(0x20000);
+      if (!s_dec_ref) return;
+      memcpy(s_dec_ref, g_ram, 0x20000);
+      const unsigned long e0_before = g_sc_decomp_cmd_hits[7];
+      ScDecompResult r;
+      sc_decomp_run(s_dec_ref, sc_decomp_bus_read, NULL, sb, sy, dx, &r);
+      /* SC_DECOMP_TRACE=1 prints one line per unpacked packet: the screen
+       * that asked for it, where in ROM it came from, and how big it is.
+       * This is how a screen's ROM assets get identified. The address it
+       * prints converts to a file offset as bank*$8000 + (addr-$8000), which
+       * is what tools/extract_graphics.py decompresses -- so a screen can be
+       * patched at its source instead of by poking VRAM behind the game. */
+      if (s_dec_trace)
+        fprintf(stderr, "[decomp] screen $%02x  src $%02x:%04x  -> wram $%04x  %5u bytes%s\n",
+                g_ram[0x14], sb, sy, dx, r.bytes_out,
+                r.bad ? "  (declined)" : "");
+      if (r.bad || g_sc_decomp_cmd_hits[7] != e0_before) {
+        g_sc_decomp_cmd_hits[7] = e0_before;   /* keep the tally honest */
+        s_dec_declined++;
+        return;                        /* leave it to the ROM */
+      }
+      for (uint32_t i = dx; i != (uint32_t)r.x; i++)
+        g_ram[0x8000 + (uint16_t)i] = s_dec_ref[0x8000 + (uint16_t)i];
+      g_ram[0x09] = (uint8_t)r.src_y; g_ram[0x0a] = (uint8_t)(r.src_y >> 8);
+      g_ram[0x0c] = (uint8_t)r.cd;    g_ram[0x0d] = (uint8_t)(r.cd >> 8);
+      g_ram[0x10] = (uint8_t)r.flag;  g_ram[0x11] = 0;
+      cpu->x = r.x;
+      cpu->pc = 0x9106;   /* the ROM's own PLB/PLP/RTS, and Sylt's hook */
+      s_dec_fast++;
+      return;
+    }
+
+    if (!s_dec_ref) s_dec_ref = (uint8_t *)malloc(0x20000);
+    if (!s_dec_ref) return;
+    memcpy(s_dec_ref, g_ram, 0x20000);
+    sc_decomp_run(s_dec_ref, sc_decomp_bus_read, NULL, sb, sy, dx, &s_dec_exp);
+    s_dec_start_x = dx;
+    s_dec_pending = 1;
+    return;
+  }
+
+  /* 00:9108 -- the RTS. The guest has finished; compare. */
+  if (cpu->pc == 0x9108 && s_dec_pending) {
+    s_dec_pending = 0;
+    unsigned long diff = 0;
+    const uint16_t got_x = cpu->x;
+    for (uint32_t i = s_dec_start_x; i != (uint32_t)s_dec_exp.x; i++)
+      if (g_ram[0x8000 + (uint16_t)i] != s_dec_ref[0x8000 + (uint16_t)i]) diff++;
+    const uint16_t got_y = (uint16_t)(g_ram[0x09] | (g_ram[0x0a] << 8));
+    if (diff || got_x != s_dec_exp.x || got_y != s_dec_exp.src_y) {
+      s_dec_mismatch++;
+      if (s_dec_mismatch <= 8)
+        fprintf(stderr, "[decomp] MISMATCH src=%02x:%04x dest=%04x  "
+                        "bytes %u cmds %d  x %04x/%04x  y %04x/%04x  "
+                        "%lu differing\n",
+                s_dec_exp.src_bank, s_dec_exp.src_y, s_dec_start_x,
+                s_dec_exp.bytes_out, s_dec_exp.commands,
+                got_x, s_dec_exp.x, got_y, s_dec_exp.src_y, diff);
+    } else {
+      s_dec_ok++;
+    }
+  }
+}
+
+/* ── 02:8b34, the overview-map cell classifier ───────────────
+ *
+ * 02:899b software-renders the whole city into a bitmap -- 120x100 = 12000
+ * cells, one classifier call each, 46% of the load window. The classifier is
+ * ~300 instructions of comparison ladder over tile ids, with a hardware
+ * divider path and table reads (docs/ROM_MAP.md).
+ *
+ * It is NOT transcribed here, deliberately. It is memoised: the value is a
+ * function of the 10-bit tile id plus a few globals, so there are at most
+ * 1024 distinct answers and a real city uses far fewer. Letting the ROM
+ * compute each one once and caching it is exact BY CONSTRUCTION -- the
+ * numbers come from the ROM, not from my reading of it -- which is a much
+ * better bargain than hand-porting a ladder whose every branch is a chance
+ * to be subtly wrong. The map generator is the cautionary tale: transcribed
+ * by hand, plausible-looking, and wrong for a session.
+ *
+ * Two things are deliberately NOT cached:
+ *
+ *   - tile ids $14-$25, the animated ones. 02:8b83 increments the animation
+ *     counter $0b3b as a SIDE EFFECT and folds it into the table index, so
+ *     the answer legitimately differs call to call. Those run the ROM.
+ *   - anything at all, once $0d49 (the overlay selector), $3e or $40 change.
+ *     The ladder branches on all three, so they are part of the key; the
+ *     cache is flushed rather than keyed, since they change rarely.
+ *
+ * The skip enters at 8b36 (after the entry REP #$30, so the widths are
+ * already what the ROM would leave) and exits by pointing PC at the real RTS
+ * at 8b96 rather than unwinding the stack by hand -- the same shape the
+ * decompressor uses at 00:9106, and for the same reason: the ROM does its own
+ * return, and any PC the game hooks in between still executes.
+ *
+ * SC_MAPCLS=0 disables. SC_MAPCLS_VERIFY=1 caches but still runs the ROM and
+ * compares, which is how the cache was shown to be exact.
+ */
+static uint16_t s_cls_cache[1024];
+static uint8_t  s_cls_valid[1024];
+static uint16_t s_cls_tile;            /* tile id of the call in flight */
+static int      s_cls_pending;         /* 1 = fill, 2 = verify */
+static unsigned s_cls_state = 0xffffffffu;
+static unsigned long s_cls_hits, s_cls_fills, s_cls_mismatch;
+
+static void sc_classifier_hook(Interp816 *cpu) {
+  static int mode = -1;                /* 0 off, 1 verify, 2 replace */
+  if (mode < 0) {
+    const char *e = getenv("SC_MAPCLS");
+    const char *v = getenv("SC_MAPCLS_VERIFY");
+    if (v && *v && *v != '0')  mode = 1;
+    else if (e && *e)          mode = (*e != '0') ? 2 : 0;
+    else                       mode = 2;
+  }
+  if (!mode) return;
+
+  const unsigned st = (unsigned)g_ram[0x0d49] |
+                      ((unsigned)g_ram[0x3e] << 8) |
+                      ((unsigned)g_ram[0x3f] << 12) |
+                      ((unsigned)g_ram[0x40] << 16) |
+                      ((unsigned)g_ram[0x41] << 20);
+  if (st != s_cls_state) {
+    memset(s_cls_valid, 0, sizeof s_cls_valid);
+    s_cls_state = st;
+  }
+
+  if (cpu->pc == 0x8b36) {
+    const uint16_t idx  = (uint16_t)(g_ram[0x0d63] | (g_ram[0x0d64] << 8));
+    const uint16_t cell = (uint16_t)(g_ram[0x10200 + idx] |
+                                     (g_ram[0x10201 + idx] << 8));
+    const uint16_t tile = (uint16_t)(cell & 0x03ff);
+    s_cls_tile = tile;
+    s_cls_pending = 0;
+    if (tile >= 0x14 && tile <= 0x25) return;   /* animated: $0b3b moves */
+    if (!s_cls_valid[tile]) { s_cls_pending = 1; return; }
+    if (mode == 1)          { s_cls_pending = 2; return; }
+    cpu->a  = s_cls_cache[tile];
+    cpu->pc = 0x8b96;                  /* the ROM's own RTS */
+    s_cls_hits++;
+    return;
+  }
+
+  /* 02:89b4 -- the ROM has returned and A holds the colour byte. */
+  if (s_cls_pending == 1) {
+    s_cls_cache[s_cls_tile] = (uint16_t)cpu->a;
+    s_cls_valid[s_cls_tile] = 1;
+    s_cls_fills++;
+  } else if (s_cls_pending == 2) {
+    if ((uint16_t)cpu->a != s_cls_cache[s_cls_tile]) s_cls_mismatch++;
+    else s_cls_hits++;
+  }
+  s_cls_pending = 0;
+}
+
+/* Dynamic rate control for the audio output.
+ *
+ * The DSP makes 32040 samples per second of guest time, and the host paces
+ * guest time to the wall clock -- but the audio device plays by its own
+ * clock. Over RDP ("Remote Audio") that clock measured 0.76% slow: the queue
+ * grew by about 240 samples a second and the sound fell further and further
+ * behind the picture. A fixed cap would cut a gap into the sound every couple
+ * of seconds. Instead each frame's samples are resampled, steered by how full
+ * the device queue is: too full, the frame is played in slightly fewer
+ * samples; too empty, in slightly more. The integral term learns the device's
+ * drift so the queue settles on the target; the proportional term reacts to
+ * stalls. The drift is clamped to 5%, as RetroArch's timing skew is: a real
+ * sound card is off by well under 0.1%, but the RDP device here measured 1-3%
+ * slow and varied between sessions -- which does shift the pitch audibly, but
+ * is still better than sound that drifts away or drops out. */
+enum { kAudioQueueTarget = 2048, kAudioOutMax = 2048 };
+static double s_audio_drift;       /* learned device drift, for SC_AUDIO_DEBUG */
+
+static int sc_audio_rate_control(const int16_t *in, int n, uint32_t queued,
+                                 int16_t *out) {
+  static double frac, level = -1.0;
+  static int16_t prev[2];
+  if (n <= 0) return 0;
+  /* The queue level is read after each push and jumps by whole device
+   * buffers as the device pulls; steer on its smoothed value. */
+  level = level < 0 ? (double)queued : level + 0.05 * ((double)queued - level);
+  double err = ((double)kAudioQueueTarget - level) / kAudioQueueTarget;
+  if (err > 1.0) err = 1.0;
+  if (err < -1.0) err = -1.0;
+  s_audio_drift += 1e-5 * err;
+  if (s_audio_drift > 0.05) s_audio_drift = 0.05;
+  if (s_audio_drift < -0.05) s_audio_drift = -0.05;
+  const double ratio = 1.0 + s_audio_drift + 0.02 * err;
+  frac += n * ratio;
+  int m = (int)frac;
+  frac -= m;
+  if (m > kAudioOutMax) m = kAudioOutMax;
+  if (m <= 0) return 0;
+  /* Output i sits at source position (i+1)*n/m - 1, so the last output lands
+   * on the last input and the next frame continues from it (prev). */
+  for (int i = 0; i < m; i++) {
+    const double pos = (double)(i + 1) * n / m - 1.0;
+    const int k = (int)(pos + 1.0) - 1;          /* floor, pos >= -1 */
+    const double f = pos - k;
+    for (int c = 0; c < 2; c++) {
+      const double a = k < 0 ? prev[c] : in[k * 2 + c];
+      const double b = k + 1 < n ? in[(k + 1) * 2 + c] : in[(n - 1) * 2 + c];
+      const double v = a + (b - a) * f;
+      out[i * 2 + c] = (int16_t)(v >= 0 ? v + 0.5 : v - 0.5);
+    }
+  }
+  prev[0] = in[(n - 1) * 2];
+  prev[1] = in[(n - 1) * 2 + 1];
+  return m;
+}
+
+/* The beam belongs to handle_pos_stuff(), and snes.c has two ways round it.
+ *
+ * A DMA start ($420B) charges the transfer's guest time through a hook, and
+ * with no hook installed snes.c moves hPos/vPos itself. The lines it crosses
+ * are then never drawn by this host, their HDMA step never runs, a crossing of
+ * the frame end is never counted, and the APU never gets the time. So the
+ * time is walked through the host's own driver instead, like any opcode's.
+ *
+ * And every $4212 read adds a synthetic 64-clock step unless
+ * g_interp_apu_driving says the caller already advances the beam per opcode,
+ * which this loop does. That step can jump over h=1024: the line loses its
+ * HDMA transfer and every later line of the frame is one line late. On the
+ * scenario view that is the one-frame "jitter" -- every 4th scanline of the
+ * skewed map off by a line -- once every few seconds
+ * (docs/upstream/ISSUE_hdma_line_phase.md).
+ *
+ * The fiber tier keeps snes.c's own behaviour: its bridge sets and restores
+ * the flag itself and syncs the beam from the CpuState clock. */
+static void sc_charge_master_cycles(Snes *snes, uint64_t clocks) {
+#ifdef SC_AOT_TIER
+  if (s_fiber_mode) {
+    while (clocks) {
+      const uint32_t chunk = clocks > 0xffffffffull ? 0xffffffffu : (uint32_t)clocks;
+      snes_advance_master_cycles(snes, chunk);
+      clocks -= chunk;
+    }
+    return;
+  }
+#endif
+  g_master_cycles += clocks;
+  for (uint64_t i = 0; i < clocks; i += 2) handle_pos_stuff();
+  snes->apuCatchupCycles += (double)clocks * kApuCyclesPerMaster;
+}
+
+static void sc_own_the_beam(void) {
+  extern int g_interp_apu_driving;   /* common_rtl.c, or this file */
+  snes_set_master_clock_charge_hook(sc_charge_master_cycles);
+#ifdef SC_AOT_TIER
+  if (s_fiber_mode) return;
+#endif
+  g_interp_apu_driving = 1;
+}
+
 static bool run_one_frame(void) {
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   if (s_fiber_mode) return run_one_frame_fiber();
 #endif
   if (s_fast_ticks) { g_ram[0x01f3] = 0; g_ram[0x01f4] = 0; }
@@ -1870,9 +3395,37 @@ static bool run_one_frame(void) {
   Snes *snes = g_snes;
   Interp816 *cpu = g_cpu;
   uint64_t target = s_frames + 1;
+  /* Read once: the loop below runs once per guest opcode, tens of thousands
+   * of times a frame, and getenv() is a locked linear scan on Windows. */
+  static int scen_diag = -1, brief_diag;
+  if (scen_diag < 0) {
+    scen_diag = getenv("SC_SCEN_DIAG") != NULL;
+    brief_diag = getenv("SC_BRIEF_DIAG") != NULL;
+  }
   long guard = 20000000; /* runaway guard: caps opcodes/frame, mirrors ref_driver.c */
   while (s_frames < target && guard-- > 0) {
     if (cpu->k == 0x00 && cpu->pc == 0x80b2) s_nmi_serviced++;
+    /* SC_BANK_PROFILE=1: opcodes executed per bank, and how many frames the
+     * simulation tick spans. Answers "is the simulation worth replacing with
+     * native code" with a number instead of an impression -- the map
+     * generator was worth it because ~800 frames of wall clock were measured
+     * first, not assumed. */
+    if (s_bank_profile) {
+      s_bank_ops[cpu->k]++;
+      if (cpu->k == s_bank_page_sel) s_b3_page[cpu->pc >> 8]++;
+      if (cpu->k == 0x03 && cpu->pc == 0x8000) {
+        s_tick_count++;
+        s_tick_start_frame = s_frames;
+        s_tick_start_ops = s_bank_ops[3];
+      }
+      if (cpu->k == 0x03 && cpu->pc == 0x8026 && s_tick_start_ops) {
+        const unsigned long long span = s_frames - s_tick_start_frame;
+        s_tick_frames_total += span;
+        s_tick_ops_total += s_bank_ops[3] - s_tick_start_ops;
+        if (span > s_tick_frames_max) s_tick_frames_max = span;
+        s_tick_start_ops = 0;
+      }
+    }
     /* Unconditional now that AUTO TURBO is gone. This only opens the
      * generation/decompression window; whether anything speeds up is MAPGEN
      * TURBO's decision, and 1 means off. */
@@ -1888,11 +3441,95 @@ static bool run_one_frame(void) {
      * 03:d871 is where execution resumes once both JSLs have returned, so the
      * pair bounds the generation exactly. The decompressor at 00:90dd keeps a
      * plain holdoff -- it has no equivalent end marker and is short. */
-    if (cpu->k == 0x03 && cpu->pc == 0xd862) { s_gen_trigger_hits++; s_generating = true; }
-    if (cpu->k == 0x03 && cpu->pc == 0xd871) s_generating = false;
-    if (cpu->k == 0x00 && cpu->pc == 0x90dd) {
-      s_gen_trigger_hits++;
-      s_gen_loop_active_frames = SC_GEN_LOOP_HOLDOFF;
+    if (cpu->k == 0x03 && cpu->pc == 0xd862) s_gen_trigger_hits++;
+    if (cpu->k == 0x02 && (cpu->pc == 0x8b36 || cpu->pc == 0x89b4))
+      sc_classifier_hook(cpu);
+    if (cpu->k == 0x00 && (cpu->pc == 0x90dd || cpu->pc == 0x90ee ||
+                           cpu->pc == 0x9108))
+      sc_decomp_hook(cpu);
+
+    /* ── Run the map generator natively, on the INTERPRETER path ───────────
+     *
+     * 01:f1ed is the whole generator, reached by JSL from 03:d869, and the
+     * SNES CPU takes about 800 frames of wall clock to grind through it --
+     * thirteen seconds of watching a map appear a few cells at a time.
+     * src/sc_mapgen.c does the same work in well under a frame.
+     *
+     * This is the same substitution as the ScHle_MapGen HLE, but hooked
+     * here rather than through hle_func, and that difference is the point:
+     * hle_func only applies to AOT bodies, so it needs SC_FIBER, and the
+     * fiber currently has rendering defects of its own
+     * (docs/TODO_fiber_rendering.md). Hooking the interpreter delivers the
+     * fast generation on the path that is actually correct.
+     *
+     * The GENERATOR is verified bit-exact -- three maps across both branches
+     * reproduce the guest's map on all 12000 cells, consume its exact draw
+     * count and leave the PRNG in its exact final state -- and the same
+     * substitution is proven working through the fiber HLE.
+     *
+     * THIS HOOK IS NOW VERIFIED IN SITU, against the ROM's own generator on the
+     * same save state: identical 5206 cells, identical kept index, identical
+     * PRNG state 180B/1385, 100.00% of cells. The map completes at frame 90
+     * against frame 690 for the ROM -- 600 frames, ten seconds, gone.
+     *
+     * Six further generations from an interactive session all returned to
+     * 03:D86D, and three of them reproduce guest captures taken independently:
+     * 4258 cells / 2DC4-8570, 9469 / 5B19-426F and 6626 / 346D-529F.
+     *
+     * A note for whoever verifies the next thing here: "gen: trigger_hits"
+     * does NOT mean the generator ran. That counter is shared with the 00:90dd
+     * decompressor, and a non-zero count while chasing this cost an hour.
+     *
+     * The RTL emulation below is the part most worth re-reading before
+     * trusting this: get the pull order or the +1 wrong and it returns into
+     * the middle of the caller.
+     *
+     * By the time execution reaches f1ed the caller has already seeded and
+     * pre-stepped the PRNG (03:d84d through the d862 loop), so $59/$5b ARE the
+     * starting point and there is no seeding to redo. */
+    if (cpu->k == 0x01 && cpu->pc == 0xf1ed) {
+      static int fast = -1;
+      if (fast < 0) {
+        const char *e = getenv("SC_MAPGEN_FAST");
+        fast = (e && *e) ? (*e != '0') : 1;   /* on; SC_MAPGEN_FAST=0 disables */
+      }
+      if (fast) {
+        static ScMapGenState gs;
+        ScMapGenPrng pr;
+        pr.s0 = (uint16_t)(g_ram[0x59] | (g_ram[0x5a] << 8));
+        pr.s1 = (uint16_t)(g_ram[0x5b] | (g_ram[0x5c] << 8));
+        pr.t  = (uint16_t)(g_ram[0x5d] | (g_ram[0x5e] << 8));
+        sc_mapgen_generate(&pr, &gs);
+        /* The map is at $7F0200 -- bank 7F, so 0x10200 into WRAM. */
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          g_ram[0x10200 + 2 * i]     = (uint8_t)(gs.map[i] & 0xff);
+          g_ram[0x10200 + 2 * i + 1] = (uint8_t)((gs.map[i] >> 8) & 0xff);
+        }
+        g_ram[0x59] = (uint8_t)(pr.s0 & 0xff); g_ram[0x5a] = (uint8_t)(pr.s0 >> 8);
+        g_ram[0x5b] = (uint8_t)(pr.s1 & 0xff); g_ram[0x5c] = (uint8_t)(pr.s1 >> 8);
+        g_ram[0x5d] = (uint8_t)(pr.t  & 0xff); g_ram[0x5e] = (uint8_t)(pr.t  >> 8);
+
+        /* Emulate the RTL that ends 01:f1ed: pull PCL, PCH, PBR, then PC+1.
+         * The JSL at 03:d869 pushed three bytes; leaving them would return
+         * into the middle of the caller. */
+        { uint16_t sp = cpu->sp;
+          uint8_t lo  = g_ram[(uint16_t)(sp + 1)];
+          uint8_t hi  = g_ram[(uint16_t)(sp + 2)];
+          uint8_t pbr = g_ram[(uint16_t)(sp + 3)];
+          cpu->sp = (uint16_t)(sp + 3);
+          cpu->k  = pbr;
+          cpu->pc = (uint16_t)(((hi << 8) | lo) + 1); }
+
+        if (getenv("SC_MAPGEN_FAST_DIAG")) {
+          unsigned nz = 0;
+          for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
+            if (gs.map[i] & 0x3ff) nz++;
+          fprintf(stderr, "[mapgen_fast] %u cells, %lu draws, prng %04X/%04X, "
+                          "return %02X:%04X\n",
+                  nz, g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1,
+                  (unsigned)cpu->k, (unsigned)cpu->pc);
+        }
+      }
     }
     /* Post-load power fix -- see apply_power_fix(). 03:c8dd is reached with
      * the map already unpacked and SRAM already restored. */
@@ -1907,22 +3544,55 @@ static bool run_one_frame(void) {
      *
      * 03:ce61 is the scenario equivalent -- map in place, about to return. */
     if (s_ninth_scenario) ninth_scenario_hook(cpu->k, cpu->pc);
+    if (scen_diag && cpu->k == 0x03 &&
+        (cpu->pc == 0xc518 || cpu->pc == 0xc5a2 || cpu->pc == 0xe30a ||
+         cpu->pc == 0xcf31 || cpu->pc == 0xce2e || cpu->pc == 0xce5e ||
+         cpu->pc == 0xc548)) {
+      fprintf(stderr, "[scen] pc=%04x $3e=%u $40=%u year=%u $0ccb=%u"
+                      " $0deb=%u $0d87=%u A=%04x name=%c%c%c%c%c%c%c%c/%u\n",
+              cpu->pc, g_ram[0x3e], g_ram[0x40] | (g_ram[0x41] << 8),
+              g_ram[0x0b53] | (g_ram[0x0b54] << 8), g_ram[0x0ccb],
+              g_ram[0x0deb] | (g_ram[0x0dec] << 8),
+              g_ram[0x0d87] | (g_ram[0x0d88] << 8), (unsigned)cpu->a,
+              nmc(0),
+              nmc(1),
+              nmc(2),
+              nmc(3),
+              nmc(4),
+              nmc(5),
+              nmc(6),
+              nmc(7),
+              g_ram[0x0b5b]);
+    }
     if (cpu->k == 0x03 && cpu->pc == 0xddb6) s_selector_frame = s_frames;
     /* 0b:fbe7 is the free-play welcome block the ROM hands index 8. Keyed
      * on the source, so if it ever selects a different one this simply
      * does not fire rather than corrupting whatever did load. */
-    if (s_ninth_scenario && cpu->k == 0x03 && cpu->pc == 0xce5e &&
+    if (s_ninth_scenario && s_rom_is_us && cpu->k == 0x03 && cpu->pc == 0xce5e &&
         s_sylt_map_armed && s_sylt_map) {
       /* 03:ce2e has decompressed the scenario's map to $7E8000 and is about
        * to unpack it. Swap in Sylt's, then disarm so the next scenario --
        * practice included -- loads its own. */
       s_sylt_map_armed = false;
+      s_sylt_city = true;
       memcpy(&g_ram[0x8000], s_sylt_map, (size_t)s_sylt_map_len);
       fprintf(stderr, "[sylt] map swapped in at $7E8000 (%ld bytes)",
               s_sylt_map_len);
       fputc('\n', stderr);
     }
-    if (s_ninth_scenario && cpu->k == 0x00) {
+    /* Packet patches run on every unpack, independent of the briefing and
+     * Sylt paths below: the selector's packets are not briefings, and they
+     * must still be patched when no briefing blob is loaded. */
+    if (cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb) {
+        s_scpk_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
+                     ((uint32_t)g_ram[0x0a] << 8);
+        s_scpk_out = 0x8000u + (g_ram[0x0e] | ((uint32_t)g_ram[0x0f] << 8));
+      } else if (cpu->pc == 0x9106) {
+        scpk_apply(s_scpk_src, s_scpk_out);
+      }
+    }
+    if (s_ninth_scenario && s_rom_is_us && cpu->k == 0x00) {
       if (cpu->pc == 0x90eb)
         s_sylt_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
                             ((uint32_t)g_ram[0x0a] << 8);
@@ -1934,6 +3604,97 @@ static bool run_one_frame(void) {
          * read here and consumed later by the map swap at 03:ce5e, which runs
          * after this. */
         sylt_write_brief_tilemap();
+    }
+    /* Translated briefings, same exit hook, generalised to the twelve
+     * packets. Placed AFTER Sylt so its own briefing still wins on the
+     * packet the two share (0B:FBE7, the free-play welcome block Sylt
+     * borrows): a translation of the English text there would otherwise
+     * overwrite the ninth scenario's own words. */
+    if ((s_brief_count || s_scen_tiles_len || s_glyph_count || s_bp_count ||
+         s_sg_count ||
+         brief_diag) &&
+        cpu->k == 0x00) {
+      if (cpu->pc == 0x90eb) {
+        s_brief_decomp_src = ((uint32_t)cpu->db << 16) | g_ram[0x09] |
+                             ((uint32_t)g_ram[0x0a] << 8);
+        s_brief_out = 0x8000u + (g_ram[0x0e] | ((uint32_t)g_ram[0x0f] << 8));
+      } else if (cpu->pc == 0x9106) {
+        /* SC_BRIEF_DIAG=1: every briefing-range unpack, with the screen
+         * it happened on. Pairing the twelve packets across regions cannot
+         * be done from the ROM -- there is no pointer table, and matching
+         * layouts is defeated by translations being longer. Watching which
+         * source the game asks for on which screen is the way to pair
+         * them, and it needs no reading of the text at all. */
+        if (brief_diag) {
+          /* Keyed on source AND screen: one source serving two screens is
+           * exactly the case that would make a briefing substitution appear
+           * on a page it does not belong to. Sylt already shares 0B:FBE7
+           * with the free-play welcome, so reuse is known to happen. */
+          static uint32_t seen[64]; static uint8_t seens[64]; static int nseen;
+          int dup = 0;
+          for (int i = 0; i < nseen; i++)
+            if (seen[i] == s_brief_decomp_src && seens[i] == g_ram[0x14]) dup = 1;
+          if (!dup && nseen < 64) {
+            seens[nseen] = g_ram[0x14];
+            seen[nseen++] = s_brief_decomp_src;
+            fprintf(stderr, "[brief] src=%06X out=$%05X screen=$%02x%s\n",
+                    (unsigned)s_brief_decomp_src,
+                    (unsigned)s_brief_out, g_ram[0x14],
+                    g_ram[0x14] == 0x0b ? "  <-- SCENARIO SELECTOR" : "");
+          }
+        }
+        const bool sylt_owns = s_ninth_scenario && s_sylt_map_armed &&
+                               s_brief_decomp_src == 0x0bfbe7u;
+        if (!sylt_owns) {
+          if (s_bp_count &&
+              (size_t)s_brief_out + SC_BRIEF_COLS * SC_BRIEF_ROWS * 2u
+                  <= sizeof g_ram &&
+              brief_compose_page(s_brief_decomp_src, &g_ram[s_brief_out])) {
+            static int said; if (!said++)
+              fprintf(stderr, "translation: briefing %06X composed from strings\n",
+                      (unsigned)s_brief_decomp_src);
+          }
+          if (s_glyph_count && s_brief_decomp_src == 0x09C0FBu) {
+            for (int i = 0; i < s_glyph_count; i++) {
+              size_t at = (size_t)s_brief_out
+                        + (size_t)s_glyph_idx[i] * kFontTile;
+              if (at + kFontTile <= sizeof g_ram)
+                memcpy(&g_ram[at], s_glyph_px[i], kFontTile);
+            }
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: %d accent glyphs written into "
+                                "the font\n", s_glyph_count); }
+          }
+          /* Order matters: the wholesale tileset copy lands FIRST, then the
+           * accented glyphs on top of it. The other way round the copy
+           * simply erased them. */
+          if (s_scen_tiles_len && s_brief_decomp_src == 0x09875Cu &&
+              (size_t)s_brief_out + s_scen_tiles_len <= sizeof g_ram) {
+            memcpy(&g_ram[s_brief_out], s_scen_tiles, s_scen_tiles_len);
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: scenario tiles substituted\n"); }
+          }
+          if (s_sg_count && s_brief_decomp_src == 0x09875Cu) {
+            for (int i = 0; i < s_sg_count; i++) {
+              size_t at = (size_t)s_brief_out + (size_t)s_sg_idx[i] * 16u;
+              if (at + 16u <= sizeof g_ram)
+                memcpy(&g_ram[at], s_sg_px[i], 16);
+            }
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: %d briefing glyphs into the "
+                                "scenario tileset\n", s_sg_count); }
+          }
+          for (int i = 0; i < s_brief_count; i++) {
+            if (s_brief_src[i] != s_brief_decomp_src) continue;
+            if ((size_t)s_brief_out + s_brief_len[i] <= sizeof g_ram)
+              memcpy(&g_ram[s_brief_out], s_brief_data[i], s_brief_len[i]);
+            { static int said; if (!said++)
+                fprintf(stderr, "translation: briefing %06X substituted\n",
+                        (unsigned)s_brief_decomp_src); }
+            break;
+          }
+        }
+      }
     }
     if (s_replay_menu) replay_menu_hook(cpu->k, cpu->pc);
     if (s_power_fix && cpu->k == 0x03 &&
@@ -2029,9 +3790,6 @@ static bool run_one_frame(void) {
     int cyc = interp816_runOpcode(cpu);
     if (cyc <= 0) cyc = 1;
     int master = cyc * 8;
-#ifndef SIMCITY_AOT_TIER
-    master += (int)ScLleTakeDmaCycles();
-#endif
     g_master_cycles += (uint64_t)master;
     for (int i = 0; i < master; i += 2) handle_pos_stuff();
     snes->apuCatchupCycles += (double)master * kApuCyclesPerMaster;
@@ -2041,30 +3799,85 @@ static bool run_one_frame(void) {
     if (s_addr_trace_last_ed == 0xff) { s_addr_trace_last_ed = g_ram[0x01ed]; s_addr_trace_armed = false; }
     else if (!s_addr_trace_armed && g_ram[0x01ed] != s_addr_trace_last_ed) s_addr_trace_armed = true;
   }
-  if (s_generating || s_gen_loop_active_frames > 0) s_gen_boost_frames++;
-  if (s_gen_loop_active_frames > 0) s_gen_loop_active_frames--;
   return guard > 0;
 }
 
-/* Keep the backdrop layer's FURNITURE out of the margins.
+/* Is the picture at its settled brightness?
+ *
+ * The three framebuffer fills below all decide what to paint by MEASURING the
+ * colours at the edge of the authentic picture -- is this strip flat, is this
+ * margin uniform, is this row plain wood. Mid-fade those colours are moving,
+ * so a row can qualify on one scanline and fail on the next, and the margins
+ * come out banded. Reported from play on the way out of the stats pages:
+ * stripes down both sides while the fade was still running, gone once it
+ * finished.
+ *
+ * So they do not run unless the display is settled. A margin that stays
+ * backdrop through a fade reads as a clean letterbox, and matches what the
+ * tilemap-based margins do anyway -- those go through the PPU, so they fade
+ * with everything else. */
+/* Report the guest's colour-math setup once per change, under SC_WS_DIAG.
+ *
+ * The popup screens dim the city behind their panel, and the question is what
+ * that dim actually is before trying to reproduce it in the margins. */
+static void ws_trace_math(void) {
+  if (!g_ppu || !getenv("SC_WS_DIAG")) return;
+  static unsigned last = ~0u;
+  const unsigned key = (unsigned)g_ppu->cgadsub << 16 | (unsigned)g_ppu->cgwsel << 8
+                     | (unsigned)(g_ppu->fixedColor & 0xff);
+  if (key == last) return;
+  last = key;
+  fprintf(stderr, "[math] $14=%02x cgadsub=%02x (layers=%02x half=%d sub=%d) "
+                  "cgwsel=%02x (addSub=%d prevent=%d clip=%d) fixed=%d,%d,%d\n",
+          g_ram[0x14], g_ppu->cgadsub, PPU_mathEnabled(g_ppu),
+          (int)PPU_halfColor(g_ppu), (int)PPU_subtractColor(g_ppu),
+          g_ppu->cgwsel, (int)PPU_addSubscreen(g_ppu),
+          PPU_preventMathMode(g_ppu), PPU_clipMode(g_ppu),
+          PPU_fixedColorR(g_ppu), PPU_fixedColorG(g_ppu), PPU_fixedColorB(g_ppu));
+}
+
+static bool ws_display_settled(void) {
+  ws_trace_math();
+  if (!g_ppu) return false;
+  const bool ok = !PPU_forcedBlank(g_ppu) && PPU_brightness(g_ppu) == 0x0f;
+  /* Log the EDGES of a fade, not every step. A fade walks brightness through
+   * sixteen values, so a step-by-step trace emitted sixteen lines per
+   * transition and buried everything else -- a play session came back as 16KB
+   * of nothing but this, with the build stamp scrolled out of the capture. */
+  { static int last = -3;
+    const int now = PPU_forcedBlank(g_ppu) ? -2 : PPU_brightness(g_ppu);
+    const int settled_now = now == 0x0f, was = last == 0x0f;
+    if (getenv("SC_WS_DIAG") && last != -3 && settled_now != was)
+      fprintf(stderr, "[fade] f=%llu $14=%02x %s\n",
+              (unsigned long long)s_frames, g_ram[0x14],
+              settled_now ? "settled" : "fading");
+    last = now; }
+  return ok;
+}
+
+/* Keep the backdrop layer's FURNITURE out of the margins -- fallback only.
  *
  * The margins on a mode-0 screen are taken from a backdrop-only pass, and on
- * the fax that layer carries the machine as well as the desk -- so the machine
- * repeated into both margins along with the wood. Reported from play as
- * wanting the fax hidden on the left and right.
+ * the fax that layer carries the machine as well as the desk, so the machine
+ * repeated into both margins along with the wood. This was the first answer:
+ * the desk repeats on a 16-row cycle, so a row showing furniture borrows its
+ * margin from 16 rows above and lands on the same phase, walking downward so a
+ * borrowed row can itself be borrowed from.
  *
- * The desk repeats on a 16-row cycle, so a row showing furniture can borrow
- * its margin from 16 rows above and land on exactly the same phase. Rows are
- * walked downward so a borrowed row can itself be borrowed from, which carries
- * plain wood down through a tall obstruction.
+ * It does not work, and both reasons are visible on screen. It borrows 16
+ * PIXELS where the cycle is 16 tile ROWS, so it repeats a 16 px band instead
+ * of the real 128 px pattern; and it judges wood by colour on finished pixels,
+ * which the machine's flat beige can pass, dragging the machine's own
+ * structure sideways -- the leg-shaped smears reported from play.
  *
- * Judging it by "is this a plain texture" does NOT work: the machine is flat
- * beige, so it has few colours and a small channel range and passes as plain.
- * The desk is judged by its colour instead -- brown, meaning red clearly ahead
- * of green and blue and none of them bright. Anything else in the strip is
- * something standing on the desk. */
+ * widen_wood_bg() now fixes the fax at the tilemap instead, where neither
+ * failure is possible, so this runs only where that declined to act: a wood
+ * screen with no free VRAM pair, or some other mode-0 screen with furniture on
+ * its backdrop. Smeared wood still beats a copy of the machine. */
 static void ws_hide_backdrop_furniture(void) {
+  if (!ws_display_settled()) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_bg_margins || !s_ws_margin_fill) return;
+  if (s_wood_widened) return;          /* real wood is out there already */
   const int right0 = s_video_w - s_ws_extra;
   for (int y = 16; y < kVideoHeight; y++) {
     uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
@@ -2079,6 +3892,121 @@ static void ws_hide_backdrop_furniture(void) {
     if (woody >= 6) continue;                              /* plain desk */
     for (int x = 0; x < s_ws_extra; x++) row[x] = above[x];
     for (int x = right0; x < s_video_w; x++) row[x] = above[x];
+  }
+}
+
+/* Carry a flat backdrop field out into the margins.
+ *
+ * The tax, city evaluation, city overview and last-ten-events screens all sit
+ * on one flat colour, and all four drew it only inside the authentic 256:
+ * black bars either side, reported from play with the observation that the fix
+ * is simply to run the green out to both edges. It is. Where the picture's own
+ * edge is a flat field there is nothing to reconstruct, so the colour is
+ * carried outward and that is the whole of it -- no pattern, no VRAM, no
+ * tilemap.
+ *
+ * Measured, the margins on those screens are green only on rows 0..10 and
+ * 220..223 and black on 11..219, so the backdrop is reaching them at the top
+ * and bottom and something in the compositor is dropping it in between. This
+ * paints over the symptom rather than fixing that, which is worth being
+ * explicit about; the cause is the same compositor behaviour as the city
+ * view's grey block.
+ *
+ * Two guards keep it away from everything else. The edge must be flat for
+ * eight pixels -- measured across every screen, the four flat ones manage that
+ * on every row, while the wood screens manage 2..8 and the city view 1..3 --
+ * and the margin must already be a single colour, so any screen drawing real
+ * content out there is skipped row by row. */
+#define SC_WS_FLAT_RUN 8
+static void ws_fill_flat_margins(void) {
+  /* Runs DURING a fade as well, not only once the display has settled.
+   *
+   * ws_display_settled() demands brightness == 15, so through a fade this
+   * was skipped and the margins kept the per-line blank's black while the
+   * guest dimmed gradually. Measured on the city overview, dismissing it:
+   * the panel walks 216 -> 15 over fourteen frames while the border drops
+   * from 49 to 0 in ONE. Reported from play as the green border being drawn
+   * to black too fast.
+   *
+   * Nothing here needs full brightness. The colour painted is the guest's
+   * own edge pixel, which the PPU has already dimmed by the same amount, so
+   * the margin tracks the fade for free. Force blank still bars it -- then
+   * there is genuinely nothing to show, and the blank owns the margins. */
+  if (!g_ppu || PPU_forcedBlank(g_ppu)) return;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
+  const int right0 = s_video_w - s_ws_extra;
+  /* All rows or none: this is a property of the SCREEN, not of a row.
+   *
+   * Judging each row on its own looked reasonable and is wrong. The city view
+   * is not a flat-background screen, but a handful of its rows happen to end
+   * in a run of one colour -- a band of water or sand meeting the edge -- and
+   * each of those got that colour smeared out to the last widescreen pixel.
+   * Measured: 7 rows of 224 on the city view against 224 of 224 on the
+   * evaluation page, so the two separate by a mile and a simple majority
+   * settles it. */
+  int flat_rows = 0;
+  for (int y = 0; y < kVideoHeight; y++) {
+    const uint32_t *row = (const uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    bool both = true;
+    for (int side = 0; side < 2 && both; side++) {
+      const uint32_t edge = side ? row[right0 - 1] : row[s_ws_extra];
+      for (int k = 1; k < SC_WS_FLAT_RUN && both; k++)
+        if (row[side ? right0 - 1 - k : s_ws_extra + k] != edge) both = false;
+    }
+    if (both) flat_rows++;
+  }
+  if (flat_rows * 4 < kVideoHeight * 3) return;   /* not a flat-background screen */
+  /* Fill with the SCREEN's background colour, not each row's own edge pixel.
+   *
+   * Per-row is wrong wherever something real reaches the edge. On the tax
+   * menu the panel very nearly touches the guest's right edge, so rows
+   * 41..53 -- the TAX RATE row -- smeared the panel's colour across the
+   * whole margin, and with the mouse cursor sitting there they smeared its
+   * black. Reported from play as colour repeating to the border, and as a
+   * black bar "because the last pixel of the cursor is black". The cursor
+   * only ever supplied the colour: savestate_8 shows the same band
+   * standing still, with no mouse involved.
+   *
+   * Found by snapshotting one margin pixel through the end-of-frame path:
+   * row45[400] is 000000 after ws_hide_backdrop_furniture() and ffdeb5
+   * after this function, which put the write here and nowhere else.
+   *
+   * The margin exists to continue a flat background, and the screen has
+   * already had to prove it HAS one to reach here, so paint the colour the
+   * rows agree on. Note the split: the flat run still qualifies a row using
+   * that row's OWN edge, and only the colour painted comes from the
+   * screen. Testing flatness against the background instead was tried and
+   * is wrong in the other direction -- a row whose edge is the panel is
+   * perfectly flat, just not in the background colour, so it failed, was
+   * skipped, and kept the blank's black. That trades a coloured stripe for
+   * a black one. */
+  uint32_t bg_edge = 0; int bg_votes = -1;
+  for (int y = 0; y < kVideoHeight; y++) {
+    const uint32_t cand = ((const uint32_t *)(s_video_pixels +
+                           (size_t)y * s_video_pitch))[right0 - 1];
+    int v = 0;
+    for (int y2 = 0; y2 < kVideoHeight; y2++)
+      if (((const uint32_t *)(s_video_pixels +
+            (size_t)y2 * s_video_pitch))[right0 - 1] == cand) v++;
+    if (v > bg_votes) { bg_votes = v; bg_edge = cand; }
+  }
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *row = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    for (int side = 0; side < 2; side++) {
+      const uint32_t row_edge = side ? row[right0 - 1] : row[s_ws_extra];
+      const uint32_t edge = bg_edge;
+      bool flat = true;
+      for (int k = 1; k < SC_WS_FLAT_RUN && flat; k++)
+        if (row[side ? right0 - 1 - k : s_ws_extra + k] != row_edge) flat = false;
+      if (!flat) continue;
+      const int x0 = side ? right0 : 0;
+      const int x1 = side ? s_video_w : s_ws_extra;
+      bool uniform = true;
+      for (int x = x0 + 1; x < x1 && uniform; x++)
+        if (row[x] != row[x0]) uniform = false;
+      if (!uniform || row[x0] == edge) continue;   /* real content, or done */
+      for (int x = x0; x < x1; x++) row[x] = edge;
+    }
   }
 }
 
@@ -2109,6 +4037,18 @@ static void ws_hide_backdrop_furniture(void) {
  * why the selector got real tiles instead. */
 #define SC_WS_FILL_SRC 16
 static void ws_fill_margins(void) {
+  if (!ws_display_settled()) return;
+  /* Not when every background is clamped.
+   *
+   * That case is now handled properly at the line level: nothing is entitled
+   * to the margins, so they are blanked to the backdrop. Filling them again
+   * here from the picture's own edge undoes it, and on the advice popup and
+   * the graphs page it undid it with a mirror-tiled strip of city map -- the
+   * very content those screens should not be showing out there. The flat
+   * screens that do want their colour carried out are covered by
+   * ws_fill_flat_margins(), which tests for a flat edge rather than a merely
+   * plain-looking one. */
+  if ((s_ws_clamp_now & 0x0fu) == 0x0fu) return;
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_margin_fill) return;
   /* Pillarboxed screens are filled too. The margins there have just been
    * blacked by the caller, so there is nothing to preserve, and a screen that
@@ -2242,9 +4182,47 @@ static void oam_put(int i, int x, int y, int tile, int attr, int size) {
   if (size)        *hb = (uint8_t)(*hb | (2u << bit));
 }
 
+/* The title's widescreen settings have to outlive screen $01.
+ *
+ * Pressing Start runs INC $14 at 03:D301 on the very next frame, but the
+ * picture does not leave then: screen $02 fades it out first, and only blanks
+ * to upload the menu once it is dark. Every title policy in this file -- BG3
+ * widened, BG2 and BG3 left unclamped, the right-margin OAM hints, the light
+ * row carried outward -- keyed on $14 == $01, so all of them dropped at once
+ * while the centre was still at full brightness. Reported from play as the
+ * widescreen elements being deleted instead of fading.
+ *
+ * It only shows once the title has finished building up, which is how it
+ * was reported. Measured over the whole frame with Start pressed at frame
+ * 1200: on the frame after Start the margins dropped from 43.4 and 33.8
+ * mean brightness to 32.1 and 18.5 while the centre stayed at 56.8, taking
+ * the margin-to-centre ratio from 0.68 to 0.45, and to 0.39 once the fade
+ * itself began. With the latch the ratio holds at 0.68 all the way to
+ * black. Pressed early, while the city is still rising, it shows nothing,
+ * because the margins hold little yet.
+ *
+ * So the policies stay latched through $02 until the display is dark --
+ * brightness 0 or forced blank -- and let go there. Nothing of the menu can
+ * be on screen before that, because the menu is uploaded during the blank.
+ * The latch only arms on $01, so the menu's own fade-in on $02 runs with the
+ * ordinary settings. */
+static bool s_title_ws_latched;
+
+static void title_ws_update(void) {
+  if (g_ram[0x14] == 0x01) { s_title_ws_latched = true; return; }
+  if (s_title_ws_latched &&
+      (g_ram[0x14] != 0x02 || !g_ppu ||
+       PPU_forcedBlank(g_ppu) || PPU_brightness(g_ppu) == 0))
+    s_title_ws_latched = false;
+}
+
+static bool title_ws_live(void) {
+  return g_ram[0x14] == 0x01 || s_title_ws_latched;
+}
+
 static void widen_title_lights(void) {
   if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_lights) return;
-  if (g_ram[0x14] != 0x01) return;                 /* title only */
+  if (!title_ws_live()) return;     /* the title, and its fade-out */
 
   /* The row is the largest group of sprites sharing a Y, tile and attribute in
    * the bottom of the picture. Found rather than hard-coded, so a different
@@ -2267,136 +4245,480 @@ static void widen_title_lights(void) {
   }
   if (best_n < 3) return;              /* not a row; leave it alone */
 
-  /* Pitch is the smallest positive gap between members. */
+  /* Pitch is the smallest positive gap between members, and lo/hi are the
+   * row's extent -- measured ONLY over members the authentic viewport actually
+   * shows.
+   *
+   * A member parked off-screen counts towards best_n but must not set the
+   * extent. One such sprite sat at x = -255, which made lo = -255, so the
+   * leftward loop below started at lo - pitch = -319 and its first condition
+   * (x >= -extra - pitch) was already false: it placed nothing at all, ever.
+   * Measured as 0 px of sprite in the left margin against 1293 in the right,
+   * on every title frame, and reported from play as the lights being missing
+   * on the left until the title starts moving -- at which point the game's own
+   * sprites move into the margin and cover it up. */
   int lo = 0x7fff, hi = -0x7fff, pitch = 0x7fff;
   for (int i = 0; i < SC_LIGHTS_FIRST_SPARE; i++) {
     if ((g_ppu->oam[i * 2] >> 8) != best_y) continue;
     if ((g_ppu->oam[i * 2 + 1] & 0xff) != best_tile) continue;
     if ((g_ppu->oam[i * 2 + 1] >> 8) != best_attr) continue;
     const int x = oam_get_x(i);
+    if (x <= -16 || x >= 256) continue;   /* parked, not part of the row */
     if (x < lo) lo = x;
     if (x > hi) hi = x;
     for (int j = 0; j < SC_LIGHTS_FIRST_SPARE; j++) {
       if ((g_ppu->oam[j * 2] >> 8) != best_y) continue;
       if ((g_ppu->oam[j * 2 + 1] & 0xff) != best_tile) continue;
-      const int d = oam_get_x(j) - x;
+      const int xj = oam_get_x(j);
+      if (xj <= -16 || xj >= 256) continue;
+      const int d = xj - x;
       if (d > 0 && d < pitch) pitch = d;
     }
   }
+  if (lo > hi) return;                    /* nothing on screen to extend */
   if (pitch <= 0 || pitch > 128) return;
 
   int slot = 127;
+  int placed_l = 0, placed_r = 0;
   for (int x = lo - pitch; x >= -s_ws_extra - pitch && slot >= SC_LIGHTS_FIRST_SPARE; x -= pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
+    /* Below 0 it is hardware-hidden unless this host claims it. */
+    if (x < 0) s_oam_left_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    placed_l++;
     slot--;
   }
   for (int x = hi + pitch; x <= 256 + s_ws_extra && slot >= SC_LIGHTS_FIRST_SPARE; x += pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
     /* Past 256 it lands in the ambiguous band, so claim it explicitly. */
     if (x >= 256) s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    placed_r++;
     slot--;
+  }
+  if (getenv("SC_LIGHTS_DIAG")) {
+    static int nn;
+    if (nn++ % 60 == 0)
+      fprintf(stderr,
+              "[lights] n=%d y=%d lo=%d hi=%d pitch=%d placed L=%d R=%d slot=%d\n",
+              best_n, best_y, lo, hi, pitch, placed_l, placed_r, slot);
   }
 }
 
-/* Widen the main menu by relocating its background to a 64-column tilemap.
+/* The wooden desk, shared by the main menu and the fax.
  *
- * The main menu ($14 == 3) draws everything on BG3 alone, from a 32-column
- * tilemap at $3000 -- 256 px, so widescreen wraps it and the menu box
- * reappears in the margin. The scenario screen's trick does not apply: that
- * one was already 64 columns with the second page blank, whereas here page 1
- * ($3400) is 1009/1024 non-zero, so it belongs to something else.
+ * Both screens draw it from one sheet -- tiles $020..$11f, sixteen to a sheet
+ * row. Confirmed rather than assumed: rendering a 16x4 tile patch from each
+ * save state and comparing gives 0 of 4096 pixels different, same three
+ * colours. Only the character base differs ($4000 on the menu, $0000 on the
+ * fax), so a tile NUMBER means the same wood on either screen.
  *
- * Mirror and repeat do not help either. PpuMergePaddedBackground pads from the
- * whole authentic 256, and the box sits close enough to both edges that either
- * drags a piece of it into the margin.
+ * tools/wood_pattern.py measures the periods off live PPU dumps and renders
+ * the match -- the tilemap, the block it found, and that block tiled back --
+ * so the answer can be checked by eye instead of trusted:
  *
- * So the map is copied to free VRAM as a 64-column map and the new half filled
- * with wood. Measured free: $6800/$6c00/$7000/$7400/$7800 are entirely empty
- * 2KB pages, and a 64-column map needs two consecutive ones.
+ *   fax  BG3 $5000 / chr $0000    16 x 16 tiles    512/512 cells reproduced
+ *   menu BG3 $3000 / chr $4000    32 x  8 tiles    256/256 cells reproduced
  *
- * The wood is an 8x8 block of consecutive tiles, read off the live tilemap:
- * tile = kMenuWood[row % 8] + (col % 8). Column 32 continues the phase from 31
- * exactly (32 % 8 == 0), so the seam is invisible.
+ * The two differ because each screen lays the same sheet out its own way, so
+ * neither period can stand in for the other. What IS common is how a row runs:
+ * sixteen consecutive tiles, so walking sideways means walking the low four
+ * bits and wrapping them, while the high bits pick the sheet row and stay put.
+ * Grown that way off a screen's OWN edge tile, a margin inherits that screen's
+ * phase without being told it -- the fax sits at phase 0, the menu at phase 8
+ * on half its rows, and neither is written down anywhere here.
  *
- * Redone every frame: the screen's own DMA owns $3000, and BG3SC is rewritten
- * per frame, so both the copy and the register have to be reasserted. */
-#define SC_MENU_MAP_SRC 0x3000u
-static const uint16_t kMenuWood[8] = {
-  0x68, 0x78, 0x88, 0x98, 0x60, 0x70, 0x80, 0x90
-};
+ * This replaces an 8-wide table read off the menu. There is no 8-wide repeat
+ * on either screen; folding the wood into one is what put the menu's widened
+ * border out of step with the rest of the panel. */
+#define SC_WOOD_LO 0x020u
+#define SC_WOOD_HI 0x11fu
 
-static void widen_menu_bg(void) {
-  s_bg3_widened = false;
-  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
-  if (g_ram[0x14] != 0x03) { s_menu_settled = 0; return; }  /* main menu only */
-  /* Only act on the layout this was measured against; if the screen is
-   * arranged differently, leave it alone rather than corrupt VRAM. */
-  if ((unsigned)PPU_bgTilemapAdr(g_ppu, 2) != SC_MENU_MAP_SRC) return;
+static bool wood_tile(uint16_t e) {
+  const unsigned t = e & 0x3ffu;
+  return t >= SC_WOOD_LO && t <= SC_WOOD_HI && !(e & 0xc000u);   /* no flips */
+}
 
-  /* Do not claim $6800..$6fff until the screen has settled AND that region is
-   * genuinely empty.
-   *
-   * $14 passes through 3 while other screens load, and this writes four
-   * kilobytes of VRAM. If the region still holds graphics being DMAd in, the
-   * result is scrambled tiles -- reported from play as looking like a bad
-   * cartridge, and intermittent, which is exactly what a race with a load
-   * looks like. Measuring it free once on the main menu is not a promise that
-   * it is free every time the screen index happens to read 3.
-   *
-   * So: require several consecutive frames on this screen, then check the
-   * destination is all zero before taking it. If it is not, this screen simply
-   * stays narrow -- a black margin is a far better failure than corruption. */
-  if (++s_menu_settled < 8) return;
+static uint16_t wood_grow(uint16_t e, int d) {
+  const unsigned t = e & 0x3ffu;
+  return (uint16_t)((e & ~0x3ffu) | (t & ~0x0fu) |
+                    ((unsigned)((int)t + d) & 0x0fu));
+}
 
-  /* Take the destination only if no ENABLED layer is using it.
-   *
-   * The first version required the region to be all zero, and that was wrong
-   * in a way only play showed: save the game while this is active and the
-   * copy is captured INTO the save state, so on reload the region is non-zero,
-   * the check refuses forever, and the menu silently falls back to the pixel
-   * fill -- which is the banded wood reported from play as "all over the
-   * place". Emptiness cannot tell another screen's data from our own.
-   *
-   * What actually matters is whether anything on screen READS those words, so
-   * that is what is tested: every enabled background's tilemap and character
-   * base, plus the sprite character bases. */
-  unsigned dst = 0;
-  for (int c = 0; c < 5 && !dst; c++) {
-    static const unsigned kCand[5] = { 0x6800u, 0x7000u, 0x7400u, 0x7800u, 0x1800u };
-    const unsigned lo = kCand[c], hi = lo + 0x800u;
-    bool clash = false;
-    for (int L = 0; L < 4 && !clash; L++) {
-      if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
-          !((g_ppu->screenEnabled[1] >> L) & 1)) continue;
-      const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
-      const unsigned ch = (unsigned)PPU_bgTileAdr(g_ppu, L);
-      if (lo < m + 0x800u && m < hi) clash = true;
-      if (lo < ch + 0x2000u && ch < hi) clash = true;
-    }
-    const unsigned o1 = (unsigned)PPU_objTileAdr1(g_ppu);
-    const unsigned o2 = (unsigned)PPU_objTileAdr2(g_ppu);
-    if (lo < o1 + 0x2000u && o1 < hi) clash = true;
-    if (lo < o2 + 0x2000u && o2 < hi) clash = true;
-    if (!clash) dst = lo;
+/* A run of two consecutive wood tiles from c, walking by step.
+ *
+ * "The end tile is in the wood range" was too weak a test to grow a margin
+ * from. On map select the scenario names are still in the tilemap off to both
+ * sides, and their font tiles fall inside the same range, so growing from one
+ * walked along the font and printed "Flooding" and "Coastal" into the right
+ * margin. Letters are not consecutive tile numbers -- "Flooding" repeats an
+ * o -- so asking for a real run rejects them while the wood still passes.
+ *
+ * Two, because two is what these screens actually leave exposed, and asking
+ * for more throws away the rows that have least. Measured over every wood map,
+ * counting rows whose margin would come out at a phase the tilemap disagrees
+ * with:
+ *
+ *              run>=2   run>=3
+ *   map select    1        1      (the one is $0f9, a cable tile, correctly
+ *   View Mode     3       13       refused in both)
+ *   selector      0        0
+ *   fax           0        0
+ *   menu          0        0
+ *
+ * View Mode is the case that decides it: its desk is isometric, and row 6 ends
+ * $202e $202f with a non-wood tile beside them, so three was one too many. */
+static bool wood_run_at(const uint16_t *map, int r, int c, int step) {
+  for (int k = 0; k < 2; k++) {
+    const uint16_t a = map[r * 32 + c + k * step];
+    if (!wood_tile(a)) return false;
+    if (k && a != wood_grow(map[r * 32 + c + (k - 1) * step], step)) return false;
   }
-  if (!dst) return;                    /* nowhere safe -- stay narrow */
+  return true;
+}
 
-  for (unsigned i = 0; i < 0x400u; i++)
-    g_ppu->vram[dst + i] = g_ppu->vram[SC_MENU_MAP_SRC + i];
-  for (unsigned row = 0; row < 32u; row++)
-    for (unsigned col = 0; col < 32u; col++)
-      g_ppu->vram[dst + 0x400u + row * 32u + col] =
-          (uint16_t)(kMenuWood[row & 7u] + ((col + 32u) & 7u));
+static bool wood_row_ends(const uint16_t *map, int r) {
+  return wood_run_at(map, r, 0, 1) && wood_run_at(map, r, 31, -1);
+}
 
-  /* BG3SC: base in the top six bits, bit 0 = 64 columns wide. */
-  g_ppu->bgXsc[2] = (uint8_t)((dst >> 8) | 0x01u);
-  s_bg3_widened = true;
-  { static int n; if (getenv("SC_WS_DIAG") && n < 4) { n++;
-      fprintf(stderr, "[menuwide] frame=%llu bg3sc=%02x page1[0]=%04x page1[40]=%04x hs=%d\n",
-              (unsigned long long)s_frames, g_ppu->bgXsc[2],
-              g_ppu->vram[dst + 0x400u],
-              g_ppu->vram[dst + 0x400u + 40u],
-              g_ppu->hScroll[2]); } }
+/* Is this map the wood sheet, laid out the way wood_grow() assumes?
+ *
+ * Everything below writes four kilobytes of VRAM, so it has to be sure of the
+ * layout first. Being "mostly tiles in the wood range" is not enough -- what
+ * wood_grow() relies on is a run of CONSECUTIVE tiles, which wood_row_ends()
+ * now establishes at both ends of every row it accepts. On top of that: some
+ * rows entirely wood, and a good share of the map wood overall.
+ *
+ * The thresholds are set from measurement, not taste. Across every save state
+ * the three real wood maps score rows/full of 16/15 (menu), 20/20 (fax) and
+ * 10/8 (map select and name entry, whose picker device covers most of the
+ * screen -- an earlier bar of 600 wood cells excluded them, and they were the
+ * two screens still reported as looking wrong). Everything else in VRAM either
+ * scores rows = 0 or is a map no enabled layer points at. */
+static bool wood_map_ok(const uint16_t *map) {
+  int rows = 0, cells = 0, full = 0;
+  for (int r = 0; r < 32; r++) {
+    int w = 0;
+    for (int c = 0; c < 32; c++) if (wood_tile(map[r * 32 + c])) w++;
+    cells += w;
+    if (w == 32) full++;
+    if (wood_row_ends(map, r)) rows++;
+  }
+  return rows >= 8 && full >= 4 && cells >= 300;
+}
+
+/* The row a margin row grows from: itself, or the wood row it repeats.
+ *
+ * Rows carrying furniture have no wood at their ends to take a phase from --
+ * the fax machine spans rows 19..30, and rows 20..30 hold no wood at all. Those
+ * fall back to the row the wood repeats from, which is what the old "borrow
+ * from 16 rows above" was reaching for. Two things were wrong with that. It
+ * borrowed 16 PIXELS rather than 16 tile rows, so it smeared a 16 px band down
+ * the screen instead of repeating the real 128 px pattern; and it worked on
+ * finished pixels, so wherever its is-this-plain-wood test misfired on the
+ * machine's flat beige it dragged the machine's own structure sideways -- the
+ * leg-shaped smears reported from play. Working on tilemap entries makes both
+ * failures impossible, and measuring the period makes the first one moot.
+ *
+ * Measured on the EDGE columns alone, because they are the only ones the fill
+ * reads. Comparing whole rows needed both rows to be clean end to end, and on
+ * map select no such pair exists at any spacing -- its device covers the
+ * middle from row 6 to row 27 -- so the search found nothing and fell through
+ * to 16. The edge columns are unobstructed on every row and repeat every 8
+ * there, which is the answer the fill actually needs. */
+static int wood_vperiod(const uint16_t *map) {
+  for (int vp = 1; vp <= 16; vp <<= 1) {
+    int tested = 0, bad = 0;
+    for (int r = 0; r + vp < 32; r++) {
+      for (int e = 0; e < 2; e++) {
+        const int c = e ? 31 : 0;
+        const uint16_t a = map[r * 32 + c], b = map[(r + vp) * 32 + c];
+        if (!wood_tile(a) || !wood_tile(b)) continue;
+        tested++;
+        if (a != b) bad++;
+      }
+    }
+    /* A tenth may disagree. Demanding perfection let a single stray tile
+     * decide the answer: map select carries $0f9 at row 11 column 31, one cell
+     * of the device's cable that happens to land in the wood range, and it
+     * alone rejected the true period of 8 and sent the search to 16. */
+    if (tested >= 16 && bad * 10 <= tested) return vp;
+  }
+  return 16;
+}
+
+/* Fill a widened map's second page with wood grown off the first page's ends.
+ *
+ * On a 64-column map with no scroll the right margin reads columns 32.., and
+ * the left margin reads the map's far end -- 63, 62, ... -- because the fetch
+ * wraps. So the page is filled from both directions: its first half continues
+ * rightward out of column 31, its second half leads back into column 0. The
+ * middle is never visible at any supported margin (96 px = 12 tiles) and is
+ * filled anyway, rather than left as tile $0000. */
+/* One line per CHANGE of decision, with the frame number.
+ *
+ * The version this replaces printed the first few frames, keyed per screen
+ * index. That tells you what a screen settled on and nothing about how it got
+ * there, which is backwards for faults that only happen during a transition --
+ * and worse, a decline printed once per screen, so an alternation between
+ * widening and declining looked identical to one settled decision. It hid the
+ * very thing it was there to find. */
+static void wood_trace(const char *what, int layer, unsigned src) {
+  if (!getenv("SC_WS_DIAG")) return;
+  static char last[128];
+  char now[128];
+  snprintf(now, sizeof now, "%s $14=%02x mode=%d BG%d src=%04x en=%02x/%02x",
+           what, g_ram[0x14], g_ppu ? PPU_mode(g_ppu) : -1, layer + 1, src,
+           g_ppu ? g_ppu->screenEnabled[0] : 0,
+           g_ppu ? g_ppu->screenEnabled[1] : 0);
+  if (!strcmp(now, last)) return;
+  snprintf(last, sizeof last, "%s", now);
+  fprintf(stderr, "[wood] f=%llu %s\n", (unsigned long long)s_frames, now);
+}
+
+/* The tile to grow a row's margin from, at one end.
+ *
+ * The row's own end when it can be trusted; otherwise the nearest row at the
+ * same vertical phase that can be, with the OWN end's palette and flip bits
+ * kept. That last part is not cosmetic: below the fax machine, rows 28..30
+ * carry the desk in palette 1 while the rows they share a phase with use
+ * palette 0, so taking the borrowed tile whole would have painted three rows
+ * of margin in the wrong colours. */
+static uint16_t wood_end(const uint16_t *page0, int r, int c, int step, int vp) {
+  const uint16_t own = page0[r * 32 + c];
+  if (wood_run_at(page0, r, c, step)) return own;
+  for (int k = r % vp; k < 32; k += vp) {
+    if (!wood_run_at(page0, k, c, step)) continue;
+    const uint16_t v = page0[k * 32 + c];
+    return wood_tile(own) ? (uint16_t)((v & 0x3ffu) | (own & ~0x3ffu)) : v;
+  }
+  return own;
+}
+
+/* The wood that belongs beyond each edge, one row at a time.
+ *
+ * Each side is grown from its own end, because the two are not always the same
+ * cycle: the menu's row 0 runs $020..$02f and then $060..$06f, so the left edge
+ * continues out of $020 and the right out of $06f, and using one for both puts
+ * a visible step in the grain at one seam.
+ *
+ * Each end is read from a row at its OWN vertical phase -- r, or failing that
+ * the nearest row vp apart that still has a clean run there. Deriving the
+ * right end from the left instead is wrong on exactly the rows that look like
+ * the menu's: map select rows 8..11, 16..19 and 24..27 hold $020 at column 0
+ * and $06f at column 31, two different rows of the sheet side by side, so
+ * growing 31 steps from $020 gives $02f and the right margin comes out a
+ * quarter of the sheet off. Rows 0, 8, 16 and 24 all carry $06f, which is what
+ * the phase search finds.
+ *
+ * A row with no usable end anywhere at its phase falls back to row 0. On the
+ * fax that never happens; rows 20..30 are solid machine, but every one of them
+ * shares a phase with a clean row above. */
+static void wood_fill_page1(const uint16_t *page0, uint16_t *page1) {
+  const int vp = wood_vperiod(page0);
+  for (int r = 0; r < 32; r++) {
+    /* The row's OWN end first, always. Going straight to the phase search
+     * breaks View Mode, whose desk is drawn in isometric: each row is offset
+     * by a tile from the one above, so no vertical period describes it and any
+     * other row is the wrong answer even at the right phase. Its rows all have
+     * clean ends, so they never reach the search. */
+    const uint16_t l  = wood_end(page0, r, 0, 1, vp);
+    const uint16_t rt = wood_end(page0, r, 31, -1, vp);
+    for (int c = 0; c < 32; c++)
+      page1[r * 32 + c] = (c < 16) ? wood_grow(rt, c + 1) : wood_grow(l, c - 32);
+  }
+}
+
+/* Widen a wood-backed screen by lending its layer a wood-only map.
+ *
+ * The margins already come from a pass that renders one layer on its own, so
+ * for the length of that pass the layer's map is replaced with a copy carrying
+ * nothing but wood -- no menu box, no fax machine, no city, no furniture --
+ * and put back before the picture proper is drawn. A 32-column map wrapping at
+ * 256 px is seamless here because the sheet's period, 16 tiles, divides 32,
+ * and the wood arrives through the real PPU with the real palette and
+ * brightness. Costs two 2KB copies per scanline and NOT ONE BYTE of VRAM.
+ *
+ * It replaces a version that relocated the map to a spare 64-column region,
+ * and the reason is worth keeping. Choosing that region can only test the
+ * layers enabled RIGHT NOW, so a page belonging to a screen the player is not
+ * currently on looks free -- and these screens share VRAM. From a play log:
+ *
+ *   frame=3220 $14=09 BG3 src=5800 dst=5000
+ *   frame=3270 $14=07 BG3 src=5400 dst=5800
+ *   frame=3312 $14=07 BG3 src=5000 dst=5800
+ *
+ * Screen 09 wrote its copy over $5000, which is screen 07's own map; screen 07
+ * wrote over $5800, which is screen 09's. Each then had to be reloaded by the
+ * game on the way back, and until it was, the wrong tiles were on screen.
+ * Reported from play as the wood flickering for seconds after a screen change,
+ * and no amount of latching or settling could fix it, because the destination
+ * was never really free. Writing nothing at all cannot collide with anything,
+ * and it retires the whole risk of scrambling VRAM along with it. */
+/* Do the columns a margin will read from a WIDE map contain nothing?
+ *
+ * Returns true if either side's eight tile columns are entirely blank, which
+ * is the case the "already reaches the margins" shortcut got wrong. */
+static bool wood_wide_margin_blank(int L) {
+  if (!g_ppu) return false;
+  const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+  if (m + 0x800u > 0x8000u) return false;      /* both pages must be in VRAM */
+  const int firstcol = (int)(((unsigned)g_ppu->hScroll[L] & 0x1ffu) >> 3);
+  int lblank = 0, rblank = 0;
+  for (int i = 1; i <= 8; i++) {
+    const int lc = (firstcol - i) & 63;
+    const int rc = (firstcol + 32 + i - 1) & 63;
+    const unsigned lo = m + (unsigned)(lc & 31) + ((lc & 32) ? 0x400u : 0u);
+    const unsigned ro = m + (unsigned)(rc & 31) + ((rc & 32) ? 0x400u : 0u);
+    if ((g_ppu->vram[lo] & 0x3ffu) == 0) lblank++;
+    if ((g_ppu->vram[ro] & 0x3ffu) == 0) rblank++;
+  }
+  return lblank == 8 || rblank == 8;
+}
+
+static void widen_wood_bg(void) {
+  s_bg3_widened = false;
+  s_wood_widened = false;
+  s_wood_pass_layer = -1;
+  if (!g_ppu || s_ws_extra <= 0 || !s_ws_widen_menu) return;
+
+  /* Find the wood on WHICHEVER layer is carrying it.
+   *
+   * It is not always BG3. The menu, both faxes and View Mode put it there, but
+   * map select and name entry -- the two screens whose margin wood was
+   * reported wrong longest -- can have it elsewhere, and keying on BG3
+   * declined on exactly the screens that needed this most.
+   *
+   * A 32x64 map is two pages and a 64x64 one is four, so those are skipped
+   * rather than guessed at; a 64-column layer already reaches the margins. */
+  int layer = -1;
+  unsigned src = 0;
+  bool wide_patch = false;   /* wide map, blank margin columns to fill in */
+  for (int L = 0; L < 4 && layer < 0; L++) {
+    /* SC_WS_DIAG prints WHY each layer was passed over. "no-wood-layer" on its
+     * own says only that nothing qualified, which is the least useful thing it
+     * could say on a screen whose margins are wrong. */
+    const char *why = NULL;
+    if (!((g_ppu->screenEnabled[0] >> L) & 1) &&
+        !((g_ppu->screenEnabled[1] >> L) & 1)) why = "disabled";
+    else if (PPU_bgTilemapWider(g_ppu, L)) {
+      why = "wide-map";
+      /* "A 64-column layer already reaches the margins" -- true only if the
+       * columns it reaches them WITH are drawn. Measured on the screen that
+       * reported a missing left margin: BG1 is 64 columns, the window sits at
+       * column 0, so the right margin reads columns 32..39 (real content on
+       * page 1) and the left wraps to 56..63, which are entirely blank. The
+       * assumption held for one side and failed for the other, which is
+       * exactly what "wood on the right, black on the left" looks like.
+       *
+       * So a wide layer is no longer skipped outright. If the columns a margin
+       * will read are blank, it gets the same page-1 stand-in the 32-column
+       * case gets -- patched over the blank columns only, so the side that
+       * already works is left alone. */
+      /* AND IT MUST ACTUALLY BE WOOD. The first version of this checked only
+       * that the margin columns were blank and took the layer on that alone,
+       * which is not a test for wood at all -- it accepted the title screen's
+       * scrolling background and grew "wood" out of its tiles, breaking the
+       * title badly. wood_map_ok() is the check the 32-column path has always
+       * applied; the wide path needs it just as much. */
+      { const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+        if (m + 0x800u > 0x8000u)              why = "wide-pages-off-vram";
+        else if (!wood_map_ok(&g_ppu->vram[m])) why = "wide-map-not-woodlike";
+        else if (!wood_wide_margin_blank(L))    why = "wide-margins-already-drawn";
+        else { why = NULL; layer = L; src = m; wide_patch = true; } }
+      /* The claim being tested: "a 64-column layer already reaches the
+       * margins". Print what the margins would actually READ from it -- the
+       * eight tile columns either side of the 32-column window -- because a
+       * wide map whose extra columns are blank reaches them with nothing. */
+      if (getenv("SC_WS_DIAG")) {
+        static int said[4];
+        if (!said[L]) {
+          said[L] = 1;
+          const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+          const unsigned hofs = (unsigned)g_ppu->hScroll[L] & 0x1ffu;
+          const int firstcol = (int)(hofs >> 3);
+          int lblank = 0, rblank = 0;
+          for (int i = 1; i <= 8; i++) {
+            const int lc = (firstcol - i) & 63;
+            const int rc = (firstcol + 32 + i - 1) & 63;
+            /* page 1 lives 0x400 words on for columns 32..63 */
+            const unsigned lo = m + (unsigned)((lc & 31)) + ((lc & 32) ? 0x400u : 0u);
+            const unsigned ro = m + (unsigned)((rc & 31)) + ((rc & 32) ? 0x400u : 0u);
+            if ((g_ppu->vram[lo] & 0x3ff) == 0) lblank++;
+            if ((g_ppu->vram[ro] & 0x3ff) == 0) rblank++;
+          }
+          fprintf(stderr, "[wood] BG%d wide: hofs=%u firstcol=%d  "
+                          "left 8 cols blank=%d/8, right 8 cols blank=%d/8\n",
+                  L + 1, hofs, firstcol, lblank, rblank);
+        }
+      }
+    }
+    else if (g_ppu->bgXsc[L] & 0x02u)      why = "bgXsc-wide";
+    else {
+      const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, L);
+      if (m + 0x400u > 0x8000u)            why = "map-off-vram";
+      else if (!wood_map_ok(&g_ppu->vram[m])) why = "map-not-woodlike";
+      else { layer = L; src = m; }
+    }
+    if (why && getenv("SC_WS_DIAG")) {
+      static char seen[4][32];
+      if (strcmp(seen[L], why)) {
+        snprintf(seen[L], sizeof seen[L], "%s", why);
+        fprintf(stderr, "[wood] BG%d skipped: %s (map=%04x)\n",
+                L + 1, why, (unsigned)PPU_bgTilemapAdr(g_ppu, L));
+      }
+    }
+  }
+  if (layer < 0) { wood_trace("no-wood-layer", -1, 0); return; }
+
+  /* The stand-in is exactly page 1 of the 64-column map this used to build.
+   *
+   * On a 64-column map the right margin reads columns 32.. and the left reads
+   * 63, 62, ... downward; on a 32-column map that wraps, the right margin
+   * reads columns 0, 1, ... and the left reads 31, 30, ... -- the same cells
+   * in the same order. So the fill that was right for page 1 is right here,
+   * and both seams keep the screen's own phase. */
+  /* Rebuild only from a map that held still since last frame.
+   *
+   * Opening the scenario menu, the margins scrambled briefly while the screen
+   * was still fading and then came right -- reported from play. The map is
+   * being DMAd in over several frames, so a rebuild caught mid-write reads
+   * half-written rows, and the phase grown from them is nonsense. Sampling the
+   * anchors and requiring them to match the previous frame costs 32 compares
+   * and defers the rebuild by one frame; until then the previous screen's wood
+   * stays up, which during a fade is exactly what it should do. */
+  { static uint16_t anchor[32];
+    static unsigned anchor_src = ~0u;
+    bool steady = anchor_src == src;
+    for (int r = 0; r < 32; r++) {
+      const uint16_t a = g_ppu->vram[src + (unsigned)r * 32u];
+      if (a != anchor[r]) steady = false;
+      anchor[r] = a;
+    }
+    anchor_src = src;
+    if (steady || !s_wood_pass_ready) {
+      wood_fill_page1(&g_ppu->vram[src], s_wood_pass_map);
+      if (wide_patch) {
+        /* Page 1 is REAL here and one margin is already reading it correctly.
+         * Keep every column that has something in it and take only the blank
+         * ones from the grown wood, or the working side breaks while fixing
+         * the other. */
+        const uint16_t *real1 = &g_ppu->vram[src + 0x400u];
+        for (int r = 0; r < 32; r++)
+          for (int c = 0; c < 32; c++) {
+            const uint16_t v = real1[r * 32 + c];
+            if ((v & 0x3ffu) != 0) s_wood_pass_map[r * 32 + c] = v;
+          }
+      }
+      s_wood_pass_ready = true;
+    } }
+  s_wood_pass_layer = layer;
+  /* The margins of a wide map read PAGE 1, so that is the page to stand in
+   * for; a 32-column map wraps and reads page 0. */
+  s_wood_pass_src = wide_patch ? src + 0x400u : src;
+  s_ws_bg_margins = true;
+  s_ws_margin_layer = layer;
+  if (layer == 2) s_bg3_widened = true;   /* BG3 is clamped independently */
+  s_wood_widened = true;
+  wood_trace("wood-pass", layer, src);
 }
 
 /* Extend the selector background in the TILEMAP, not in the framebuffer.
@@ -2407,36 +4729,52 @@ static void widen_menu_bg(void) {
  * The shipped screen fills columns 0..44 and leaves 45..63 as tile $0000,
  * which is why scrolling the ninth column into view showed black.
  *
- * The wood is genuinely repeatable, as it turns out: columns 41..44 carry a
- * 4-wide by 8-tall block that repeats down the whole screen. Reading it off
- * the live tilemap and tiling it into columns 45..63 extends the background
- * for real -- the PPU draws it, it scrolls with everything else, and the
- * host-side pixel fill it replaces is gone along with its scroll artefacts.
+ * The extension is grown from the live tilemap with wood_grow(), the same rule
+ * the menu and the faxes use: a row of the wood sheet is sixteen consecutive
+ * tiles, so walking sideways walks the low four bits and wraps them.
  *
- * Phase continues from column 41 so the seam at column 44/45 is invisible. */
-static const uint16_t kSelWood[8][4] = {
-  { 0x0029, 0x002a, 0x002b, 0x002c },
-  { 0x0039, 0x003a, 0x003b, 0x003c },
-  { 0x0049, 0x004a, 0x004b, 0x004c },
-  { 0x0059, 0x005a, 0x005b, 0x005c },
-  { 0x0061, 0x0062, 0x0063, 0x0064 },
-  { 0x0071, 0x0072, 0x0073, 0x0074 },
-  { 0x0081, 0x0082, 0x0083, 0x0084 },
-  { 0x0091, 0x0092, 0x0093, 0x0094 },
-};
+ * This replaced a hardcoded 4-wide by 8-tall block read off columns 41..44.
+ * There is no 4-wide repeat -- reported from play as the selector's wood being
+ * the one still worth optimising -- and the loop was plain to see: row 0 ran
+ * $029 $02a $02b $02c $029 $02a... where the sheet continues $02d $02e $02f
+ * $020.
+ *
+ * Column 41 is the anchor, and it has to be. Column 44 would be the natural
+ * choice as the last column the shipped screen fills, but with SC_NINTH the
+ * Sylt card occupies columns 42..49 on rows 5..13, so 44 is card art on a
+ * third of the screen. 41 is wood on every row, which is presumably why the
+ * old table was read from there too. */
 
 /* Written every frame the selector runs: the screen's own setup DMA lands
- * before this and would otherwise put the blank tiles back. */
+ * before this and would otherwise put the blank tiles back. sylt_place_card()
+ * runs after it, so the card is laid back over columns 42..49. */
 static void selector_extend_tilemap(void) {
   if (!g_ppu) return;
   const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);   /* BG1, in words */
-  for (int row = 0; row < 32; row++)
-    for (int col = 45; col < 64; col++) {
-      /* Columns 32..63 live in the second 32x32 page, at map + $400 words. */
-      const unsigned idx = map + 0x400u + (unsigned)row * 32u + (unsigned)(col - 32);
-      if (idx >= 0x8000u) continue;
-      g_ppu->vram[idx] = kSelWood[row & 7][(col - 41) & 3];
-    }
+  if (map + 0x800u > 0x8000u) return;
+  /* Remember each row's anchor, and keep using the last good one while the
+   * screen is loading.
+   *
+   * Arriving at the selector, column 41 has not been written yet on the first
+   * frames, so the row was skipped and its columns 45..63 stayed as the blank
+   * tiles the shipped map holds -- reported from play as the left wood
+   * flickering briefly on the way in. Which end it shows up at is not a
+   * coincidence: BG1 is 64 columns and the left margin reads the map's far
+   * end, columns 60..63, so the columns this fills are exactly the ones the
+   * left margin shows. */
+  static uint16_t held[32];
+  static unsigned held_map = ~0u;
+  if (held_map != map) { held_map = map; memset(held, 0, sizeof held); }
+  for (int row = 0; row < 32; row++) {
+    /* Columns 32..63 live in the second 32x32 page, at map + $400 words. */
+    const unsigned page1 = map + 0x400u + (unsigned)row * 32u;
+    const uint16_t live = g_ppu->vram[page1 + (41u - 32u)];
+    if (wood_tile(live)) held[row] = live;
+    const uint16_t anchor = held[row];
+    if (!wood_tile(anchor)) continue;      /* never had one -- leave the row */
+    for (int col = 45; col < 64; col++)
+      g_ppu->vram[page1 + (unsigned)(col - 32)] = wood_grow(anchor, col - 41);
+  }
 }
 
 /* SC_HOST_MAP_DUMP=<file>: render the map host-side and write it as a PPM,
@@ -2485,6 +4823,9 @@ static void host_map_init(void) {
    * pixels while binding and arming reported success. */
   s_ov_pitch = s_video_pitch;
   s_hud_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
+  s_guest_pixels = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight);
+  s_hostmap_pitch = (s_video_w + 16) * 4;
+  s_hostmap_px = (uint8_t *)calloc((size_t)s_hostmap_pitch, kVideoHeight + 16);
   s_ov_bg3 = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   s_ov_obj = (uint8_t *)calloc((size_t)s_ov_pitch, kVideoHeight);
   if (!s_ov_bg3 || !s_ov_obj) { s_host_map = false; return; }
@@ -2495,30 +4836,20 @@ static void host_map_init(void) {
           (int)a, (int)b, (int)PPU_mode(g_ppu));
 }
 
-/* Per frame, before any line renders. */
+/* Per frame, before any line renders -- a deliberate no-op.
+ *
+ * It used to arm the runner's overlay export for BG3 and OBJ with
+ * kPpuOverlayFlag_RemoveFromGame, which takes those layers OUT of the game's
+ * own render. BG3 does come back correctly -- the surface reports exactly the
+ * pixels BG3 drew -- but OBJ never does (upstream #31), so arming it simply
+ * deletes the sprites from the picture.
+ *
+ * Nothing needs it now. The guest's own 256 columns are kept verbatim below,
+ * so there is nothing to take apart and reassemble. */
 static void host_map_arm_captures(void) {
   if (!s_host_map || !g_ppu || !s_ov_bg3) return;
-  if (!host_map_screen_live()) return;   /* city view only, as above */
-  /* Keep the UI layers out of the widescreen margins.
-   *
-   * BG3 is a tilemap like BG2, so widening the picture tiles the toolbar and
-   * status bar sideways exactly as it did the map -- reported from play as
-   * "the UI seems repeated too". Clamping pins them to the authentic 256
-   * columns; the composite below then anchors that block to the left edge.
-   *
-   * BG2 is clamped too and costs nothing: it is the layer being replaced.
-   * Must be re-applied every frame, per the API contract. */
-  memset(s_ov_bg3, 0, (size_t)s_ov_pitch * kVideoHeight);
-  memset(s_ov_obj, 0, (size_t)s_ov_pitch * kVideoHeight);
+  if (!host_map_screen_live()) return;
   PpuClearOverlayCaptures(g_ppu);
-  bool c3 = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Bg3, 0, 0, s_video_w,
-                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
-  bool co = PpuSetOverlayCapture(g_ppu, kPpuOverlaySource_Obj, 0, 0, s_video_w,
-                                 kVideoHeight, kPpuOverlayFlag_RemoveFromGame);
-  { static int shown = 0;
-    if (shown < 2) { shown++;
-      fprintf(stderr, "host map: capture armed bg3=%d obj=%d mode=%d\n",
-              (int)c3, (int)co, (int)PPU_mode(g_ppu)); } }
 }
 
 /* True only when a city actually exists to draw.
@@ -2533,11 +4864,356 @@ static void host_map_arm_captures(void) {
  * play, 3 scenario). Measured at boot: $14 = 00 and $3e = 0 through frame 110+,
  * while savestates 7, 8 and 9 -- real city views -- all have $3e = 1. */
 static bool host_map_screen_live(void) {
-  return g_ram[0x14] == 0x00 && (g_ram[0x3e] | (g_ram[0x3f] << 8)) != 0;
+  if (g_ram[0x14] != 0x00 || (g_ram[0x3e] | (g_ram[0x3f] << 8)) == 0) return false;
+  if (!g_ppu) return false;
+  /* $14 == 0 is not only the city view. The tax, evaluation, overview and
+   * history pages all report it, and so does View Mode -- View Mode with the
+   * SAME enable bits and the SAME three map bases as the city view, so no
+   * register separates those two at all.
+   *
+   * Two further tests do. BG2 is the map and the four menu pages do not enable
+   * it, which excludes them; and View Mode is the one carrying the wooden
+   * desk, which widen_wood_bg() has already found by reading the tilemap.
+   * Without both, the host map painted terrain across all five. */
+  if (!(((g_ppu->screenEnabled[0] | g_ppu->screenEnabled[1]) >> 1) & 1))
+    return false;                       /* BG2 = the map, on either screen */
+  /* The bank/loan screen is a full-screen art scene, not the city.
+   *
+   * It reports $14 == 0 with BG2 enabled on the SUBSCREEN, so the test above
+   * passed it and the host map painted city terrain into both margins --
+   * reported from play as the loan view being broken in widescreen. The
+   * margin blank could not clean up after it either, since that is skipped
+   * whenever this function says yes.
+   *
+   * Enable bits separate the three cases that reach here:
+   *
+   *   city    main=17 (BG1|BG2|BG3|OBJ)  sub=04    BG2 on MAIN
+   *   advice  main=14 (BG3|OBJ)          sub=03    BG2 sub, BG1 sub
+   *   loan    main=15 (BG1|BG3|OBJ)      sub=02    BG2 sub, BG1 MAIN
+   *
+   * So: the map only on the subscreen while BG1 holds the main screen means
+   * the picture belongs to that BG1 scene, and the city is merely showing
+   * through colour math. Testing "BG2 on main" instead would have caught the
+   * loan screen too, and would also have dropped the advice page, whose
+   * dimmed city in the margins is wanted. */
+  if (!((g_ppu->screenEnabled[0] >> 1) & 1) &&
+      ((g_ppu->screenEnabled[0] >> 0) & 1))
+    return false;                       /* BG1 scene over a subscreen map */
+  if (s_wood_widened) return false;     /* View Mode */
+  return true;
 }
 
 /* After the guest frame: replace the picture with our map, then put the
  * captured HUD and sprites back over it using their real alpha. */
+/* Passe-partout: never show the guest's outermost tile column.
+ *
+ * Every seam chased in this file lives in exactly those 8 px at each side.
+ * The trailing one is the column the game rewrites while it is still on screen
+ * behind you; the leading one is the column that becomes visible before the
+ * game rewrites it. Both are the same geometry: a 32-column tilemap is 256 px
+ * against a 256 px screen, so one column has to serve both edges at once and
+ * cannot.
+ *
+ * On hardware those columns sat in CRT overscan and were never seen -- the game
+ * is built on that assumption. So rather than repair them frame by frame, do
+ * not display them: the host map, which draws the same terrain from WRAM,
+ * covers the outermost column on each side permanently.
+ *
+ * This removes the fault by construction, and with it the whole repair
+ * mechanism -- direction tracking, hold counters, staleness bookkeeping -- and
+ * the cloned cursor and HUD that mechanism caused, which came from translating
+ * composed pixels that included screen-fixed layers.
+ *
+ * Measured first: every edge of the guest picture is live map, not HUD. While
+ * the map scrolls, columns 0-15 change 60-89%% (the toolbar starts at x~16),
+ * columns 240-255 change 34-59%%, and the top and bottom rows change too -- the
+ * status bar is a panel inside the picture, not a band across the edge. An 8 px
+ * crop therefore takes map pixels only and clips no HUD anywhere.
+ *
+ * SC_PASSEPARTOUT=0 restores the guest's own edge columns and re-enables the
+ * per-frame repair. */
+enum { kPassePartout = 8 };
+static bool ws_passepartout(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("SC_PASSEPARTOUT");
+    on = (e && *e) ? (atoi(e) != 0) : 1;
+  }
+  return on != 0;
+}
+
+/* Repair the scroll seam.
+ *
+ * The map tilemap is 32 columns -- 256 px, exactly the screen width -- and
+ * serves as a circular buffer over a city far larger than it. Scrolling has to
+ * rewrite the column about to appear at the LEADING edge, and because 32
+ * columns wrap onto themselves that very column is still on screen at the
+ * TRAILING edge. The incoming content therefore flashes in at the far side,
+ * once per tile column of scroll: about fifteen times a second at the normal
+ * 2 px/frame, and it reads as content from the opposite edge.
+ *
+ * Measured on the city view scrolling right: the leftmost 8 px mismatch a
+ * correctly-scrolled previous frame by 64-88% while the middle of the screen
+ * mismatches by 0.0%. Isolating layers puts it entirely on BG2 (87.8%); BG1
+ * measures 4.6% because the game windows BG1 to x 0..247, masking its own copy
+ * of the same artifact. BG2 carries no window at all.
+ *
+ * No VRAM trick can fix it -- one column must serve both edges in the same
+ * frame with different content -- so the composed picture is patched instead.
+ * Between frames the map is a rigid translation by the scroll delta, and the
+ * previous frame held the correct content for that sliver, so prev[x + dx] is
+ * exactly it. Patched only on frames where the trailing column really was
+ * rewritten, which keeps a sprite sitting at the edge from smearing on every
+ * frame that merely scrolls. */
+static uint8_t *s_seam_prev;
+static size_t s_seam_prev_size;
+static uint16_t s_seam_map[0x400];
+static bool s_seam_have_prev;
+static int s_seam_hs_prev, s_seam_vs_prev;
+/* How many pixels of the rewritten column are still on screen at the
+ * trailing edge. The repair has to continue until that column has fully
+ * scrolled off, otherwise the picture simply snaps to the new content one
+ * frame later and the seam reappears displaced rather than removed. */
+static int s_seam_hold_x, s_seam_hold_y;
+/* Which way the map was last travelling, so a paused frame still knows
+ * which edge is trailing, and how long it has been still. */
+static int s_seam_dir_x = 1, s_seam_dir_y = 1, s_seam_idle_x, s_seam_idle_y;
+/* The LEADING edge is a separate fault from the trailing one this file
+ * mostly deals with. Scrolling right, a tile column becomes visible at the
+ * right BEFORE the game rewrites it, so for two or three frames it still
+ * holds the wrapped content from 256 px away -- measured in a play capture
+ * as a spike on the right 16 px every fourth frame (one tile column at
+ * 2 px/frame), 72-79%% 'correctly scrolled' against 84-86%% on quiet frames.
+ *
+ * It cannot be repaired from history the way the trailing edge is: the
+ * correct pixels do not exist yet anywhere, because the game has not
+ * written them. The host map has that terrain from WRAM, so the strip is
+ * started a few pixels early to cover the sliver while it is wrong.
+ *
+ * On hardware this sliver sat in CRT overscan and was never seen; widescreen
+ * put the guest's right edge in the middle of the picture, next to the join,
+ * which is why it reads as a defect now. */
+static int s_seam_lead_col = -1;
+static bool s_seam_lead_dirty;
+static int s_hostmap_adj_x, s_hostmap_adj_y;  /* mirrors, for SC_COMPOSE_DIAG */
+static inline uint32_t sc_ext_sub(uint32_t c, int sr, int sg, int sb) {
+  if (!(sr | sg | sb)) return c;
+  int r = (int)((c >> 16) & 0xff) - sr; if (r < 0) r = 0;
+  int g = (int)((c >> 8) & 0xff) - sg;  if (g < 0) g = 0;
+  int b = (int)(c & 0xff) - sb;         if (b < 0) b = 0;
+  return (c & 0xff000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+static int s_seam_lead_cover;      /* right edge  */
+static int s_seam_lead_left;       /* left edge   */
+static int s_seam_lead_top;        /* top edge    */
+static int s_seam_lead_row = -1;
+static bool s_seam_lead_rdirty;
+
+static void ws_fix_scroll_seam(void) {
+  /* With the passe-partout on BOTH edges there is nothing left to repair, and
+   * the repair is what ghosts the HUD: it translates COMPOSED pixels, so any
+   * screen-fixed layer inside its 16 columns is dragged along a frame behind.
+   * That is the same root cause as the cloned cursor, and it is why this stands
+   * down entirely rather than being narrowed again.
+   *
+   * There is no quality cost. An earlier note here claimed the left cover
+   * mismatched a translated previous frame by 11-34%% where the repair was
+   * exact; that was a flaw in the measurement, not the picture. The band test
+   * shifted an 8 px window by the scroll delta, so it read two GUEST columns
+   * and compared them against host content. Measured with the window kept
+   * inside the cover, both edges are 100.0%% on every frame. */
+  if (ws_passepartout()) {
+    s_seam_lead_cover = 0;
+    s_seam_lead_left = 0;
+    s_seam_lead_top = 0;
+    s_seam_hold_x = 0;
+    s_seam_hold_y = 0;
+    return;
+  }
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("SC_SEAM_FIX");
+    enabled = (e && *e) ? (atoi(e) != 0) : 1;
+  }
+  if (!enabled || !s_video_pixels || !g_ppu) return;
+
+  const size_t need = (size_t)s_video_pitch * kVideoHeight;
+
+  /* Off the city view the history is meaningless -- drop it so returning to
+   * the map cannot patch from a menu's pixels. */
+  if (!host_map_screen_live()) {
+    s_seam_have_prev = false;
+    s_seam_lead_cover = 0;
+    s_seam_lead_left = 0;
+    s_seam_lead_top = 0;
+    s_seam_lead_col = -1;
+    s_seam_lead_row = -1;
+    return;
+  }
+
+  if (s_seam_prev_size != need) {
+    free(s_seam_prev);
+    s_seam_prev = (uint8_t *)malloc(need);
+    s_seam_prev_size = s_seam_prev ? need : 0;
+    s_seam_have_prev = false;
+  }
+  if (!s_seam_prev) return;
+
+  const int hs = g_ppu->hScroll[1] & 0x3ff;
+  const int vs = g_ppu->vScroll[1] & 0x3ff;
+
+  /* Which tilemap entries changed since the last frame. */
+  const unsigned m = (unsigned)PPU_bgTilemapAdr(g_ppu, 1);
+  bool col_changed[32] = {false}, row_changed[32] = {false};
+  for (unsigned i = 0; i < 0x400u; i++) {
+    const uint16_t v = g_ppu->vram[(m + i) & 0x7fffu];
+    if (v != s_seam_map[i]) { col_changed[i & 31] = true; row_changed[i >> 5] = true; }
+    s_seam_map[i] = v;
+  }
+
+  if (s_seam_have_prev) {
+    /* Scroll registers are 10-bit and the map wraps at 256; keep the delta
+     * small and signed so a wrap does not read as a huge jump. */
+    int dx = ((hs - s_seam_hs_prev) & 0xff), dy = ((vs - s_seam_vs_prev) & 0xff);
+    if (dx > 128) dx -= 256;
+    if (dy > 128) dy -= 256;
+
+    /* Is the column now at the LEADING edge still holding wrapped content?
+     * It goes suspect the moment it becomes the leading column and is cleared
+     * the moment the game rewrites it. Which edge leads depends on the
+     * direction of travel: scrolling right it is the right edge, scrolling
+     * left the left one. Same again for the rows, vertically. */
+    { const int lc = dx > 0 ? (((hs + kVideoWidth - 1) >> 3) & 31)
+                            : ((hs >> 3) & 31);
+      if (lc != s_seam_lead_col) { s_seam_lead_col = lc; s_seam_lead_dirty = true; }
+      if (col_changed[lc]) s_seam_lead_dirty = false;
+      s_seam_lead_cover = (dx > 0 && s_seam_lead_dirty)
+                              ? (((hs + kVideoWidth - 1) & 7) + 1) : 0;
+      s_seam_lead_left = (dx < 0 && s_seam_lead_dirty)
+                              ? (8 - (hs & 7)) : 0; }
+    { const int lr = dy > 0 ? (((vs + kVideoHeight - 1) >> 3) & 31)
+                            : ((vs >> 3) & 31);
+      if (lr != s_seam_lead_row) { s_seam_lead_row = lr; s_seam_lead_rdirty = true; }
+      if (row_changed[lr]) s_seam_lead_rdirty = false;
+      s_seam_lead_top = (dy < 0 && s_seam_lead_rdirty)
+                            ? (8 - (vs & 7)) : 0; }
+
+    const int gx0 = s_ws_extra;              /* guest's left edge, render coords */
+    const int gx1 = gx0 + kVideoWidth;
+
+    /* Horizontal: trailing edge is the side the content is leaving by.
+     *
+     * A frame with no movement must NOT abandon the repair. Panning by pushing
+     * the cursor against the edge starts and stops constantly, so dx==0 frames
+     * are common mid-scroll; clearing the hold on one let the stale column pop
+     * straight back into view. Reported from play as the seam still being heavy
+     * when panning by cursor and on the diagonal. With no movement the strip
+     * simply holds its previous pixels -- dx is 0, so nothing translates and
+     * nothing decrements. */
+    if (dx != 0) { s_seam_dir_x = dx > 0 ? 1 : -1; s_seam_idle_x = 0; }
+    else if (++s_seam_idle_x > 12) s_seam_hold_x = 0;
+    if (dx > -8 && dx < 8) {
+      /* Check BOTH edge columns, not just the trailing one. The two coincide
+       * only when the scroll sits off a tile boundary; exactly at a boundary
+       * they differ by one, and testing the wrong one missed the rewrite --
+       * measured as a 4% residual on the right edge when scrolling left. */
+      const int left_col = (hs >> 3) & 31;
+      const int right_col = ((hs + kVideoWidth - 1) >> 3) & 31;
+      /* Sixteen pixels, not eight. The game rewrites TWO tilemap columns per
+       * update ("wrote: 6 7" in the per-frame trace), and both land inside the
+       * trailing sliver. An 8 px repair left the second column showing through:
+       * measured x0-7 at 0% but x8-15 still at 56%, which is why the seam was
+       * still plainly visible in play after the first attempt. */
+      /* Only ARM a repair near actual movement. Letting dx==0 arm one meant
+       * ordinary map animation armed it on a still screen. */
+      if ((dx != 0 || s_seam_idle_x <= 3) &&
+          (col_changed[left_col] || col_changed[right_col])) s_seam_hold_x = 16;
+      if (s_seam_hold_x > 0) {
+        const int wdt = s_seam_hold_x;
+        const int x0 = s_seam_dir_x > 0 ? gx0 : gx1 - wdt;
+        const int x1 = s_seam_dir_x > 0 ? gx0 + wdt : gx1;
+        s_seam_hold_x -= dx > 0 ? dx : -dx;
+        if (s_seam_hold_x < 0) s_seam_hold_x = 0;
+        for (int y = 0; y < kVideoHeight; y++) {
+          /* BOTH axes. This block used to translate by dx only, so on a
+           * DIAGONAL pan it pulled pixels from the wrong row and the repair
+           * itself painted a seam along the top and left -- reported from play
+           * as the seam being clearly visible when scrolling right and down. */
+          const int sy = y + dy;
+          if (sy < 0 || sy >= kVideoHeight) continue;
+          uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          const uint32_t *src =
+              (const uint32_t *)(s_seam_prev + (size_t)sy * s_video_pitch);
+          for (int x = x0; x < x1; x++) {
+            const int sx = x + dx;
+            if (sx >= gx0 && sx < gx1) dst[x] = src[sx];
+          }
+        }
+      }
+    } else {
+      s_seam_hold_x = 0;
+    }
+
+    /* Vertical: 32 rows is 256 px against 224 visible, so there is a little
+     * slack here that the horizontal axis does not have -- but the game still
+     * rewrites a visible row often enough to show the same seam. */
+    /* The vertical repair is OFF by default.
+     *
+     * Unlike the horizontal one, which touches 16 columns of map, this rewrites
+     * 16 rows across the WHOLE guest width -- straight through the status bar --
+     * so any HUD element in those rows is translated with the map and ghosts a
+     * frame behind. Reported from play as HUD elements drawn one frame too slow.
+     *
+     * And it buys nothing. The tilemap is 32 rows against 224 visible lines, so
+     * there are 4 spare rows to stage into and the game rewrites a row before it
+     * is exposed: measured over 113 frames of downward scrolling in a play
+     * capture, the leading edge is median 0.0%% and worst 12.8%%, against 24-28%%
+     * spikes on the horizontal axis where there is no slack at all.
+     *
+     * SC_SEAM_FIX_V=1 restores it. */
+    { static int von = -1;
+      if (von < 0) { const char *e = getenv("SC_SEAM_FIX_V");
+                     von = (e && *e) ? (atoi(e) != 0) : 0; }
+      if (!von) dy = 0, s_seam_hold_y = 0; }
+    if (dy != 0) { s_seam_dir_y = dy > 0 ? 1 : -1; s_seam_idle_y = 0; }
+    else if (++s_seam_idle_y > 12) s_seam_hold_y = 0;
+    if (dy > -8 && dy < 8) {
+      /* Symmetric with the horizontal block: sixteen pixels, both edge rows.
+       * This axis was left at eight and a single row when the horizontal one
+       * was widened -- the bottom seam seen when panning down by cursor. */
+      const int top_row = (vs >> 3) & 31;
+      const int bot_row = ((vs + kVideoHeight - 1) >> 3) & 31;
+      if ((dy != 0 || s_seam_idle_y <= 3) &&
+          (row_changed[top_row] || row_changed[bot_row])) s_seam_hold_y = 16;
+      if (s_seam_hold_y > 0) {
+        const int hgt = s_seam_hold_y;
+        const int y0 = s_seam_dir_y > 0 ? 0 : kVideoHeight - hgt;
+        const int y1 = s_seam_dir_y > 0 ? hgt : kVideoHeight;
+        s_seam_hold_y -= dy > 0 ? dy : -dy;
+        if (s_seam_hold_y < 0) s_seam_hold_y = 0;
+        for (int y = y0; y < y1; y++) {
+          const int sy = y + dy;
+          if (sy < 0 || sy >= kVideoHeight) continue;
+          uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+          const uint32_t *src =
+              (const uint32_t *)(s_seam_prev + (size_t)sy * s_video_pitch);
+          for (int x = gx0; x < gx1; x++) {
+            const int sx = x + dx;   /* BOTH axes here too */
+            if (sx >= gx0 && sx < gx1) dst[x] = src[sx];
+          }
+        }
+      }
+    } else {
+      s_seam_hold_y = 0;
+    }
+  }
+
+  memcpy(s_seam_prev, s_video_pixels, need);
+  s_seam_have_prev = true;
+  s_seam_hs_prev = hs;
+  s_seam_vs_prev = vs;
+}
+
 static void host_map_compose(void) {
   if (!s_host_map || !s_ov_bg3) return;
   /* Only on the main map screen. $01df is the screen-mode index: 3 is the
@@ -2568,60 +5244,519 @@ static void host_map_compose(void) {
    * case, applied consistently. */
   if (!host_map_screen_live()) return;
 
-  { static int shown = 0;
-    if (shown < 3) { shown++;
-      int n3 = 0, no = 0;
-      for (int y = 0; y < kVideoHeight; y++) {
-        const uint32_t *b3 = (const uint32_t *)(s_ov_bg3 + (size_t)y * s_ov_pitch);
-        const uint32_t *ob = (const uint32_t *)(s_ov_obj + (size_t)y * s_ov_pitch);
-        for (int x = 0; x < s_video_w; x++) { if (b3[x] >> 24) n3++; if (ob[x] >> 24) no++; }
-      }
-      /* KNOWN ISSUE: both counts are 0. The captures arm successfully and the
-       * mode is 1, which HOST_OVERLAY_EXTRACTION.md lists as covered, yet the
-       * surfaces stay empty -- so the HUD and sprites do not come back and the
-       * frame is bare map. Reported from play as "map works, no overlay".
-       * Whatever the reason is, it is inside the runner's export path rather
-       * than this wiring. Diagnostic kept until it is understood. */
-      fprintf(stderr, "host map: composing, bgmode=%d bg3px=%d objpx=%d\n",
-              (int)PPU_mode(g_ppu), n3, no); } }
+  /* Keep the guest's own 256 columns EXACTLY; spend the extra width on host
+   * terrain to the right of them.
+   *
+   * Earlier versions replaced the map inside the authentic picture as well and
+   * then tried to key the guest's frame back over the top. That cannot work:
+   * the host renderer is a reimplementation and agrees with the guest's own map
+   * on 76.6% of pixels at its best alignment. The missing quarter is real
+   * content -- the taller roofs that overlap the tile behind them, shoreline
+   * decoration -- which a colour key then discards as "same as the map".
+   *
+   * Nothing has to be recovered if nothing is thrown away. Measured, this
+   * leaves the authentic 256 columns 0 pixels different from what the game
+   * draws, on every screen.
+   *
+   * Two details the render depends on:
+   *
+   *  - NATIVE cell size. This continues a picture the guest draws at 8 px per
+   *    cell, so any other zoom draws terrain at the wrong size AND starts from
+   *    the wrong cell: a band of mismatched tiles along the join that moves as
+   *    you scroll.
+   *  - ONE ROW UP. The host render sits a pixel low against the guest's map.
+   *    Sweeping the offset, dx 0 / dy +1 scores 91.8% and nothing else comes
+   *    within thirty points. ScMapView_Render takes whole cells, so the
+   *    correction cannot go through the scroll. */
+  if (!s_guest_pixels) return;
+  /* Nothing to extend at authentic width. The result is identical either way --
+   * the guest's columns are copied back over the whole frame -- so this only
+   * skips the wasted render now that the host map is on by default. */
+  if (s_ws_extra <= 0) return;
+  memcpy(s_guest_pixels, s_video_pixels, (size_t)s_video_pitch * kVideoHeight);
+
+  if (ScMapView_GetCellPx() != 8) ScMapView_SetCellPx(8);
+  if (!s_hostmap_px) return;
   int sx = 0, sy = 0;
   ScMapView_GetScroll(&sx, &sy);
-  const int cols = (s_video_w + 7) / 8, rows = (kVideoHeight + 7) / 8;
-  if (!ScMapView_Render(s_video_pixels, s_video_pitch, cols, rows, sx, sy)) return;
-  /* Composite the HUD-only pass over the map.
+
+  /* SUB-CELL alignment. ScMapView_GetScroll reports whole map cells, but the
+   * guest scrolls its map 2 px at a time, so a cell-aligned render only agrees
+   * with it every fourth frame and drifts up to 7 px in between -- reported
+   * from play as the extension running slightly fast and visibly coming apart
+   * for a moment. Measured, the guest's BG2 register follows
+   * `cell * 8 + fine (mod 256)` exactly, so the fine part is the correction.
    *
-   * An isolated render still paints the backdrop, so "not black" is the wrong
-   * test -- the whole scratch buffer would count as opaque. Key on the actual
-   * backdrop colour instead, taken from CGRAM entry 0 through the same
-   * brightness the PPU applies, so it matches whatever the pass produced. */
-  if (s_hud_pixels) {
-    uint16_t bd = g_ppu->cgram[0];
-    s_backdrop_argb = 0xFF000000u
-        | ((uint32_t)g_ppu->brightnessMult[bd & 0x1f] << 16)
-        | ((uint32_t)g_ppu->brightnessMult[(bd >> 5) & 0x1f] << 8)
-        | (uint32_t)g_ppu->brightnessMult[(bd >> 10) & 0x1f];
-    /* Anchor the UI to the upper-left rather than leaving it centred.
+   * The constant row below is separate and not this: every state measured sits
+   * at fine (0,0) at rest, yet the host render is still a pixel low. */
+  const int fx = g_ppu->hScroll[1] & 7;
+  const int fy = g_ppu->vScroll[1] & 7;
+
+  /* Keep the strip's MOVEMENT equal to the guest's, without disturbing where
+   * it sits.
+   *
+   * The coarse cell and the fine offset come from different places:
+   * ScMapView_GetScroll reads the game's scroll in city cells, fx/fy above are
+   * the PPU's BG2 register. Around a tile boundary the cell can lag the
+   * register by a frame, and the strip then snaps a whole tile the wrong way --
+   * measured over a 230-frame vertical pan as exactly one frame where the guest
+   * moved dy=+4 and the strip moved dy=-4. Reported from play as the extension
+   * jumping "one tile away" when panning with A.
+   *
+   * Forcing the cell to agree with the register outright is NOT the fix: the
+   * two carry a standing offset that is perfectly normal, and overriding it
+   * moved the terrain on five of ten save states at rest. So correct only the
+   * discrepancy in MOTION -- how far the strip would travel this frame versus
+   * how far the register actually travelled -- and carry it as whole cells.
+   * The adjustment cancels itself once the cell catches up, so at rest it is
+   * zero and the picture is untouched. */
+  { static int prev_sy, prev_sx, prev_fy, prev_fx, prev_v, prev_h_, have;
+    static int still;
+    static int adj_x, adj_y;
+    const int vpix = g_ppu->vScroll[1] & 0xff, hpix = g_ppu->hScroll[1] & 0xff;
+    if (have) {
+      int dv = (vpix - prev_v) & 0xff, dh = (hpix - prev_h_) & 0xff;
+      if (dv > 128) dv -= 256;
+      if (dh > 128) dh -= 256;
+      /* Only track ordinary scrolling; a jump means a screen change, not a pan. */
+      if (dv > -32 && dv < 32 && dh > -32 && dh < 32) {
+        const int moved_y = (sy - prev_sy) * 8 + (fy - prev_fy);
+        const int moved_x = (sx - prev_sx) * 8 + (fx - prev_fx);
+        if ((dv - moved_y) % 8 == 0) adj_y += (dv - moved_y) / 8;
+        if ((dh - moved_x) % 8 == 0) adj_x += (dh - moved_x) / 8;
+        /* Bound it. The fault is a one-frame, one-cell lag, so a correction
+         * beyond a single cell is not that fault -- it is the two sources
+         * tracking differently, and letting it accumulate walked the terrain
+         * right off its anchor (85662 pixels adrift on one save state). */
+        if (adj_y > 1) adj_y = 1; else if (adj_y < -1) adj_y = -1;
+        if (adj_x > 1) adj_x = 1; else if (adj_x < -1) adj_x = -1;
+        /* Return to zero once the map genuinely stops.
+         *
+         * The comment above says "at rest it is zero", and that was simply
+         * not true: nothing drove the adjustment back. It was cleared only
+         * by a JUMP (>=32 px), so any standing discrepancy the correction
+         * picked up stayed forever. Measured on savestate_6: the disaster
+         * camera pans the view (sy 61 -> 71), adj_y latches to -1, and stays
+         * -1 for 350+ frames with dv, dh, fx and fy all zero. Reported from
+         * play as the extension sitting one tile off after the disaster cam
+         * moves the map -- and ONLY after that, which is exactly the
+         * signature of a latch rather than a tracking error.
+         *
+         * The correction exists for a ONE-FRAME lag between the cell and the
+         * register while scrolling. With nothing moving there is no lag to
+         * correct, so it must decay. Eight still frames is the threshold
+         * because the guest scrolls 2 px at a time and a pan never goes that
+         * long without moving -- so this cannot fire mid-pan and undo the
+         * lag fix it is there to provide. */
+        if (dv == 0 && dh == 0 && sx == prev_sx && sy == prev_sy) {
+          if (++still >= 8) { adj_x = 0; adj_y = 0; }
+        } else {
+          still = 0;
+        }
+      } else {
+        adj_x = adj_y = 0;
+      }
+    }
+    s_hostmap_adj_x = adj_x; s_hostmap_adj_y = adj_y;
+    prev_sy = sy; prev_sx = sx; prev_fy = fy; prev_fx = fx;
+    prev_v = vpix; prev_h_ = hpix; have = 1;
+    { static int use = -1;
+      if (use < 0) { const char *e = getenv("SC_HOSTMAP_ADJ");
+                     use = (e && *e) ? (*e != '0') : 1; }
+      if (use) { sx += adj_x; sy += adj_y; } } }
+
+  /* Dim the extension the same way the guest dims the city behind an overlay.
+   *
+   * The advisor pages compose backdrop plus subscreen, HALVED (cgadsub $60,
+   * cgwsel $02). With the backdrop black that is arithmetically `city / 2`, so
+   * the extension is halved too -- derived from the registers, not fitted to
+   * the picture. Two earlier attempts to measure a ratio off the frame both
+   * made things worse: a mean left the terrain 36% too dark, a median tinted
+   * other pages.
+   *
+   * Only this exact shape. Subtractive math against the subscreen cannot be
+   * reproduced here, because the value being subtracted is the subscreen and
+   * this code does not have it. */
+  /* Advisor pages are LEFT-ALIGNED, like every other screen.
+   *
+   * Centring them was tried and backed out. Moving the page means moving
+   * the guest's whole 256 columns, because at this point panel and city
+   * are already one picture -- so the toolbar left the left edge and the
+   * margins changed with it. Reported from play, twice: first as the map
+   * shifting, then as the widescreen itself shifting.
+   *
+   * The right fix is to composite the page from its OWN layer, and the
+   * layer state says that is exactly how the game draws it: main = $14
+   * (BG3 + OBJ, the page) and sub = $03 (BG1 + BG2, the city). The runner
+   * even has the machinery -- PpuSetOverlayCapture accepted the capture,
+   * armed bg3=1 obj=1.
+   *
+   * It exports nothing, and cannot. renderFlags reads 8 (NoSpriteLimits);
+   * bit 0, NewRenderer, is clear, so ppu_runLine dispatches to
+   * ppu_draw_whole_line_legacy, and ppu_legacy.c has ZERO overlay
+   * references. SC_NEW_RENDERER=1 does not flip it either. Overlay
+   * extraction is a new-renderer feature and this project runs the legacy
+   * path -- the same reason the note on s_render_flags gives for the
+   * widescreen clamp fields being dead.
+   *
+   * So centring waits on either the new renderer or an overlay
+   * implementation in the legacy one. Do not retry it at this layer. */
+  const bool advisor_page = PPU_mathEnabled(g_ppu) && PPU_halfColor(g_ppu) &&
+                            PPU_addSubscreen(g_ppu) && !PPU_subtractColor(g_ppu) &&
+                            (g_ppu->cgadsub & 0x20u) && g_ppu->cgram[0] == 0;
+  /* Subtractive colour math, the shape the map screens use.
+   *
+   * The advisor pages are cgadsub $60 -- additive, halved -- and `halve`
+   * below reproduces them. The LAND VALUE / map screens are cgadsub $a3:
+   * SUBTRACT, not halved, operand = subscreen. `halve` does not fire, so the
+   * extension stayed at full brightness while the guest darkened its own
+   * city. Reported from play as the map screen's right side not being
+   * darker the way the advisor pages are.
+   *
+   * The subscreen is not exposed by the runner, so it cannot be applied
+   * directly. It does not have to be: the host strip spans the guest's OWN
+   * columns, so at the same screen x both draw the same cell, and the
+   * difference IS what the math did. Measured on savestate_4 at a clean
+   * city-vs-city sample: host b5,94,73 -> guest 7b,5a,39, a difference of
+   * exactly 58 on all three channels. A uniform subtrahend.
+   *
+   * So derive it per frame, per channel, as the MODE of (host - guest) over
+   * the overlap. The mode matters: the overlap also contains HUD, the panel
+   * and sprites, where the two legitimately differ, and a mean or median is
+   * dragged around by them -- which is what sank two earlier attempts to fit
+   * a ratio off the frame (36%% too dark, and a tint on other pages). The
+   * modal offset is the value the majority of city pixels agree on, and it
+   * is zero on every screen that does no subtraction, so this is inert
+   * elsewhere -- in normal gameplay guest and host are pixel-identical.
+   *
+   * SC_EXT_SUB=0 disables it. */
+  int dim_r = 0, dim_g = 0, dim_b = 0;
+  { static int on = -1;
+    if (on < 0) { const char *e = getenv("SC_EXT_SUB");
+                  on = (e && *e) ? (*e != '0') : 1; }
+    /* Only at FULL brightness.
      *
-     * With the layers clamped, the guest draws its UI into the authentic 256
-     * columns, which sit centred at x = s_ws_extra .. s_ws_extra+255 in a
-     * widened frame. Reading with that offset lands the block flush against
-     * the left edge, so the toolbar and status bar stay where they belong and
-     * the extra width goes entirely to map. */
-    const int ui_shift = s_ws_extra;
-    for (int y = 0; y < kVideoHeight; y++) {
-      uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
-      const uint32_t *hud = (const uint32_t *)(s_hud_pixels + (size_t)y * s_video_pitch);
-      for (int x = 0; x < s_video_w; x++) {
-        int sxp = x + ui_shift;
-        if (sxp >= s_video_w) break;
-        uint32_t p = hud[sxp];
-        /* 24-bit compare. This keying was
-         * written to make a fade match by treating backdrop pixels as
-         * transparent, but s_backdrop_argb carries 0xFF alpha while the
-         * rendered pixels carry 0, so `p != s_backdrop_argb` was ALWAYS
-         * true and only the black test ever did anything. */
-        if ((p & 0x00FFFFFFu) != (s_backdrop_argb & 0x00FFFFFFu) &&
-            (p & 0x00FFFFFFu) != 0) dst[x] = p;
+     * The subtrahend is derived from the difference between the guest's own
+     * columns and the host render of the same cells. During a fade those two
+     * do not track each other exactly, and the estimator reads the gap as
+     * colour math -- so the margin was dimmed on top of the fade and lagged
+     * behind it, then snapped level when the fade finished. Measured leaving
+     * the loan screen: the margin/guest ratio falls 1.06 -> 0.42 across the
+     * fade-in and jumps back to 1.06 the frame it completes. Reported from
+     * play as the fading not being synchronous.
+     *
+     * Every screen that really does subtract sits at brightness 15, so
+     * requiring that costs nothing and removes the whole class: with the
+     * estimator off the ratio holds at 1.06 for every frame of the fade. */
+    /* Not while the picture is CHANGING BRIGHTNESS.
+     *
+     * The subtrahend is derived from the difference between the guest's own
+     * columns and the host render of the same cells. Mid-fade those two do
+     * not track exactly, the estimator reads the gap as colour math, and the
+     * margin gets dimmed on top of the fade -- so it lags and then snaps
+     * level when the fade ends. Measured leaving the loan screen: the
+     * margin/guest ratio falls 1.06 -> 0.42 across the fade-in and returns to
+     * 1.06 the frame it completes. Reported from play as the fading not being
+     * synchronous.
+     *
+     * Testing brightness == 15 does NOT catch it: this game fades per
+     * scanline, so the register still reads 15 when the compositor runs.
+     * What does catch it is the master brightness moving at all between
+     * frames -- a screen that genuinely subtracts sits still. */
+    static int last_bright = -1;
+    const int bright_now = (int)g_ppu->inidisp;
+    const bool settled = (last_bright == bright_now);
+    last_bright = bright_now;
+    if (on && settled &&
+        PPU_mathEnabled(g_ppu) && PPU_subtractColor(g_ppu) &&
+        PPU_addSubscreen(g_ppu)) {
+      static int hr[256], hg[256], hb[256];
+      memset(hr, 0, sizeof hr); memset(hg, 0, sizeof hg); memset(hb, 0, sizeof hb);
+      long n = 0, eq = 0;
+      for (int y = 0; y + 1 + fy < kVideoHeight; y += 2) {
+        const uint32_t *g =
+            (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
+        const uint32_t *s = (const uint32_t *)(
+            s_hostmap_px + (size_t)(y + 1 + fy) * s_hostmap_pitch);
+        for (int x = 0; x < kVideoWidth; x += 2) {
+          const uint32_t gc = g[x + s_ws_extra] & 0xffffffu;
+          const uint32_t sc = s[x + fx + 8] & 0xffffffu;
+          if (!sc) continue;                  /* nothing drawn there */
+          if (gc == sc) { eq++; continue; }   /* untouched by the math */
+          const int dr = (int)((sc >> 16) & 0xff) - (int)((gc >> 16) & 0xff);
+          const int dg = (int)((sc >> 8) & 0xff) - (int)((gc >> 8) & 0xff);
+          const int db = (int)(sc & 0xff) - (int)(gc & 0xff);
+          if (dr < 0 || dg < 0 || db < 0) continue;   /* not a subtraction */
+          /* Skip CLAMPED channels. Where the subtraction drove a channel to
+           * zero the observed difference is smaller than the real subtrahend
+           * -- savestate_0 shows host 00,31,ad -> guest 00,00,73, i.e. diffs
+           * 0,49,58 where the true value is 58 on all three and green simply
+           * ran out of range. Counting those biases each channel downward by
+           * a different amount, which is a colour cast rather than a dimming.
+           * Only an unclamped channel witnesses the true subtrahend. */
+          if ((gc >> 16) & 0xff) { hr[dr]++; n++; }
+          if ((gc >> 8) & 0xff)  { hg[dg]++; }
+          if (gc & 0xff)         { hb[db]++; }
+        }
+      }
+      if (n > 200) {
+        int br = 0, bg = 0, bb = 0;
+        for (int i = 1; i < 256; i++) {
+          if (hr[i] > hr[br]) br = i;
+          if (hg[i] > hg[bg]) bg = i;
+          if (hb[i] > hb[bb]) bb = i;
+        }
+        /* Only accept a subtrahend the majority actually agrees on. Below
+         * that the frame is not doing a uniform subtraction and guessing
+         * would tint it. */
+        /* A channel with too few unclamped witnesses cannot be estimated;
+         * fall back to whichever channel does have agreement, since the
+         * subtrahend measured here is uniform across channels. */
+        /* If a large share of the overlap is IDENTICAL, the math is not
+         * subtracting anything and the differing pixels are HUD, sprites and
+         * seam noise. Their modal difference is meaningless -- measured, it
+         * comes out at 107 on savestate_7, where the probe shows guest and
+         * host pixel-identical and the true answer is zero. cgadsub having
+         * the subtract bit set is NOT sufficient: savestate_7 is $b3 and
+         * subtracts nothing. Only the frame can say. */
+        if (eq * 4 > n) { dim_r = dim_g = dim_b = 0; }
+        else {
+        long tr = 0, tg = 0, tb = 0;
+        for (int i = 0; i < 256; i++) { tr += hr[i]; tg += hg[i]; tb += hb[i]; }
+        const int ok_r = tr > 200 && hr[br] * 4 > tr;
+        const int ok_g = tg > 200 && hg[bg] * 4 > tg;
+        const int ok_b = tb > 200 && hb[bb] * 4 > tb;
+        if (ok_r || ok_g || ok_b) {
+          const int best = ok_b ? bb : (ok_g ? bg : br);
+          dim_r = ok_r ? br : best;
+          dim_g = ok_g ? bg : best;
+          dim_b = ok_b ? bb : best;
+        }
+        }
+      }
+    } }
+  /* Force blank hides the extension too.
+   *
+   * The host map dims with a fade because pal_entry() runs its colours
+   * through the PPU's brightnessMult table. That covers brightness, and
+   * misses the OTHER way a SNES shows nothing: INIDISP bit 7.
+   *
+   * The game ends a fade-out by writing $8f -- force blank ON, brightness
+   * restored to 15 -- so it can rebuild the screen unseen. Measured across
+   * the Information -> View Mode transition: inidisp steps 09, 08 ... 01 with
+   * both halves fading together, and then at the very moment the guest goes
+   * black the extension jumps back to FULL brightness for 14 frames, because
+   * brightnessMult[15] is exactly what it was before the fade started.
+   * Reported from play as the widescreen fading to black, returning to full
+   * brightness, and only then being overwritten by the wood.
+   *
+   * Brightness alone can never express this: the register says 15 and means
+   * nothing is displayed. */
+  const bool blanked = PPU_forcedBlank(g_ppu) != 0;
+  uint32_t s_margin_backdrop;
+  { const uint16_t bd = g_ppu->cgram[0];
+    const uint8_t *bm = g_ppu->brightnessMult;
+    s_margin_backdrop = 0xff000000u | ((uint32_t)bm[bd & 31] << 16) |
+                        ((uint32_t)bm[(bd >> 5) & 31] << 8) | bm[(bd >> 10) & 31]; }
+  const bool halve = advisor_page;   /* same test, computed above */
+  { static int md = -1;
+    if (md < 0) { const char *e = getenv("SC_MATH_DIAG"); md = (e && *e) ? 1 : 0; }
+    if (md) { static int nf; if (++nf % 40 == 0)
+      fprintf(stderr, "[math] halve=%d en=%d half=%d addsub=%d sub=%d cgadsub=%02x cgwsel=%02x bd=%04x\n",
+              (int)halve, (int)(PPU_mathEnabled(g_ppu) != 0),
+              (int)(PPU_halfColor(g_ppu) != 0),
+              (int)(PPU_addSubscreen(g_ppu) != 0),
+              (int)(PPU_subtractColor(g_ppu) != 0),
+              g_ppu->cgadsub, g_ppu->cgwsel, g_ppu->cgram[0]); } }
+  /* Cover the guest's leading sliver while it is showing wrapped content.
+   * The host render already spans the guest's own columns, so this is just
+   * a matter of where the strip starts. Zero on every frame the guest's own
+   * edge is correct, which is most of them. */
+  const int lead = (s_seam_lead_cover > 0 && s_seam_lead_cover <= 8)
+                       ? s_seam_lead_cover : 0;
+  const int x_from = kVideoWidth - lead;
+  /* The same cover on the other two leading edges. Unlike the right edge --
+   * which widescreen puts in open picture next to the join -- these sit where
+   * the HUD lives, so they paint over the toolbar and the status bar for the
+   * two or three frames they are active. SC_SEAM_LEAD_LT=0 turns them off
+   * without disturbing the right edge. */
+  static int lt_on = -1;
+  /* Off by default. These were never reproduced, and they cover the two
+   * edges where the HUD lives -- the toolbar and the status bar -- so when
+   * they do fire they paint host terrain over it. Reported from play as
+   * ghosting on HUD elements. SC_SEAM_LEAD_LT=1 re-enables them. */
+  if (lt_on < 0) { const char *e = getenv("SC_SEAM_LEAD_LT");
+                   lt_on = (e && *e) ? (atoi(e) != 0) : 0; }
+  const int lead_l = (lt_on && s_seam_lead_left > 0 && s_seam_lead_left <= 8)
+                         ? s_seam_lead_left : 0;
+  const int lead_t = (lt_on && s_seam_lead_top > 0 && s_seam_lead_top <= 8)
+                         ? s_seam_lead_top : 0;
+  const int pp = ws_passepartout() ? kPassePartout : 0;
+  const int left_cover = pp > lead_l ? pp : lead_l;
+  const int x_start = pp ? (kVideoWidth - pp) : x_from;
+  /* Render one cell further left than needed, and skip it when sampling.
+   * The overlay pass draws a building's upper half one CELL up and left, so
+   * the leftmost visible column needs a neighbour outside the window to
+   * receive an overhang from. Without it, roofs pop in at the left edge as
+   * cells scroll into the render -- measured as the left 8 px failing to
+   * translate on 11-34%% of frames while the rest of the picture was exact. */
+  /* SC_COMPOSE_DIAG: the compositor samples a CELL-granular render with a
+   * fine offset. If the cell step and the fx wrap ever land on different
+   * frames, the sampled window jumps 8 px and back at the tile cadence. */
+  { static int cd = -1;
+    if (cd < 0) { const char *e = getenv("SC_COMPOSE_DIAG"); cd = (e && *e) ? 1 : 0; }
+    if (cd) { static int nf; static int psx = -9999;
+      nf++;
+      fprintf(stderr, "[compose] inidisp=%02x blank=%d bright=%d f=%d sx=%d sy=%d dsx=%d fx=%d fy=%d adj=%d,%d\n",
+              g_ppu->inidisp, (int)(PPU_forcedBlank(g_ppu) != 0),
+              (int)PPU_brightness(g_ppu),
+              nf, sx, sy, psx == -9999 ? 0 : sx - psx, fx, fy,
+              s_hostmap_adj_x, s_hostmap_adj_y);
+      psx = sx; } }
+  int use_sx = sx, use_sy = sy, use_fx = fx, use_fy = fy;
+  /* Hold the margins on the city being replaced.
+   *
+   * Loading a city from the in-city dialog writes the new map into WRAM while
+   * the dialog and the old city are still on screen; the game fades out, and
+   * shows the new city only when it fades back in. This renderer reads the map
+   * from WRAM, so it drew the new city into the margins at once, beside the
+   * old one, for the thirty-odd frames before the fade. Reported from play as
+   * the widescreen not waiting for the fade to black (savestate 3, loading the
+   * practice city).
+   *
+   * The game writes the new map over several frames, 500 to 3000 cells each,
+   * where play changes fewer than 50 (measured over 6000 frames of a
+   * scenario). So a frame changing more than 300 cells raises a suspicion:
+   * from then on the margins draw the map as it was before it, and once 4000
+   * cells differ from that copy they are held on it -- still through the
+   * current brightness, so they fade out with the picture -- until the screen
+   * has been black (force blank or brightness 0) and lights up again. Ten
+   * quiet frames short of 4000 drop the suspicion. A frame on which this
+   * screen was not live ends either state, and so does a time limit.
+   *
+   * SC_SWAP_HOLD=0 turns it off; SC_SWAP_DIAG prints what it sees. */
+  { static int on = -1, diag = 0;
+    if (on < 0) { const char *e = getenv("SC_SWAP_HOLD");
+                  on = (e && *e) ? (*e != '0') : 1;
+                  const char *d = getenv("SC_SWAP_DIAG"); diag = (d && *d) ? 1 : 0; }
+    static uint8_t base_map[SC_MAPVIEW_MAP_BYTES], base_pal[SC_MAPVIEW_PAL_BYTES];
+    static uint8_t prev_map[SC_MAPVIEW_MAP_BYTES], scratch_pal[SC_MAPVIEW_PAL_BYTES];
+    static int base_sx, base_sy, base_fx, base_fy;
+    static bool have, suspect, hold, dark;
+    static int quiet, held;
+    static uint64_t last_frame = ~(uint64_t)0;
+    enum { kSwapFrame = 300, kSwapTotal = 4000, kSwapQuiet = 10, kSwapMaxFrames = 900 };
+    if (s_frames != last_frame + 1) { have = suspect = hold = false; }
+    last_frame = s_frames;
+    const bool black = blanked || PPU_brightness(g_ppu) == 0;
+    if (!on) have = suspect = hold = false;
+    else if (!have) {
+      ScMapView_Snapshot(base_map, base_pal);
+      ScMapView_Snapshot(prev_map, scratch_pal);
+      base_sx = sx; base_sy = sy; base_fx = fx; base_fy = fy;
+      have = true;
+    } else {
+      const int step = ScMapView_ChangedCells(prev_map);
+      ScMapView_Snapshot(prev_map, scratch_pal);
+      if (!hold) {
+        if (step > kSwapFrame && !suspect) { suspect = true; quiet = 0; }
+        if (suspect) {
+          const int total = ScMapView_ChangedCells(base_map);
+          if (diag)
+            fprintf(stderr, "[swap] f=%llu step %d total %d%s\n",
+                    (unsigned long long)s_frames, step, total,
+                    total > kSwapTotal ? " -> hold" : "");
+          if (total > kSwapTotal) { hold = true; suspect = false; dark = false; held = 0; }
+          else if (step > kSwapFrame) quiet = 0;
+          else if (++quiet >= kSwapQuiet) suspect = false;
+        }
+      } else {
+        if (black) dark = true;
+        else if (dark) hold = false;       /* lit again: the new city is showing */
+        if (++held > kSwapMaxFrames) hold = false;
+        if (diag && !hold)
+          fprintf(stderr, "[swap] f=%llu hold released after %d frames\n",
+                  (unsigned long long)s_frames, held);
+      }
+      if (!suspect && !hold) {
+        memcpy(base_map, prev_map, sizeof base_map);
+        memcpy(base_pal, scratch_pal, sizeof base_pal);
+        base_sx = sx; base_sy = sy; base_fx = fx; base_fy = fy;
+      }
+    }
+    /* The load moves the view as well, so the copy is drawn where it was. */
+    const bool frozen = suspect || hold;
+    ScMapView_SetSource(frozen ? base_map : NULL, frozen ? base_pal : NULL);
+    if (frozen) { use_sx = base_sx; use_sy = base_sy; use_fx = base_fx; use_fy = base_fy; }
+  }
+  const int cols = (s_video_w + 8 + 7) / 8 + 1, rows = (kVideoHeight + 16 + 7) / 8;
+  const bool drawn = ScMapView_Render(s_hostmap_px, s_hostmap_pitch, cols, rows,
+                                      use_sx - 1, use_sy);
+  ScMapView_SetSource(NULL, NULL);
+  if (!drawn) {
+    memcpy(s_video_pixels, s_guest_pixels, (size_t)s_video_pitch * kVideoHeight);
+    return;
+  }
+
+  /* SC_DIM_PROBE: the host strip spans the guest's OWN columns, so at the
+   * same screen x the two draw the same city cell. Any difference is what
+   * the guest's colour math did to it -- measured, not inferred. */
+  { static int dp = -1;
+    if (dp < 0) { const char *e = getenv("SC_DIM_PROBE"); dp = (e && *e) ? 1 : 0; }
+    if (dp) { static int nf; if (++nf % 60 == 0) {
+      fprintf(stderr, "[dim] halve=%d cgadsub=%02x sub=%d,%d,%d  ",
+              (int)halve, g_ppu->cgadsub, dim_r, dim_g, dim_b);
+      for (int k = 0; k < 4; k++) {
+        const int yy = 190 + k * 8, xx = 150 + k * 40;
+        const uint32_t *g =
+            (const uint32_t *)(s_guest_pixels + (size_t)yy * s_video_pitch);
+        const uint32_t *s = (const uint32_t *)(
+            s_hostmap_px + (size_t)(yy + 1 + use_fy) * s_hostmap_pitch);
+        fprintf(stderr, "x%d g=%06x h=%06x  ", xx,
+                g[xx + s_ws_extra] & 0xffffff, s[xx + use_fx + 8] & 0xffffff);
+      }
+      fputc(10, stderr);
+    } } }
+  for (int y = 0; y < kVideoHeight; y++) {
+    uint32_t *dst = (uint32_t *)(s_video_pixels + (size_t)y * s_video_pitch);
+    const uint32_t *gst =
+        (const uint32_t *)(s_guest_pixels + (size_t)y * s_video_pitch);
+    const uint32_t *src =
+        (const uint32_t *)(s_hostmap_px + (size_t)(y + 1 + use_fy) * s_hostmap_pitch);
+    memcpy(dst, gst + s_ws_extra, (size_t)kVideoWidth * 4);   /* guest */
+    if (y < lead_t)
+      for (int x = 0; x < kVideoWidth; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
+    else if (halve)
+      for (int x = 0; x < left_cover; x++) {
+        const uint32_t c = blanked ? 0xff000000u : src[x + use_fx + 8];
+        dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
+      }
+    else
+      for (int x = 0; x < left_cover; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
+    if (halve)
+      for (int x = x_start; x < s_video_w; x++) {
+        const uint32_t c = blanked ? 0xff000000u : src[x + use_fx + 8];
+        dst[x] = (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
+      }
+    else
+      for (int x = x_start; x < s_video_w; x++) dst[x] = blanked ? 0xff000000u
+                        : sc_ext_sub(src[x + use_fx + 8], dim_r, dim_g, dim_b);
+    /* Sprites the host map cannot draw. dst[x] past the guest's edge was
+     * rendered by the PPU at x + s_ws_extra, and only s_ws_extra px of the
+     * wider strip has PPU coverage. Transparency is RGB-only: the render
+     * buffer leaves alpha clear, so comparing the whole word makes every
+     * backdrop pixel look opaque and paints the margin solid black. */
+    if (s_ws_obj_layer && s_margin_obj_on && !blanked) {
+      const uint32_t *ol =
+          (const uint32_t *)(s_ws_obj_layer + (size_t)y * s_video_pitch);
+      int hi = kVideoWidth + s_ws_extra;
+      if (hi > s_video_w) hi = s_video_w;
+      for (int x = kVideoWidth; x < hi; x++) {
+        const uint32_t c = ol[x + s_ws_extra];
+        if ((c & 0x00ffffffu) != (s_margin_backdrop & 0x00ffffffu))
+          dst[x] = 0xff000000u | (c & 0x00ffffffu);
       }
     }
   }
@@ -2794,13 +5929,23 @@ static void file_sli_read(SaveLoadInfo *sli, void *data, size_t n) {
   if (fs->ok && fread(data, 1, n, fs->f) != n) fs->ok = false;
 }
 
-/* The shared PPU snapshot contains picture registers and memories, but omits
- * its CPU-port latches. In particular, losing VMAIN's increment-on-high bit
- * shifts subsequent tile/palette uploads after a load. Keep that native-layout
- * bus region and our host clock/HDMA walker alongside the machine snapshot.
- * These files, like the underlying snapshot, are local to this engine build. */
+/* A versioned format, from the adaptive-renderer PR (blackerking/
+ * UrbanRecomp#1). The device snapshot holds the PPU's registers and
+ * memories but not its CPU-port latches -- the VRAM pointer and VMAIN's
+ * increment-on-high bit among them -- so a state loaded where the game was
+ * mid-upload sent the following tile and palette uploads to the wrong place.
+ * That is the old "a state taken on a report screen breaks up after loading".
+ * The latches (vramPointer up to the widescreen fields), this host's master
+ * clock and its HDMA walker are written after the old contents, behind a
+ * header naming their sizes, so a state from a build whose layout differs is
+ * refused rather than misread.
+ *
+ * States without the header still load, with a warning: they are what every
+ * bug report so far was filed against. */
 enum { kScPpuBusBytes = offsetof(Ppu, extraLeftCur) - offsetof(Ppu, vramPointer) };
-static const uint32_t kScStateHeader[] = {0x54534353, 1, kScPpuBusBytes, sizeof(s_hdma)};
+static const uint32_t kScStateHeader[] = {0x54534353u /* "SCST" */, 1,
+                                          kScPpuBusBytes, sizeof(s_hdma)};
+
 static bool save_state(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) return false;
@@ -2808,7 +5953,7 @@ static bool save_state(const char *path) {
   fs.base.func = file_sli_write;
   fs.f = f;
   fs.ok = true;
-  file_sli_write(&fs.base, (void *)kScStateHeader, sizeof(kScStateHeader));
+  fs.base.func(&fs.base, (void *)kScStateHeader, sizeof(kScStateHeader));
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
@@ -2823,24 +5968,56 @@ static bool load_state(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return false;
   uint32_t header[4];
-  if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
-      memcmp(header, kScStateHeader, sizeof(header))) {
-    fprintf(stderr, "state: incompatible format; create a new state with this build\n");
-    fclose(f); return false;
+  bool versioned = fread(header, 1, sizeof(header), f) == sizeof(header) &&
+                   header[0] == kScStateHeader[0];
+  if (versioned && memcmp(header, kScStateHeader, sizeof(header)) != 0) {
+    fprintf(stderr, "state: %s is from a build with another layout "
+                    "(version %u, %u latch bytes, %u HDMA bytes); save it again "
+                    "with this build\n", path, (unsigned)header[1],
+            (unsigned)header[2], (unsigned)header[3]);
+    fclose(f);
+    return false;
+  }
+  if (!versioned) {
+    fprintf(stderr, "state: %s is in the old format, without the PPU port "
+                    "latches; uploads right after loading can come out wrong. "
+                    "Save it again with this build.\n", path);
+    fseek(f, 0, SEEK_SET);
   }
   FileSli fs;
   fs.base.func = file_sli_read;
   fs.f = f;
   fs.ok = true;
+  ScSram_Hold();   /* the saved cities on disk stay the player's */
   snes_saveload(g_snes, &fs.base);
   interp816_saveload(g_cpu, &fs.base);
   fs.base.func(&fs.base, &s_frames, sizeof(s_frames));
-  fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
-  fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
-  fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
-  g_ppu->lastBrightnessMult = 0xff; /* rebuild derived color lookup tables */
+  if (versioned) {
+    fs.base.func(&fs.base, &g_ppu->vramPointer, kScPpuBusBytes);
+    fs.base.func(&fs.base, &g_master_cycles, sizeof(g_master_cycles));
+    fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
+  }
+  g_ppu->lastBrightnessMult = 0xff;   /* rebuild the brightness tables */
+  ScSram_Release();
   bool ok = fs.ok;
   fclose(f);
+  /* Hand the restored registers to the fiber, HERE rather than at the call
+   * sites.
+   *
+   * load_state restores g_snes and the Interp816, and knows nothing about the
+   * separate CpuState the fiber actually executes. Without this the fiber
+   * keeps running boot registers over mid-game WRAM and wedges spinning on the
+   * BNE at $05935A in the block-copy region.
+   *
+   * That was already known and already fixed -- but only on the --load-state
+   * command-line path. The interactive slot keys and the menu loader called
+   * load_state directly and got the stale registers, so loading a state from
+   * inside a running fiber session hung the game. Doing it inside load_state
+   * means a new call site cannot miss it, which is exactly how this one was
+   * missed. */
+#ifdef SC_AOT_TIER
+  if (ok && sc_fiber_active()) ScFiberDrive_AdoptInterpState(g_cpu);
+#endif
   return ok;
 }
 
@@ -2889,13 +6066,12 @@ static bool add_input2_event(const char *text) {
 }
 
 /* One-button macro for the documented debug-menu entry code (Peter's
- * SimCity SNES Guide, crediting Corey Miller/"ZaphodBee"): a fixed
+ * SNES guide for the game, crediting Corey Miller/"ZaphodBee"): a fixed
  * 16-step sequence read on controller 2 while on the "Goodbye! See you
- * soon" quit-confirmation screen. Static ROM analysis found no code
- * anywhere in this ROM dump reading a second controller (no $421A/$421B
- * or manual $4016/$4017 access), so this is unverified for this specific
- * ROM revision -- this macro exists to test it live/headlessly rather
- * than requiring 16 hand-timed presses. Each step is held for
+ * soon" quit-confirmation screen. It opens the debug menu -- confirmed in
+ * play (2026-09-17), although static analysis had found no code reading a
+ * second controller (no $421A/$421B or manual $4016/$4017 access). The
+ * macro saves 16 hand-timed presses. Each step is held for
  * kP2StepHold frames with a kP2StepGap release between steps so the
  * game's edge-detection (if any) sees 16 distinct presses, not one held
  * button. */
@@ -3037,10 +6213,8 @@ static void menu_action_clear_milestones(void) {
  * left alone: they are not scenarios and have nothing to win.
  *
  * SRAM lives in the cart model (`cart->ram`), not in g_ram, so it has to go
- * through the bus rather than a direct array write -- and it is not persisted
- * to disk by this host, so the unlock lasts for the session and is captured
- * by save states (which snapshot every device model), but does not survive a
- * fresh launch on its own. */
+ * through the bus rather than a direct array write. The windowed game keeps
+ * SRAM on disk (src/sc_sram.c), so the unlock is saved like any city. */
 #define kWinMarkBits 0x007fu   /* scenarios 0-6 */
 static bool s_unlock_all;
 
@@ -3128,8 +6302,8 @@ static void apply_frame_input(uint64_t frame) {
   g_snes->input2_currentState = input2;
 }
 
-/* ── host-mouse cursor control, ported from the community "SimCity mouse
- * patch" (https://github.com/Selicre/simcity-mouse, main.asm/mouse.asm).
+/* ── host-mouse cursor control, ported from the community mouse patch
+ * by Selicre (https://github.com/Selicre/simcity-mouse, main.asm/mouse.asm).
  * That patch hooks the NMI to bit-bang an actual SNES mouse's serial
  * protocol on controller port 2 and accumulates the result into two WRAM
  * bytes it identified by testing: $7E01EB (X) and $7E01ED (Y) -- the same
@@ -3223,7 +6397,7 @@ static void apply_mouse_delta(int dx, int dy) {
  *
  * ar-recomp's own overlay decodes the ROM's actual dialog font/frame
  * graphics for an in-theme look -- skipped here as purely cosmetic
- * ActRaiser-specific work (not something SimCity's ROM has an equivalent
+ * ActRaiser-specific work (not something this game's ROM has an equivalent
  * of anyway). This uses a small hand-authored 3x5 bitmap font instead,
  * the same kind of fallback ar-recomp itself falls back to when ROM font
  * decoding isn't available. It only covers the character set this menu's
@@ -3348,7 +6522,6 @@ static void trigger_disaster_bit(unsigned bit, const char *what) {
  * consume them, so execution stays on paths the game really takes. */
 /* The loaded ROM image, so the UFO population gate can be lifted for the
  * duration of a triggered event. Set in main() once the ROM is read. */
-static bool s_rom_is_us = true;
 static uint8_t *s_rom_data;
 static uint32_t s_rom_size;
 
@@ -3568,8 +6741,6 @@ static SettingDesc s_settings[] = {
   { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "REPLAY MENU",           kSettingBool, &s_replay_menu,         0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
-  { "MAPGEN TURBO",          kSettingCycle, &s_mapgen_turbo,        0,    NULL,
-    kMapgenTurbos, (int)(sizeof(kMapgenTurbos) / sizeof(kMapgenTurbos[0])) },
   { "CHEATS",                kSettingHeader, NULL, 0, NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
@@ -3790,10 +6961,31 @@ static void render_settings_menu(SDL_Renderer *renderer) {
  * its slot, practice keeps its map, the ROM is untouched, and Sylt still loads
  * through the ROM's own path. */
 
+/* A data file shipped with the program (sylt_graphics/...): from the working
+ * directory, where a portable folder keeps it, else from the program's own
+ * directory -- where an installed build keeps it, since there the working
+ * directory is the player's data folder instead. */
+static FILE *sc_fopen_data(const char *rel) {
+  FILE *f = fopen(rel, "rb");
+  if (f) return f;
+#if SNESRECOMP_SDL3
+  const char *base = SDL_GetBasePath();
+#else
+  char *base = SDL_GetBasePath();
+#endif
+  if (!base) return NULL;
+  char path[1024];
+  snprintf(path, sizeof path, "%s%s", base, rel);
+#if !SNESRECOMP_SDL3
+  SDL_free(base);
+#endif
+  return fopen(path, "rb");
+}
+
 static void load_sylt_map(void) {
   const char *path = getenv("SC_SYLT_MAP");
-  if (!path) path = "sylt_graphics/sylt_map.bin";
-  FILE *f = fopen(path, "rb");
+  FILE *f = path ? fopen(path, "rb")
+                 : sc_fopen_data(path = "sylt_graphics/sylt_map.bin");
   if (!f) return;                       /* absent is not an error */
   if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
   const long n = ftell(f);
@@ -3855,10 +7047,191 @@ static void load_sylt_map(void) {
 static uint16_t *s_sylt_tiles;      /* tiles_w * tiles_h * 8 words */
 static int s_sylt_tw, s_sylt_th;
 
+/* Sylt's card is this project's own artwork and draws its disaster line as
+ * pixels -- "Coastal" on row 6, "Flooding" on row 7 -- so the selector packet
+ * patch, which only repoints tilemap cells at shipped strips, cannot reach
+ * it. When a patch is loaded it carries the donor's word for the same
+ * disaster (the strip Rio's card uses) as six tiles of artwork. Row 7 is
+ * blanked from this card's own background rather than the donor's, so the
+ * one-line German word does not leave "Flooding" underneath it. */
+/* -- SC_WRAM_WATCH: name the instruction that writes a WRAM range ---------
+ *
+ * SC_WRAM_WATCH="LO:HI" (hex g_ram offsets, HI optional) prints every write
+ * in that range with the 65816 PC of the instruction that made it.
+ *
+ * This exists because none of the runtime's own watchpoints work in this
+ * target. cpu_trace's WRAM watch, SNESRECOMP_WRITE_WATCH and
+ * SNESRECOMP_WRAM_WATCH all sit on the AOT/CpuState write path
+ * (cpu_write8/16), and this host executes through the interp816 core, so
+ * those functions are never called -- a watch on $7E:2000, written every
+ * frame, stayed silent. See docs/ROM_MAP.md.
+ *
+ * What DOES reach the interpreter's stores is snes.c's own hook: all three
+ * direct-WRAM store sites call snes_note_direct_wram_write(), which forwards
+ * to a settable function pointer. So this needs no submodule change at all;
+ * it just installs a callback the runtime already offers.
+ *
+ * The PC is g_interp816_cur_pc, the interpreter's current instruction -- so
+ * a hit is not "something changed this", it is the address of the store. */
+extern uint32_t g_interp816_cur_pc;
+static uint32_t s_ww_lo, s_ww_hi; static long s_ww_hits, s_ww_cap = 400;
+/* SC_WRAM_WATCH_FROM=<frame>: the boot clear loop writes every byte of WRAM
+ * at frame 2 and would otherwise spend the whole budget saying so. */
+static unsigned long long s_ww_from;
+
+static void sc_wram_write_probe(uint32_t off, uint8_t val, const char *via) {
+  if (off < s_ww_lo || off > s_ww_hi || s_ww_hits >= s_ww_cap) return;
+  if (s_frames < s_ww_from) return;
+  fprintf(stderr, "[wramwrite] f%llu  $%05X = %02X  by %02X:%04X  via %s\n",
+          (unsigned long long)s_frames, off, val,
+          (unsigned)((g_interp816_cur_pc >> 16) & 0xff),
+          (unsigned)(g_interp816_cur_pc & 0xffff), via ? via : "-");
+  s_ww_hits++;
+}
+
+/* -- SC_DMA_VRAM: every VRAM DMA, with the WRAM buffer it came from -------
+ *
+ * SC_DMA_VRAM=1 lists each VRAM transfer as source -> destination. Optional
+ * SC_DMA_VRAM_AT=<hex vmadd> reports only transfers covering that VRAM word.
+ *
+ * For finding where a screen's text is composed. The status/advisor block is
+ * ROM text (docs/ROM_MAP.md) but how the game indexes it is unknown, and
+ * unlike the building labels it draws to a tilemap rather than to the sprite
+ * staging buffer -- so SC_WRAM_WATCH has nothing to watch until the WRAM
+ * buffer behind that tilemap is known. This names it: the DMA source IS that
+ * buffer, and SC_WRAM_WATCH pointed there then names the writing routine. */
+static uint32_t s_dv_at = 0xffffffffu;
+
+static void sc_dma_vram_probe(uint8_t aBank, uint16_t aAdr,
+                              uint16_t vmadd, uint16_t size) {
+  const uint32_t words = size ? (uint32_t)size / 2u : 0x8000u;
+  if (s_dv_at != 0xffffffffu &&
+      !(vmadd <= s_dv_at && s_dv_at < vmadd + words)) return;
+  fprintf(stderr, "[dmavram] f%llu $%02x  $%02X:%04X -> vram $%04X  %u bytes  (%u words)\n",
+          (unsigned long long)s_frames, g_ram[0x14], aBank, aAdr, vmadd,
+          size ? size : 0x10000u, words);
+}
+
+/* -- SC_VRAM_WRITE_WATCH: name the instruction that writes a VRAM range ---
+ *
+ * SC_VRAM_WRITE_WATCH="LO:HI" (hex VRAM WORD addresses) prints each CPU
+ * write through $2118/$2119 in that range with the 65816 PC behind it.
+ *
+ * The counterpart of SC_WRAM_WATCH, and needed because the status text box
+ * has no WRAM staging buffer to watch: SC_DMA_VRAM showed there is no
+ * per-frame tilemap DMA in game at all, so the text is written straight to
+ * VRAM. The debug server does carry a VRAM trace, but it is gated on
+ * SNESRECOMP_REVERSE_DEBUG, allocates gigabytes of ring, and records
+ * g_last_recomp_func -- an AOT function name, empty on the interp816 path
+ * this host runs. So ppu.c got a settable hook beside its existing
+ * debug_server_on_vram_write() calls, the same shape snes.c already had for
+ * WRAM, and this installs a callback on it. */
+static uint32_t s_vw_lo, s_vw_hi; static long s_vw_hits, s_vw_cap = 400;
+static unsigned long long s_vw_from;
+static int s_vw_nz;
+static int s_vw_scr = -1;
+
+static void sc_vram_write_probe(uint32_t byte_addr, uint8_t value) {
+  const uint32_t word = byte_addr >> 1;
+  if (word < s_vw_lo || word > s_vw_hi || s_vw_hits >= s_vw_cap) return;
+  if (s_frames < s_vw_from) return;
+  /* SC_VRAM_WRITE_WATCH_NZ=1 drops zero writes. Screens are blanked with a
+   * clear loop before anything is drawn, and it spends the whole budget
+   * in one frame -- 600 hits at 00:869D, all of them zeros. */
+  if (s_vw_nz && value == 0) return;
+  /* SC_VRAM_WRITE_WATCH_SCREEN=<hex $14>: only that screen. The title
+   * animates constantly and spends any budget before a later screen draws
+   * anything -- 4000 hits at 00:8D43 without ever reaching the menu. */
+  if (s_vw_scr >= 0 && g_ram[0x14] != (uint8_t)s_vw_scr) return;
+  fprintf(stderr, "[vramwrite] f%llu  $%04X%s = %02X  by %02X:%04X\n",
+          (unsigned long long)s_frames, word, (byte_addr & 1) ? "h" : "l",
+          value, (unsigned)((g_interp816_cur_pc >> 16) & 0xff),
+          (unsigned)(g_interp816_cur_pc & 0xffff));
+  s_vw_hits++;
+}
+
+static void sc_vram_write_watch_install(void) {
+  const char *e = getenv("SC_VRAM_WRITE_WATCH");
+  if (!e || !*e) return;
+  char *end = NULL;
+  s_vw_lo = (uint32_t)strtoul(e, &end, 16);
+  s_vw_hi = (end && *end == ':') ? (uint32_t)strtoul(end + 1, NULL, 16)
+                                 : s_vw_lo + 0x3f;
+  { const char *m = getenv("SC_VRAM_WRITE_WATCH_MAX");
+    if (m && *m) s_vw_cap = strtol(m, NULL, 0); }
+  { const char *f = getenv("SC_VRAM_WRITE_WATCH_FROM");
+    if (f && *f) s_vw_from = strtoull(f, NULL, 0); }
+  { const char *z = getenv("SC_VRAM_WRITE_WATCH_NZ");
+    s_vw_nz = (z && *z && *z != '0'); }
+  { const char *sc = getenv("SC_VRAM_WRITE_WATCH_SCREEN");
+    if (sc && *sc) s_vw_scr = (int)strtol(sc, NULL, 16); }
+  ppu_set_vram_write_log_hook(sc_vram_write_probe);
+  fprintf(stderr, "vram write watch: $%04X..$%04X, from frame %llu, up to %ld hits\n",
+          s_vw_lo, s_vw_hi, (unsigned long long)s_vw_from, s_vw_cap);
+}
+
+static void sc_dma_vram_install(void) {
+  const char *e = getenv("SC_DMA_VRAM");
+  if (!e || !*e || *e == '0') return;
+  { const char *at = getenv("SC_DMA_VRAM_AT");
+    if (at && *at) s_dv_at = (uint32_t)strtoul(at, NULL, 16); }
+  dma_set_vram_notify_hook(sc_dma_vram_probe);
+  if (s_dv_at != 0xffffffffu)
+    fprintf(stderr, "dma vram probe: only transfers covering vram $%04X\n",
+            s_dv_at);
+  else
+    fprintf(stderr, "dma vram probe: every VRAM transfer\n");
+}
+
+static void sc_wram_watch_install(void) {
+  const char *e = getenv("SC_WRAM_WATCH");
+  if (!e || !*e) return;
+  char *end = NULL;
+  s_ww_lo = (uint32_t)strtoul(e, &end, 16);
+  s_ww_hi = (end && *end == ':') ? (uint32_t)strtoul(end + 1, NULL, 16)
+                                 : s_ww_lo + 0x27;
+  { const char *m = getenv("SC_WRAM_WATCH_MAX");
+    if (m && *m) s_ww_cap = strtol(m, NULL, 0); }
+  { const char *f = getenv("SC_WRAM_WATCH_FROM");
+    if (f && *f) s_ww_from = strtoull(f, NULL, 0); }
+  snes_set_wram_write_log_hook(sc_wram_write_probe);
+  fprintf(stderr, "wram watch: $%05X..$%05X, from frame %llu, up to %ld hits\n",
+          s_ww_lo, s_ww_hi, (unsigned long long)s_ww_from, s_ww_cap);
+}
+
+static void sylt_apply_translated_line(void) {
+  if (!s_sylt_tiles || s_sylt_tw != 8 || s_sylt_th < 8) return;
+  if (s_scpk_count < 0) scpk_load();
+  const ScpkEntry *e = NULL;
+  for (int i = 0; i < s_scpk_count; i++)
+    if (s_scpk[i].src == 0xffffffu) { e = &s_scpk[i]; break; }
+  if (!e) return;
+  /* Both drawn lines go first, from each row's own leftmost tile, which is
+   * card background. Blanking both and letting the patch choose where to
+   * land keeps that choice in the tool rather than split across the two. */
+  for (int row = 6; row <= 7; row++) {
+    const int base = row * s_sylt_tw;
+    for (int tx = 1; tx < s_sylt_tw; tx++)
+      memcpy(&s_sylt_tiles[(size_t)(base + tx) * 8],
+             &s_sylt_tiles[(size_t)base * 8], 8 * sizeof(uint16_t));
+  }
+  int n = 0;
+  for (int k = 0; k < e->nspans; k++) {
+    const uint32_t slot = e->spans[k].off / 16u;
+    if (e->spans[k].len != 16 ||
+        slot >= (uint32_t)(s_sylt_tw * s_sylt_th)) continue;
+    for (int j = 0; j < 8; j++)
+      s_sylt_tiles[slot * 8 + j] =
+          (uint16_t)(e->spans[k].data[j * 2] | (e->spans[k].data[j * 2 + 1] << 8));
+    n++;
+  }
+  fprintf(stderr, "[sylt] disaster line replaced from the packet patch (%d tiles)\n", n);
+}
+
 static void load_sylt_card(void) {
   const char *path = getenv("SC_SYLT_CARD");
-  if (!path) path = "sylt_graphics/sylt_card.bin";
-  FILE *f = fopen(path, "rb");
+  FILE *f = path ? fopen(path, "rb")
+                 : sc_fopen_data(path = "sylt_graphics/sylt_card.bin");
   if (!f) return;                       /* absent is not an error */
   uint16_t hdr[4];
   if (fread(hdr, sizeof hdr, 1, f) != 1) { fclose(f); return; }
@@ -3879,6 +7252,7 @@ static void load_sylt_card(void) {
   }
   fclose(f);
   s_sylt_tw = tw; s_sylt_th = th;
+  sylt_apply_translated_line();
   fprintf(stderr, "[sylt] loaded %s (%dx%d tiles -> CHR $%03x..$%03x)", path,
           tw, th, SC_SYLT_TILE_BASE, SC_SYLT_TILE_BASE + tw * th - 1);
   fputc('\n', stderr);
@@ -3953,22 +7327,38 @@ static void sylt_place_card(void) {
  * "as egas, .S.A. 096". The stored tilemaps are complete -- decoding block 7
  * gives "Las Vegas, the world's largest gambling city," in full -- so that is
  * a display bug, not a data one, and it is not this feature's to fix. */
-#define SC_BRIEF_COLS 32
-#define SC_BRIEF_ROWS 64
-#define SC_BRIEF_BLANK 0x3FFu
 
 static void brief_put(uint8_t *dst, int row, int col, const char *s,
                       unsigned up, unsigned lo) {
   for (; *s; s++, col++) {
     if (col < 0 || col >= SC_BRIEF_COLS) continue;
     unsigned t = SC_BRIEF_BLANK;
-    const char c = *s;
+    /* unsigned: the accented characters arrive as Latin-1 bytes >= $80,
+     * which a signed char would make negative and never match. */
+    const unsigned char c = (unsigned char)*s;
     if (c >= 'A' && c <= 'Z')      t = up + (unsigned)(c - 'A');
     else if (c >= 'a' && c <= 'z') t = lo + (unsigned)(c - 'a');
     else if (c >= '0' && c <= '9') t = up + 0x20u + (unsigned)(c - '0');
     else if (c == ',')             t = up + 0x1Cu;
     else if (c == '.')             t = up + 0x1Du;
     else if (c == 39)              t = up + 0x1Eu;   /* apostrophe, unescaped */
+    /* Slots outside the two letter banks, identified from the German
+     * words they sit inside. Fixed tile numbers rather than up-relative:
+     * the four accented ones are blank in the US tileset, so the donor's
+     * artwork is copied in at the same numbers; the hyphen the US draws
+     * already. */
+    else if (c == 0xFCu)          t = 0x6F1u;   /* u-umlaut */
+    else if (c == 0xE4u)          t = 0x6F4u;   /* a-umlaut */
+    else if (c == 0xF6u)          t = 0x704u;   /* o-umlaut */
+    else if (c == 0xDFu)          t = 0x70Bu;   /* sharp s   */
+    /* NOT $69D: that is the German slot number, and on the US side $69D is
+     * up+13 -- the letter N, which is what it drew. The donor's hyphen is
+     * copied into this free slot instead. */
+    else if (c == '-')            t = 0x6ECu;
+    else if (c == 0xE9u)          t = 0x6EDu;   /* e-acute, French */
+    else if (c == 0xE8u)          t = 0x6EEu;   /* e-grave, French */
+    else if (c == 0xE2u)          t = 0x6EFu;   /* a-circumflex     */
+    else if (c == 0xEFu)          t = 0x6F0u;   /* i-diaeresis      */
     /* space, and anything with no glyph, stays blank */
     const size_t i = (size_t)(row * SC_BRIEF_COLS + col) * 2u;
     dst[i]     = (uint8_t)(t & 0xffu);
@@ -4006,6 +7396,113 @@ static void sylt_write_brief_tilemap(void) {
     brief_put(dst, 4 + i, 4, kSyltBody[i], 0x690u, 0x6C0u);
   fprintf(stderr, "[sylt] briefing tilemap written to $7E8000");
   fputc('\n', stderr);
+}
+
+/* Apply any surface whose screen is the one now showing. A surface carries
+ * its tiles already REMAPPED to indices the target screen left free, so
+ * writing them cannot land on artwork that is already correct -- which is
+ * what the naive same-index card copy did to the card names.
+ *
+ * Applied once per visit to the screen, not once ever: the game rebuilds
+ * these tilemaps each time it enters. */
+static void apply_surfaces(void) {
+  static int last_screen = -1;
+  if (!s_surf_count || !g_ppu) return;
+  const int scr = g_ram[0x14];
+  if (scr == last_screen) return;
+  last_screen = scr;
+  for (int i = 0; i < s_surf_count; i++) {
+    const uint8_t *s = s_surf[i];
+    if (s[6] != (uint8_t)scr) continue;
+    const unsigned tmap = (unsigned)(s[7] | (s[8] << 8));
+    const unsigned nw = s[9];
+    const unsigned nrows = s[10];
+    const uint8_t *rows = s + 11;
+    const unsigned ncols = rows[nrows];
+    const uint8_t *cols = rows + nrows + 1;
+    const uint8_t *p = cols + ncols;
+    const unsigned ntiles = (unsigned)(p[0] | (p[1] << 8)); p += 2;
+    const uint8_t *ents = p;
+    const uint8_t *art = ents + (size_t)nrows * ncols * 2u;
+    if ((size_t)(art - s) + (size_t)ntiles * (2u + nw * 2u) > s_surf_len[i])
+      continue;                       /* truncated: leave the screen alone */
+    for (unsigned t = 0; t < ntiles; t++) {
+      const uint8_t *e = art + (size_t)t * (2u + nw * 2u);
+      const unsigned idx = (unsigned)(e[0] | (e[1] << 8));
+      if ((size_t)idx * nw + nw > 0x8000u) continue;
+      for (unsigned k = 0; k < nw; k++)
+        g_ppu->vram[idx * nw + k] =
+            (uint16_t)(e[2 + k * 2] | (e[3 + k * 2] << 8));
+    }
+    /* Only the listed columns. Writing a whole row would replace the
+     * background, which is the target's and not the donor's. */
+    for (unsigned r = 0; r < nrows; r++)
+      for (unsigned ci = 0; ci < ncols; ci++) {
+        const unsigned c = cols[ci];
+        const size_t k = ((size_t)r * ncols + ci) * 2u;
+        const unsigned v = (unsigned)(ents[k] | (ents[k + 1] << 8));
+        const unsigned at = tmap + (c < 32 ? 0u : 0x400u)
+                          + (unsigned)rows[r] * 32u + (c & 31u);
+        if (at < 0x8000u) g_ppu->vram[at] = (uint16_t)v;
+      }
+    { static int said; if (!said++)
+        fprintf(stderr, "translation: surface applied on screen $%02x\n", scr); }
+  }
+}
+
+/* Write the translated scenario cards into VRAM: the art of each tile the
+ * card references, then its 8x9 tilemap. Same operation and same moment as
+ * sylt_place_card(), which places the ninth card -- these are the other
+ * eight. Column 42 is never carried in the blob, so Sylt is untouched. */
+static void place_translated_cards(void) {
+  if (!s_card_count || !g_ppu) return;
+  /* A packet patch puts the same cards in through the game's own DMA, and
+   * doing both means this one races the other and loses. */
+  if (scpk_active()) return;
+  const unsigned map = (unsigned)PPU_bgTilemapAdr(g_ppu, 0);
+  for (int i = 0; i < s_card_count; i++) {
+    for (int t = 0; t < s_card_nt[i]; t++) {
+      const unsigned base = (unsigned)s_card_tid[i][t] * 16u;
+      if (base + 16u > 0x8000u) continue;
+      for (int k = 0; k < 16; k++)
+        g_ppu->vram[base + k] = (uint16_t)(s_card_px[i][t][k * 2] |
+                                          (s_card_px[i][t][k * 2 + 1] << 8));
+    }
+    if (s_card_h[i] == 0) continue;   /* tiles only: no tilemap write */
+    for (int y = 0; y < s_card_h[i]; y++)
+      for (int x = 0; x < s_card_w[i]; x++) {
+        const int col = s_card_col[i] + x, row = s_card_row[i] + y;
+        if (col > 63 || row > 31) continue;
+        const unsigned idx = map + (col < 32 ? 0u : 0x400u)
+                           + (unsigned)row * 32u + (unsigned)(col & 31);
+        if (idx >= 0x8000u) continue;
+        g_ppu->vram[idx] = s_card_map[i][y * s_card_w[i] + x];
+      }
+  }
+  { static int said; if (!said++)
+      fprintf(stderr, "translation: %d scenario cards placed\n", s_card_count); }
+}
+
+/* Compose a translated briefing page from strings -- the same two-bank
+ * layout sylt_write_brief_tilemap() uses just above, so the title keeps
+ * its own colour. Returns false when this page is not one we carry. */
+static bool brief_compose_page(uint32_t src, uint8_t *dst) {
+  for (int i = 0; i < s_bp_count; i++) {
+    if (s_bp_src[i] != src) continue;
+    for (int k = 0; k < SC_BRIEF_COLS * SC_BRIEF_ROWS; k++) {
+      dst[k * 2]     = (uint8_t)(SC_BRIEF_BLANK & 0xffu);
+      dst[k * 2 + 1] = (uint8_t)(SC_BRIEF_BLANK >> 8);
+    }
+    if (s_bp_title[i][0])
+      brief_put(dst, 2, 5, s_bp_title[i], 0x000u, 0x030u);
+    /* the page's OWN origin, not a fixed row 4 column 4: the pages do
+     * not share one layout. */
+    for (int k = 0; k < s_bp_nlines[i]; k++)
+      brief_put(dst, s_bp_row[i] + k, s_bp_col[i], s_bp_line[i][k],
+                0x690u, 0x6C0u);
+    return true;
+  }
+  return false;
 }
 
 /* The STANDARD / FREE box. Deliberately small and centred rather than styled
@@ -4059,7 +7556,7 @@ static void render_replay_menu(SDL_Renderer *renderer) {
 /* ── generic activity qualification (--qualify N): the same pass/fail bar
  * as snesrecomp/cosim/ref_driver.c's standalone mode -- "goes through the
  * attract demo without logic, video, or audio errors" made concrete and
- * automatable, with zero SimCity-specific WRAM knowledge required. ─────── */
+ * automatable, with zero game-specific WRAM knowledge required. ─────── */
 static void write_mx_bitmap_dump(void) {
   if (!s_mx_bitmap || !s_mx_bitmap_path) return;
   FILE *f = fopen(s_mx_bitmap_path, "wb");
@@ -4202,6 +7699,7 @@ static int run_qualification(uint64_t frames) {
     last_video_hash = vh;
 
     {
+      s_loop_frame = f;
       const char *dump_at = getenv("SC_DUMP_AT");
       const char *dump_path = getenv("SC_DUMP_PATH");
       if (dump_at && dump_path && f == strtoull(dump_at, NULL, 0)) {
@@ -4279,14 +7777,10 @@ static int run_qualification(uint64_t frames) {
       if (dsp->sampleBuffer[idx * 2] || dsp->sampleBuffer[idx * 2 + 1]) { active = true; break; }
     }
     if (active) audio_active_frames++;
-    /* dsp_getSamples() (runner/src/snes/dsp.c) always consumes a fixed 534
-     * native samples per call and resamples them to the `samplesPerFrame`
-     * argument -- it does NOT consume `samplesPerFrame` samples. Gating the
-     * call on "available >= (a ~533 target output count)" therefore lets it
-     * fire when fewer than 534 raw samples truly exist, pushing sampleRead
-     * past sampleWrite; the unsigned wraparound then reads as "ring
-     * completely full" to the DSP's own backpressure check in dsp_cycle and
-     * freezes sample production forever. Gate on the real fixed quantum. */
+    /* The headless drain takes 534 a frame whenever that many exist, a hair
+     * more than the 533.125 the DSP makes, so the ring never fills here.
+     * dsp_getSamples() takes exactly what it is asked for and never more
+     * than exists (runner/src/snes/dsp.c). */
     /* SC_APU_DIAG=1: per-frame audio ledger -- what the DSP produced, what
      * was queued, and what the drain took. Cheap and env-gated. */
     { static int diag = -1;
@@ -4294,7 +7788,7 @@ static int run_qualification(uint64_t frames) {
       if (diag) fprintf(stderr, "[apu f=%llu] write=%u avail=%u produced=%d\n",
                         (unsigned long long)f, dsp->sampleWrite, available,
                         (int)(dsp->sampleWrite - last_sample_write));
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
       /* Beam-step ledger: only the fiber host has a host-side beam loop.
        * This is what showed the beam being advanced from two places at
        * once -- guest-heavy frames need only ~300 host steps instead of
@@ -4331,7 +7825,7 @@ static int run_qualification(uint64_t frames) {
       rc = 1;
     }
   }
-#ifdef SIMCITY_AOT_TIER
+#ifdef SC_AOT_TIER
   /* Did the guest actually run COMPILED code? Without this the wall-clock
    * comparison in OPEN_QUESTIONS B2 is unreadable: a fiber run that quietly
    * interpreted everything would look exactly like a slow AOT tier. Tier-downs
@@ -4344,10 +7838,10 @@ static int run_qualification(uint64_t frames) {
     interp_tier2_stats(&sites, &clean, &bail);
     extern unsigned long long g_interp_bridge_bounces;
     extern unsigned long long g_interp_bridge_steps;
-    extern unsigned SimCityFiberDrive_GuestS(void);
-    extern unsigned SimCityFiberDrive_ResumePC(void);
+    extern unsigned ScFiberDrive_GuestS(void);
+    extern unsigned ScFiberDrive_ResumePC(void);
     if (s_fiber_mode) fprintf(stderr, "guest: S=%04X resume=%06X\n",
-                              SimCityFiberDrive_GuestS(), SimCityFiberDrive_ResumePC());
+                              ScFiberDrive_GuestS(), ScFiberDrive_ResumePC());
     else fprintf(stderr, "guest: S=%04X pc=%02X:%04X\n",
                          (unsigned)g_cpu->sp, (unsigned)g_cpu->k, (unsigned)g_cpu->pc);
     fprintf(stderr, "aot: bounces=%llu interp_steps=%llu tier_downs=%ld gap_sites=%d clean=%llu bail=%llu",
@@ -4355,8 +7849,65 @@ static int run_qualification(uint64_t frames) {
             interp_tier_hit_count(), sites, clean, bail);
     fprintf(stderr, "\n"); }
 #endif
-  fprintf(stderr, "gen: trigger_hits=%lu boosted_frames=%lu turbo=%d\n",
-          s_gen_trigger_hits, s_gen_boost_frames, s_mapgen_turbo);
+  fprintf(stderr, "gen: 03:d862 seeding hits=%lu\n", s_gen_trigger_hits);
+  if (s_dec_fast || s_dec_declined)
+  /* SC_LABEL_TRACE: who writes the main map's building labels?
+   *
+   * The labels are sprites -- OAM slots 90..97, which the game stages in
+   * WRAM at $7E:2168 before DMAing it. Every attempt to find their
+   * placement statically has failed: the run starts, the lengths, their
+   * deltas and several strides are all absent from the ROM, and the
+   * generated code addresses the slots computationally rather than by any
+   * literal this can be grepped for. So ask the runtime instead. The
+   * watch fires inside cpu_write8/16 and the ring keeps the most recent
+   * function entry, which names the routine.
+   *
+   * Needs a build with SNESRECOMP_TRACE=1; in the normal build this is
+   * a no-op and the dump prints nothing. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+  if (getenv("SC_LABEL_TRACE"))
+    cpu_trace_dump_wram("label writes", 64);
+#endif
+
+    fprintf(stderr, "decomp: replaced=%lu declined=%lu\n",
+            s_dec_fast, s_dec_declined);
+  if (s_cls_hits || s_cls_fills || s_cls_mismatch)
+    fprintf(stderr, "mapcls: cached=%lu distinct=%lu mismatched=%lu\n",
+            s_cls_hits, s_cls_fills, s_cls_mismatch);
+  if (s_dec_ok || s_dec_mismatch)
+    fprintf(stderr, "decomp: verified=%lu mismatched=%lu\n",
+            s_dec_ok, s_dec_mismatch);
+  if (s_dec_ok || s_dec_mismatch || s_dec_fast) {
+    fprintf(stderr, "decomp: cmd hits");
+    for (int i = 0; i < 8; i++)
+      fprintf(stderr, " %02x=%lu", i << 5, g_sc_decomp_cmd_hits[i]);
+    fprintf(stderr, "  bank-wraps=%lu\n", g_sc_decomp_bank_wraps);
+  }
+  if (s_bank_profile) {
+    unsigned long long tot = 0;
+    for (int b = 0; b < 256; b++) tot += s_bank_ops[b];
+    fprintf(stderr, "bankprof: total opcodes=%llu\n", tot);
+    for (int b = 0; b < 256; b++)
+      if (s_bank_ops[b] * 200 > tot)
+        fprintf(stderr, "  bank %02x: %12llu  %5.1f%%\n", b,
+                s_bank_ops[b], 100.0 * (double)s_bank_ops[b] / (double)tot);
+    { unsigned long long b3 = s_bank_ops[s_bank_page_sel];
+      fprintf(stderr, "  bank-%02x hot pages:\n", s_bank_page_sel);
+      for (int k = 0; k < 10; k++) {
+        int best = -1; unsigned long long bv = 0;
+        for (int i = 0; i < 256; i++)
+          if (s_b3_page[i] > bv) { bv = s_b3_page[i]; best = i; }
+        if (best < 0 || !bv) break;
+        fprintf(stderr, "    %02x:%02x00-%02xff  %12llu  %5.1f%%\n",
+                s_bank_page_sel, best, best, bv, b3 ? 100.0*(double)bv/(double)b3 : 0.0);
+        s_b3_page[best] = 0;
+      } }
+    if (s_tick_count)
+      fprintf(stderr, "  sim ticks=%llu  avg frames/tick=%.2f  max=%llu  "
+                      "avg bank-03 opcodes/tick=%llu\n",
+              s_tick_count, (double)s_tick_frames_total / (double)s_tick_count,
+              s_tick_frames_max, s_tick_ops_total / s_tick_count);
+  }
   fprintf(stderr,
           "qualify: %s frames=%llu master=%llu logic_changes=%llu "
           "logic_stall_max=%llu audio_samples=%u audio_active_frames=%llu "
@@ -4389,8 +7940,156 @@ int main(int argc, char **argv) {
   if (!ScVideoLoad(&s_custom_video, s_video_config)) {
     fprintf(stderr, "Invalid widescreen settings: %s\n", s_video_config); return 2;
   }
-  bool show_mods = argc == 1;
-  bool explicit_size = false;
+  bool explicit_size = false, native_only = false;
+  /* SC_MAPGEN_SELFTEST=<index>: run the decompiled generator for one map index
+   * and write the 12000-cell result to SC_MAPGEN_OUT, then exit. No ROM, no
+   * emulation -- this is the native generator alone, so a match against a map
+   * dumped from the guest means the decompilation is right.
+   *
+   * SC_MAPGEN_CARRY and SC_MAPGEN_A exist because 03:d840's entry carry and
+   * its entry A are genuinely unknown -- the disassembly cannot show either --
+   * so they are swept rather than assumed. */
+  /* SC_MAPGEN_SWEEP=1 with SC_MAPGEN_GOLD=<wram dump>: brute-force 03:d840's
+   * two unknown entry values against a map dumped from the guest. Sweeping is
+   * the only way to settle them -- the disassembly cannot show either, and a
+   * backward walk of the PRNG from a sampled state produced only chance hits.
+   *
+   * This is decisive in BOTH directions. If the decompilation is right, the
+   * true pair reproduces the map and stands far above every other; if nothing
+   * rises above chance, the seeding is not what is wrong and no amount of
+   * guessing at it will help. It came out the second way, twice.
+   *
+   * SC_MAPGEN_GOLD MUST BE A COMPLETED GENERATION. 03:d840 runs the whole map
+   * as one synchronous JSL, but the SNES CPU needs ~800 frames of wall clock
+   * to finish it, so a capture that stops earlier catches a part-built map --
+   * which is what the first reference here did, invalidating every number
+   * measured against it. The completion marker is $0b2a-2c (03:d873 copies the
+   * selection there only after the generation returns) matching $0b27-29, with
+   * the PRNG frozen. */
+  { const char *sw = getenv("SC_MAPGEN_SWEEP");
+    const char *gp = getenv("SC_MAPGEN_GOLD");
+    if (sw && *sw && gp && *gp) {
+      static uint16_t gold[SC_MAPGEN_CELLS];
+      FILE *gf = fopen(gp, "rb");
+      if (!gf) { fprintf(stderr, "[sweep] cannot open %s\n", gp); return 1; }
+      { static unsigned char raw[0x20000];
+        const size_t got = fread(raw, 1, sizeof raw, gf);
+        fclose(gf);
+        if (got < 0x10200 + 2 * SC_MAPGEN_CELLS) {
+          fprintf(stderr, "[sweep] %s is too small (%u bytes)\n",
+                  gp, (unsigned)got);
+          return 1;
+        }
+        /* The map lives at $7F0200 -- bank 7F, so 0x10200 into a WRAM dump.
+         * This offset was wrong once already (7E, not 7F) and cost a whole
+         * "golden reference" built on the wrong buffer. */
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          const unsigned o = 0x10200u + 2u * i;
+          gold[i] = (uint16_t)((raw[o] | (raw[o + 1] << 8)) & 0x3ffu);
+        } }
+
+      { const unsigned idx =
+            (unsigned)strtoul(getenv("SC_MAPGEN_SELFTEST")
+                                  ? getenv("SC_MAPGEN_SELFTEST") : "3", NULL, 0);
+        /* $0b2a, the previous map's kept index -- part of the seeding. */
+        const uint8_t sweep_prev = (uint8_t)(getenv("SC_MAPGEN_PREV")
+            ? strtoul(getenv("SC_MAPGEN_PREV"), NULL, 0) : 0u);
+        static ScMapGenState gs;
+        unsigned best[4] = {0, 0, 0, 0}, bestc[4] = {0, 0, 0, 0};
+        unsigned besta[4] = {0, 0, 0, 0};
+        double sum = 0.0; unsigned runs = 0;
+        for (unsigned carry = 0; carry < 2u; carry++) {
+          for (unsigned a = 0; a < 0x10000u; a++) {
+            ScMapGenPrng pr;
+            memset(gs.map, 0, sizeof gs.map);
+            sc_mapgen_seed(&pr, (uint16_t)a, (uint8_t)(idx & 0xff),
+                           (uint8_t)((idx >> 8) & 0xff),
+                           (uint8_t)((idx >> 16) & 0xff), sweep_prev, carry);
+            sc_mapgen_generate(&pr, &gs);
+            { unsigned m = 0;
+              for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++)
+                if ((gs.map[i] & 0x3ffu) == gold[i]) m++;
+              sum += m; runs++;
+              if (m > best[0]) {
+                for (int k = 3; k > 0; k--) {
+                  best[k] = best[k-1]; bestc[k] = bestc[k-1]; besta[k] = besta[k-1];
+                }
+                best[0] = m; bestc[0] = carry; besta[0] = a;
+              } }
+          }
+          fprintf(stderr, "[sweep] carry=%u done, best so far %u (%.1f%%)\n",
+                  carry, best[0], 100.0 * best[0] / SC_MAPGEN_CELLS);
+        }
+        fprintf(stderr, "[sweep] mean match over %u runs: %.1f (%.1f%%)\n",
+                runs, sum / runs, 100.0 * (sum / runs) / SC_MAPGEN_CELLS);
+        for (int k = 0; k < 4; k++)
+          fprintf(stderr, "[sweep] #%d carry=%u A=%04X  %u/%u = %.1f%%\n",
+                  k + 1, bestc[k], besta[k], best[k], (unsigned)SC_MAPGEN_CELLS,
+                  100.0 * best[k] / SC_MAPGEN_CELLS); }
+      return 0;
+    } }
+
+  { const char *st = getenv("SC_MAPGEN_SELFTEST");
+    if (st && *st) {
+      const char *outp = getenv("SC_MAPGEN_OUT");
+      const char *cs = getenv("SC_MAPGEN_CARRY");
+      const char *as = getenv("SC_MAPGEN_A");
+      const unsigned idx = (unsigned)strtoul(st, NULL, 0);
+      static ScMapGenState gs;
+      ScMapGenPrng pr;
+      { const char *pv = getenv("SC_MAPGEN_PREV");
+        sc_mapgen_seed(&pr, (uint16_t)(as ? strtoul(as, NULL, 0) : 0u),
+                       (uint8_t)(idx & 0xff), (uint8_t)((idx >> 8) & 0xff),
+                       (uint8_t)((idx >> 16) & 0xff),
+                       (uint8_t)(pv ? strtoul(pv, NULL, 0) : 0u),
+                       (unsigned)(cs ? strtoul(cs, NULL, 0) : 0u)); }
+      { const char *sa = getenv("SC_MAPGEN_SNAP_AT");
+        if (sa && *sa) g_sc_mapgen_snap_at = strtoul(sa, NULL, 0); }
+      { const char *rp = getenv("SC_MAPGEN_REPEAT");
+        const unsigned reps = rp && *rp ? (unsigned)strtoul(rp, NULL, 0) : 1u;
+        /* Was a guess that the reference had accumulated several passes, since
+         * the preview regenerates while the button is held. Disproved -- more
+         * passes make the match worse, and the second wipes the first's work.
+         * Kept only as a sweep knob; 1 is correct. */
+        g_sc_mapgen_prng_steps = 0;
+        for (unsigned r = 0; r < reps; r++) sc_mapgen_generate(&pr, &gs); }
+      if (outp && *outp) {
+        FILE *f = fopen(outp, "wb");
+        /* With SC_MAPGEN_SNAP_AT, write the map as it stood after exactly that
+         * many draws rather than the finished one. */
+        if (f) {
+          fwrite(g_sc_mapgen_snapped ? g_sc_mapgen_snap : gs.map,
+                 2, SC_MAPGEN_CELLS, f);
+          fclose(f);
+        }
+      }
+      { unsigned hist[64] = {0}, nz = 0;
+        for (unsigned i = 0; i < SC_MAPGEN_CELLS; i++) {
+          const unsigned v = gs.map[i] & 0x3ffu;
+          if (v) nz++;
+          if (v < 64) hist[v]++;
+        }
+        fprintf(stderr, "[selftest] idx=%u nonzero=%u  0:%u 1:%u 2:%u 3:%u"
+                        " 20:%u 21:%u 24:%u 27:%u\n",
+                idx, nz, hist[0], hist[1], hist[2], hist[3],
+                hist[0x14], hist[0x15], hist[0x18], hist[0x1b]);
+        fprintf(stderr, "[selftest] prng_steps=%lu s0=%04X s1=%04X\n",
+                g_sc_mapgen_prng_steps, (unsigned)pr.s0, (unsigned)pr.s1);
+        { static const char *nm[5] = { "centre f380", "path   f5b9",
+                                       "cluster f311", "shore  f444",
+                                       "scatter f3a3" };
+          unsigned long prev = 0;
+          for (int k = 0; k < 5; k++) {
+            fprintf(stderr, "[phase] %-12s steps=%6lu  cells=%5lu (%+ld)"
+                            "  changed=%lu cleared=%lu\n",
+                    nm[k], g_sc_mapgen_phase_steps[k],
+                    g_sc_mapgen_phase_cells[k],
+                    (long)g_sc_mapgen_phase_cells[k] - (long)prev,
+                    g_sc_mapgen_phase_changed[k], g_sc_mapgen_phase_cleared[k]);
+            prev = g_sc_mapgen_phase_cells[k];
+          } } }
+      return 0;
+    } }
   /* SC_LANG=U|E|F|G|J -- pick the regional ROM.
    *
    * All five regions are 512KB and all five pass --qualify 600 unchanged on
@@ -4399,42 +8098,28 @@ int main(int argc, char **argv) {
    *
    * The AOT tier is a different matter -- see the fingerprint guard below.
    *
-   * Candidate filenames per region, tried in order, because the No-Intro names
-   * carry decorations ("[!]") that vary by dump. An explicit ROM argument
-   * always wins over SC_LANG. */
-  const char *rom_path = "simcity.sfc";
-  char remembered_rom[1024] = {0};
-  { FILE *f = fopen("rom.cfg", "r");
-    if (f) {
-      if (fgets(remembered_rom,sizeof(remembered_rom),f)) {
-        remembered_rom[strcspn(remembered_rom,"\r\n")]=0;
-        if (remembered_rom[0]) rom_path=remembered_rom;
-      }
-      fclose(f);
-    }
-  }
+   * The project assumes no file name: the region's image is found in the
+   * working directory by its contents (ScFindRom, FNV-1a over the file). An
+   * explicit ROM argument always wins over SC_LANG. */
+  const char *rom_path = NULL;
+  static char s_found_rom[1024];
   { const char *lang = getenv("SC_LANG");
     if (lang && *lang) {
-      static const struct { char code; const char *names[3]; } kRoms[] = {
-        { 'U', { "simcity.sfc", "Sim City (U) [!].sfc", NULL } },
-        { 'E', { "Sim City (E) [!].sfc", "Sim City (E).sfc", NULL } },
-        { 'F', { "Sim City (F).sfc", "Sim City (F) [!].sfc", NULL } },
-        { 'G', { "Sim City (G) [!].sfc", "Sim City (G).sfc", NULL } },
-        { 'J', { "Sim City (J).sfc", "Sim City (J) [!].sfc", NULL } },
+      static const struct { char code; unsigned long fnv; } kRoms[] = {
+        { 'U', SC_ROM_FNV_US }, { 'E', SC_ROM_FNV_EU }, { 'F', SC_ROM_FNV_FR },
+        { 'G', SC_ROM_FNV_DE }, { 'J', SC_ROM_FNV_JP },
       };
       char want = (char)toupper((unsigned char)lang[0]);
-      const char *picked = NULL;
-      for (size_t i = 0; i < sizeof(kRoms)/sizeof(kRoms[0]) && !picked; i++) {
+      bool known = false;
+      for (size_t i = 0; i < sizeof(kRoms)/sizeof(kRoms[0]); i++) {
         if (kRoms[i].code != want) continue;
-        for (int n = 0; n < 3 && kRoms[i].names[n]; n++) {
-          FILE *f = fopen(kRoms[i].names[n], "rb");
-          if (f) { fclose(f); picked = kRoms[i].names[n]; break; }
-        }
-        if (!picked)
-          fprintf(stderr, "SC_LANG=%c: no ROM file found for that region\n", want);
+        known = true;
+        if (ScFindRom(kRoms[i].fnv, s_found_rom, sizeof s_found_rom))
+          rom_path = s_found_rom;
+        else
+          fprintf(stderr, "SC_LANG=%c: no ROM of that region in the working directory\n", want);
       }
-      if (picked) { rom_path = picked; }
-      else if (!strchr("UEFGJ", want))
+      if (!known)
         fprintf(stderr, "SC_LANG: want one of U E F G J\n");
     } }
   const char *load_state_path = NULL;
@@ -4463,29 +8148,25 @@ int main(int argc, char **argv) {
       fprintf(stderr, "SC_WRAM_DUMP_PC: dumps fire at guest %02X:%04X\n",
               (unsigned)(s_dump_pc24 >> 16), (unsigned)(s_dump_pc24 & 0xffff));
     } }
-#ifdef SIMCITY_AOT_TIER
-  /* SC_FIBER=1: drive the guest inside the fiber instead of interpreting it
-   * per opcode (migration step 3d). Only meaningful in the AOT build, and
-   * deliberately opt-in -- see run_one_frame_fiber(). */
+#ifdef SC_AOT_TIER
+  /* The AOT tier is linked into this build, but the fiber is OPT-IN again.
+   *
+   * It was briefly the default. Playing on it showed widescreen defects that
+   * had already been fixed coming back -- the rendering code is identical, so
+   * the cause is that the guest runs compiled bodies under the fiber and any
+   * fix that hangs off the per-opcode interpreter path stops firing. Until
+   * that is found and closed, the interpreter stays the default, because it
+   * is the path every widescreen fix was developed and verified against.
+   *
+   * SC_FIBER=1 enables it -- that is how the map generator HLE at 01:f1ed
+   * runs, which is worth having and is verified bit-exact.
+   *
+   * The decision is recorded here but ACTED ON after the ROM is read, because
+   * the AOT code is compiled against the US image and the region is not known
+   * until then. */
   { const char *e = getenv("SC_FIBER");
-    if (e && *e && *e != '0') {
-      if (!SimCityFiberDrive_Init()) {
-        fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
-        return 1;
-      }
-      s_fiber_mode = true;
-      /* Feed the coverage bitmaps from the bridge, or a fiber run records
-       * nothing at all and every tool in tools/ silently sees an empty
-       * bitmap. Interpreted opcodes go into the bitmaps exactly as the
-       * per-opcode host records them; compiled-body ENTRIES are collected
-       * separately, because a bounce is not an extent. */
-      { extern void (*g_interp_bridge_pc_hook)(uint32_t, int, int);
-        extern void (*g_interp_bridge_bounce_hook)(uint32_t, int, int);
-        g_interp_bridge_pc_hook = sc_note_executed_pc;
-        g_interp_bridge_bounce_hook = sc_note_aot_entry; }
-      fprintf(stderr, "[fiber] driving the guest inside the fiber "
-                      "(entry I_RESET_M1X1)\n");
-    } }
+    s_fiber_explicit = (e && *e);
+    s_fiber_want = s_fiber_explicit ? (*e != '0') : 0; }
 #endif
   { const char *e = getenv("SC_SCENARIO_EVENT");
     if (e && *e) {
@@ -4541,6 +8222,8 @@ int main(int argc, char **argv) {
    * presses. */
   { const char *e = getenv("SC_DEBUG_CODE_AT");
     if (e && *e) queue_debug_menu_code(strtoull(e, NULL, 0)); }
+  bool rom_given = false, scale_given = false;
+  bool force_launcher = false, no_settings = false;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--video-config") && i + 1 < argc) { ++i;
     } else if (!strcmp(argv[i], "--help")) {
@@ -4552,9 +8235,9 @@ int main(int argc, char **argv) {
            "F11: fullscreen. F10: game settings. No arguments: Mods launcher.");
       return 0;
     } else if (!strcmp(argv[i], "--fullscreen")) { s_fullscreen=true;
-    } else if (!strcmp(argv[i], "--mods")) { show_mods = true;
+    } else if (!strcmp(argv[i], "--mods")) { force_launcher = true;
     } else if (!strcmp(argv[i], "--widescreen")) { s_custom_video.enabled = true;
-    } else if (!strcmp(argv[i], "--no-widescreen")) { s_custom_video.enabled = false;
+    } else if (!strcmp(argv[i], "--no-widescreen")) { s_custom_video.enabled = false; native_only = true;
     } else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
       if (!ScParseAspect(argv[++i], &s_custom_video.aspect)) {
         fprintf(stderr, "Unknown view size: %s\n", argv[i]); return 2;
@@ -4571,8 +8254,13 @@ int main(int argc, char **argv) {
         return 2;
     } else if (!strcmp(argv[i], "--qualify") && i + 1 < argc) {
       qualify_frames = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--launcher") || !strcmp(argv[i], "--mods")) {
+      force_launcher = true;
+    } else if (!strcmp(argv[i], "--no-settings")) {
+      no_settings = true;
     } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
       scale = atoi(argv[++i]);
+      scale_given = true;
     } else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
       if (!add_input_event(argv[++i])) {
         fprintf(stderr, "invalid --input event; expected start:duration:hexmask\n");
@@ -4587,44 +8275,47 @@ int main(int argc, char **argv) {
       load_state_path = argv[++i];
     } else if (argv[i][0] != '-') {
       rom_path = argv[i];
+      rom_given = true;
     }
   }
 
-  char launcher_rom[1024] = {0};
-#ifdef RECOMP_LAUNCHER
-  if (show_mods && !qualify_frames) {
-    RecompLauncherCSettings settings = {0};
-    RecompLauncherCGameInfo game = {0};
-    static const uint8_t rom_hash[1][32] = {{
-      0xe9,0xc0,0xbc,0x05,0x51,0x1e,0x05,0xa0,0xd7,0xc3,0xe7,0xcc,0x42,0xe7,0x61,0xe1,
-      0xe8,0xe5,0x32,0xd4,0x6f,0x59,0xb9,0x85,0x4b,0x69,0x02,0xe1,0xa2,0xe9,0xdd,0x0a}};
-    game.name = "SimCity"; game.region = "SNES"; game.platform = "SUPER NINTENDO";
-    game.num_players = 1; game.mods = ScModsProvider(&s_custom_video, s_video_config);
-    game.known_sha256=rom_hash; game.num_known_sha256=1;
-    game.expected_crc=0x8aedd3a1u; game.has_expected_crc=1;
-    game.lock_device=1; /* Input remains the game's existing keyboard/mouse controls. */
-    settings.window_scale = scale; settings.audio_freq = 48000;
-#if SNESRECOMP_SDL3
-    const char *base = SDL_GetBasePath();
-#else
-    char *base = SDL_GetBasePath();
-#endif
-    int result = recomp_launcher_run_window("SimCity - Mods", &settings, &game,
-      base ? base : ".", rom_path, launcher_rom, sizeof(launcher_rom));
-#if !SNESRECOMP_SDL3
-    SDL_free(base);
-#endif
-    if (result == RECOMP_LAUNCHER_RESULT_QUIT) return 0;
-    if (result != RECOMP_LAUNCHER_RESULT_LAUNCH || !launcher_rom[0]) {
-      fprintf(stderr,"Unable to open the Mods launcher.\n"); return 1;
+  /* Settings and the pre-boot launcher (src/sc_launcher.c).
+   *
+   * A player's run starts without a ROM argument and gets the launcher --
+   * unless they told it to skip itself; --launcher brings it back. Any run
+   * that is not --qualify then applies sc-settings.ini: window, audio, and the
+   * SC_WIDESCREEN / SC_NINTH / SC_TRANSLATION / SC_PACKET_PATCH variables,
+   * each only where it is not already set by hand. --qualify runs, and
+   * --no-settings, stay exactly as their environment says, so every tool and
+   * comparison in tools/ and docs/ keeps meaning what it meant. */
+  static ScSettings s_launch_settings;
+  ScSetAppIdentity();   /* before the launcher opens the first window */
+  ScSettingsLoad(&s_launch_settings, kScSettingsPath);
+  if (rom_given) snprintf(s_launch_settings.rom, sizeof s_launch_settings.rom, "%s", rom_path);
+  if (!qualify_frames && !no_settings) {
+    if (force_launcher || (!rom_given && !s_launch_settings.skip_launcher)) {
+      const int r = ScLauncherRun(&s_launch_settings, kScSettingsPath, &s_custom_video, s_video_config);
+      if (r == 0) return 0;
+      if (r > 0) { rom_path = s_launch_settings.rom; rom_given = true; }
     }
-    rom_path = launcher_rom;
-    scale=settings.window_scale>0 ? settings.window_scale : scale;
-    s_fullscreen=settings.fullscreen!=0;
-    s_linear_filter=settings.linear_filter!=0;
-    { FILE *f=fopen("rom.cfg","w"); if (f) { fprintf(f,"%s\n",rom_path); fclose(f); } }
+    if (!rom_given && !getenv("SC_LANG")) {
+      FILE *probe = fopen(s_launch_settings.rom, "rb");
+      if (probe) { fclose(probe); rom_path = s_launch_settings.rom; }
+    }
+    if (!scale_given) scale = s_launch_settings.window_scale;
+    s_fullscreen = s_launch_settings.fullscreen;
+    s_linear_filter = s_launch_settings.linear_filter != 0;
+    s_enable_audio = s_launch_settings.enable_audio != 0;
+    ScSettingsApply(&s_launch_settings);
   }
-#endif
+  if (!rom_path && ScFindRom(SC_ROM_FNV_US, s_found_rom, sizeof s_found_rom))
+    rom_path = s_found_rom;
+  if (!rom_path) {
+    fprintf(stderr, "no ROM: pass the path of your own copy, pick it in the "
+                    "launcher, or put it (any file name) in the working directory\n");
+    return 1;
+  }
+
   if (!explicit_size) {
     s_window_height=224*scale;
     ScViewport initial=ScVideoViewport(&s_custom_video,1280,720);
@@ -4654,22 +8345,305 @@ int main(int argc, char **argv) {
                      : region == 0x02 ? "Europe" : region == 0x06 ? "France"
                      : region == 0x09 ? "Germany" : "unknown";
     s_rom_is_us = (fp == 0xec01686au);
+    s_rom_fnv = fp;
     ScMapView_SetRomIsUs(s_rom_is_us);
     fprintf(stderr, "rom: %s  region=%s (%02x)  fnv=%08x%s\n",
             rom_path, name, region, fp, s_rom_is_us ? "  [AOT-compatible]" : "");
+
+    /* SC_TRANSLATION=<file.bin> -- a translated message block, from
+     * tools/text_tool.py pack.
+     *
+     * Applied to the IN-MEMORY image, and deliberately after the fingerprint
+     * above has been taken. Patching the ROM file instead would change that
+     * fingerprint, and it gates the host map renderer, SC_FIBER, the cursor
+     * cadence patch and the view fix -- so a translator would silently lose
+     * four features by translating. This way the file on disk is never
+     * touched and a translation ships as its own small blob, carrying only
+     * its author's words and no ROM content.
+     *
+     * Latin releases store the block as characters. Japan stores tile
+     * indices, so there is nothing here to overwrite. */
+    scpk_apply_rom(rom_data, rom_size);
+
+    { const char *tr = getenv("SC_TRANSLATION");
+      if (tr && *tr) {
+        /* Blob from tools/text_tool.py: "SCTR", ver, target region, record
+         * count, payload length, then the message block itself.
+         *
+         * We run the US image and only the US image -- every ROM-address
+         * hook in this file, the AOT tier and the host map renderer are keyed
+         * to it. Other ROMs are donors: their text is lifted out and laid
+         * over the US block, so a player gets German or French text with the
+         * US build's features intact.
+         *
+         * A translation may be LONGER than the English original -- German
+         * runs 278 bytes over, French 395. That is fine: 9597 bytes of $FF
+         * filler follow the block, up to the $080000 bank boundary, and the
+         * extra separators read as empty records past the last real one,
+         * which nothing asks for. Hence the budget rather than a size match. */
+        enum { kTrOff = 0x07A868u, kTrBudget = 0x080000u - 0x07A868u };
+        uint32_t got = 0;
+        uint8_t *blob = read_file(tr, &got);
+        if (!blob)
+          fprintf(stderr, "SC_TRANSLATION: cannot read '%s'\n", tr);
+        else if (got < 12 || memcmp(blob, "SCTR", 4) != 0)
+          fprintf(stderr, "SC_TRANSLATION: '%s' is not a translation blob -- "
+                          "make one with tools/text_tool.py import\n", tr);
+        else {
+          const uint32_t recs = (uint32_t)blob[6] | ((uint32_t)blob[7] << 8);
+          const uint32_t len  = (uint32_t)blob[8]  | ((uint32_t)blob[9] << 8)
+                              | ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
+          if (!s_rom_is_us)
+            fprintf(stderr, "SC_TRANSLATION: these blobs target the US image; "
+                            "run the US ROM and use the other one as the donor\n");
+          else if (len + 12u > got || len > kTrBudget)
+            fprintf(stderr, "SC_TRANSLATION: '%s' is malformed or too long "
+                            "(%u bytes, budget %u)\n",
+                    tr, (unsigned)len, (unsigned)kTrBudget);
+          else if (kTrOff + len > rom_size)
+            fprintf(stderr, "SC_TRANSLATION: ROM too short\n");
+          else {
+            memcpy(rom_data + kTrOff, blob + 12, len);
+            s_tr_off = kTrOff; s_tr_len = len;
+            /* The messages are reached through a POINTER TABLE, not by
+             * counting separators. It sits immediately before the block at
+             * $07A800 -- 52 entries of a 16-bit bank-relative address --
+             * and every entry matches a record start in the stock image.
+             *
+             * A translation whose records are different lengths therefore
+             * leaves every pointer aiming into the middle of some other
+             * message. Reported from play as wrong text, broken line
+             * breaks, a message reduced to one line and a stray tile --
+             * four symptoms, one cause. Rebuild it from what we wrote. */
+            { enum { kPtrTab = 0x07A800u, kPtrBase = 0xA868u, kPtrCount = 52 };
+              uint32_t rec = 0; int n = 0;
+              for (uint32_t i = 0; i <= len && n < kPtrCount; i++) {
+                if (i == 0 || (i < len && blob[12 + i - 1] == 0xFF)) {
+                  uint32_t a = kPtrBase + rec;
+                  rom_data[kPtrTab + n * 2]     = (uint8_t)(a & 0xff);
+                  rom_data[kPtrTab + n * 2 + 1] = (uint8_t)(a >> 8);
+                  n++;
+                }
+                if (i < len && blob[12 + i] == 0xFF) rec = i + 1;
+              }
+              fprintf(stderr, "translation: %d message pointers rebuilt\n", n); }
+            /* v2 blobs carry the briefings after the text. */
+            if (blob[4] >= 2 && 12u + len + 2u <= got) {
+              const uint8_t *q = blob + 12 + len;
+              int nb = q[0] | (q[1] << 8); q += 2;
+              for (int i = 0; i < nb && i < kMaxBriefs; i++) {
+                if ((size_t)(q - blob) + 8u > got) break;
+                uint32_t src = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                             | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                uint32_t bl  = (uint32_t)q[4] | ((uint32_t)q[5] << 8)
+                             | ((uint32_t)q[6] << 16) | ((uint32_t)q[7] << 24);
+                q += 8;
+                if ((size_t)(q - blob) + bl > got) break;
+                s_brief_data[s_brief_count] = (uint8_t *)malloc(bl);
+                if (!s_brief_data[s_brief_count]) break;
+                memcpy(s_brief_data[s_brief_count], q, bl);
+                s_brief_src[s_brief_count] = src;
+                s_brief_len[s_brief_count] = bl;
+                s_brief_count++;
+                q += bl;
+              }
+              if (blob[4] >= 3 && (size_t)(q - blob) + 4u <= got) {
+                uint32_t tl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                            | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                q += 4;
+                if (tl && (size_t)(q - blob) + tl <= got) {
+                  s_scen_tiles = (uint8_t *)malloc(tl);
+                  if (s_scen_tiles) {
+                    memcpy(s_scen_tiles, q, tl);
+                    s_scen_tiles_len = tl;
+                  }
+                  q += tl;
+                }
+                if (blob[4] >= 4 && (size_t)(q - blob) + 2u <= got) {
+                  int ng = q[0] | (q[1] << 8); q += 2;
+                  for (int i = 0; i < ng && s_glyph_count < kMaxGlyphs; i++) {
+                    if ((size_t)(q - blob) + 2u + kFontTile > got) break;
+                    s_glyph_idx[s_glyph_count] = (uint16_t)(q[0] | (q[1] << 8));
+                    memcpy(s_glyph_px[s_glyph_count], q + 2, kFontTile);
+                    s_glyph_count++;
+                    q += 2 + kFontTile;
+                  }
+                }
+                if (blob[4] >= 5 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t sl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *e = q + sl;
+                  if (sl >= 2 && e <= blob + got) {
+                    int np = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < np && s_bp_count < kBpPages; i++) {
+                      if (q + 5 > e) break;
+                      s_bp_src[s_bp_count] = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                        | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                      q += 4;
+                      if (blob[4] >= 7) {
+                        if (q + 2 > e) break;
+                        s_bp_row[s_bp_count] = q[0];
+                        s_bp_col[s_bp_count] = q[1];
+                        q += 2;
+                      } else {
+                        s_bp_row[s_bp_count] = 4; s_bp_col[s_bp_count] = 4;
+                      }
+                      unsigned tl = *q++;
+                      if (q + tl > e) break;
+                      if (tl > kBpChars - 1) tl = kBpChars - 1;
+                      memcpy(s_bp_title[s_bp_count], q, tl);
+                      s_bp_title[s_bp_count][tl] = 0;
+                      q += tl;
+                      if (q >= e) break;
+                      unsigned nl = *q++;
+                      unsigned kept = 0;
+                      for (unsigned k = 0; k < nl && q < e; k++) {
+                        unsigned ll = *q++;
+                        if (q + ll > e) { q = e; break; }
+                        if (kept < kBpLines) {
+                          unsigned c = ll > kBpChars - 1 ? kBpChars - 1 : ll;
+                          memcpy(s_bp_line[s_bp_count][kept], q, c);
+                          s_bp_line[s_bp_count][kept][c] = 0;
+                          kept++;
+                        }
+                        q += ll;
+                      }
+                      s_bp_nlines[s_bp_count] = (uint8_t)kept;
+                      s_bp_count++;
+                    }
+                  }
+                }
+                if (blob[4] >= 6 && (size_t)(q - blob) + 2u <= got) {
+                  int nsg = q[0] | (q[1] << 8); q += 2;
+                  for (int i = 0; i < nsg && s_sg_count < kMaxGlyphs; i++) {
+                    if ((size_t)(q - blob) + 18u > got) break;
+                    s_sg_idx[s_sg_count] = (uint16_t)(q[0] | (q[1] << 8));
+                    memcpy(s_sg_px[s_sg_count], q + 2, 16);
+                    s_sg_count++; q += 18;
+                  }
+                }
+                if (blob[4] >= 8 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t cl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *ce = q + cl;
+                  if (cl >= 2 && ce <= blob + got) {
+                    int nc = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < nc && s_card_count < kMaxCards; i++) {
+                      if (q + 11 > ce || memcmp(q, "SCCD", 4) != 0) break;
+                      int cw = q[5], ch = q[6];
+                      s_card_col[s_card_count] = q[7];
+                      s_card_row[s_card_count] = q[8];
+                      s_card_w[s_card_count] = (uint8_t)cw;
+                      s_card_h[s_card_count] = (uint8_t)ch;
+                      int nt = q[9] | (q[10] << 8);
+                      q += 11;
+                      if (cw * ch > 72 || nt > kCardTiles) break;
+                      if (q + cw * ch * 2 > ce) break;
+                      for (int k = 0; k < cw * ch; k++, q += 2)
+                        s_card_map[s_card_count][k] = (uint16_t)(q[0] | (q[1] << 8));
+                      int kept = 0;
+                      for (int k = 0; k < nt; k++) {
+                        if (q + 34 > ce) break;
+                        s_card_tid[s_card_count][kept] = (uint16_t)(q[0] | (q[1] << 8));
+                        memcpy(s_card_px[s_card_count][kept], q + 2, 32);
+                        kept++; q += 34;
+                      }
+                      s_card_nt[s_card_count] = (uint8_t)kept;
+                      s_card_count++;
+                    }
+                  }
+                }
+                if (blob[4] >= 9 && (size_t)(q - blob) + 4u <= got) {
+                  uint32_t sl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                               | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                  q += 4;
+                  const uint8_t *se = q + sl;
+                  if (sl >= 2 && se <= blob + got) {
+                    int ns = q[0] | (q[1] << 8); q += 2;
+                    for (int i = 0; i < ns && s_surf_count < kMaxSurf; i++) {
+                      if (q + 4 > se) break;
+                      uint32_t fl = (uint32_t)q[0] | ((uint32_t)q[1] << 8)
+                                   | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+                      q += 4;
+                      if (q + fl > se || fl < 11 || memcmp(q, "SCSF", 4) != 0) break;
+                      s_surf[s_surf_count] = (uint8_t *)malloc(fl);
+                      if (!s_surf[s_surf_count]) break;
+                      memcpy(s_surf[s_surf_count], q, fl);
+                      s_surf_len[s_surf_count] = fl;
+                      s_surf_count++;
+                      q += fl;
+                    }
+                  }
+                }
+              }
+            }
+            fprintf(stderr, "translation: %s applied (%u messages, %u bytes "
+                            "at $%06X, %u spare)\n",
+                    tr, (unsigned)recs, (unsigned)len, (unsigned)kTrOff,
+                    (unsigned)(kTrBudget - len));
+            if (s_surf_count)
+              fprintf(stderr, "translation: %d surface(s) loaded\n", s_surf_count);
+            if (s_card_count)
+              fprintf(stderr, "translation: %d scenario cards loaded\n",
+                      s_card_count);
+            if (s_sg_count)
+              fprintf(stderr, "translation: %d briefing glyphs loaded\n",
+                      s_sg_count);
+            if (s_bp_count)
+              fprintf(stderr, "translation: %d briefing pages loaded as strings\n",
+                      s_bp_count);
+            if (s_glyph_count)
+              fprintf(stderr, "translation: %d accent glyphs loaded\n",
+                      s_glyph_count);
+            if (s_scen_tiles_len)
+              fprintf(stderr, "translation: scenario picture tiles loaded\n");
+            if (s_brief_count)
+              fprintf(stderr, "translation: %d scenario briefings loaded\n",
+                      s_brief_count);
+          }
+        }
+        free(blob);
+      } }
   }
-#ifdef SIMCITY_AOT_TIER
-  /* Checked HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
+#ifdef SC_AOT_TIER
+  /* Decided HERE, not where SC_FIBER is parsed: env parsing runs before the ROM
    * is read, so the fingerprint is not known yet. The first version of this
    * guard sat at the parse site and did nothing at all -- a German ROM ran 60
    * compiled bounces straight past it. */
-  if (s_fiber_mode && !s_rom_is_us) {
-    fprintf(stderr,
-            "SC_FIBER refused: the AOT code is compiled against the US ROM and "
-            "this image is a different region.\n"
-            "  Run without SC_FIBER -- the interpreter tier handles every "
-            "region.\n");
-    return 1;
+  if (s_fiber_want && !s_rom_is_us) {
+    if (s_fiber_explicit) {
+      fprintf(stderr,
+              "SC_FIBER refused: the AOT code is compiled against the US ROM "
+              "and this image is a different region.\n"
+              "  Run without SC_FIBER -- the interpreter tier handles every "
+              "region.\n");
+      return 1;
+    }
+    /* Only the default asked for it, so step down rather than refuse to run.
+     * Every region stays playable; this one just runs on the interpreter. */
+    fprintf(stderr, "[fiber] not a US image -- running on the interpreter "
+                    "tier, which handles every region.\n");
+    s_fiber_want = 0;
+  }
+  if (s_fiber_want) {
+    if (!ScFiberDrive_Init()) {
+      fprintf(stderr, "SC_FIBER: could not start the game fiber\n");
+      return 1;
+    }
+    s_fiber_mode = true;
+    /* Feed the coverage bitmaps from the bridge, or a fiber run records
+     * nothing at all and every tool in tools/ silently sees an empty bitmap.
+     * Interpreted opcodes go into the bitmaps exactly as the per-opcode host
+     * records them; compiled-body ENTRIES are collected separately, because a
+     * bounce is not an extent. */
+    { extern void (*g_interp_bridge_pc_hook)(uint32_t, int, int);
+      extern void (*g_interp_bridge_bounce_hook)(uint32_t, int, int);
+      g_interp_bridge_pc_hook = sc_note_executed_pc;
+      g_interp_bridge_bounce_hook = sc_note_aot_entry; }
+    fprintf(stderr, "[fiber] driving the guest inside the fiber "
+                    "(entry I_RESET_M1X1)\n");
   }
 #endif
   if (!rom_data) {
@@ -4840,12 +8814,50 @@ int main(int argc, char **argv) {
   }
 
   g_snes = snes_init(g_ram);
+  { const char *e = getenv("SC_BEAM_LEGACY");
+    if (e && *e && *e != '0') s_own_beam = false; }
+  if (s_own_beam) sc_own_the_beam();
+  sc_wram_watch_install();
+  sc_dma_vram_install();
+  sc_vram_write_watch_install();
   cart_set_master_clock_source(g_snes->cart, &g_master_cycles);
   g_ppu = g_snes->ppu;
   if (!snes_loadRom(g_snes, rom_data, (int)rom_size)) {
     fprintf(stderr, "loadRom failed for '%s'\n", rom_path);
     return 1;
   }
+  /* cart_init() copies the ROM, so confirm the translation survived into
+   * the buffer that actually executes. This file already records one
+   * patch that landed in the wrong copy and silently did nothing. */
+  /* cart_init() copies the ROM. The building labels are patched in the
+   * image, so confirm they survived into the buffer that executes -- this
+   * file already records one patch that landed in the wrong copy and
+   * silently did nothing. */
+  if (s_scpk_rom_len) {
+    const uint8_t *live = sc_live_rom();
+    if (!live || memcmp(live + s_scpk_rom_off, rom_data + s_scpk_rom_off,
+                        s_scpk_rom_len) != 0)
+      fprintf(stderr, "packet patch: cart spans LOST -- the cart copy does not carry them\n");
+    else
+      fprintf(stderr, "packet patch: cart spans live in the cart image\n");
+  }
+  if (s_tr_len) {
+    const uint8_t *live = sc_live_rom();
+    if (!live || memcmp(live + s_tr_off, rom_data + s_tr_off, s_tr_len) != 0)
+      fprintf(stderr, "translation: LOST -- the cart copy does not carry it\n");
+    else
+      fprintf(stderr, "translation: live in the cart image\n");
+  }
+  /* Arm the label watch before the game runs. OAM slots 90..97 are staged
+   * at $7E:2168; a hit records the writing function in the trace ring. */
+#if defined(SNESRECOMP_TRACE) && SNESRECOMP_TRACE
+  if (getenv("SC_LABEL_TRACE")) {
+    cpu_trace_clear_wram_watches();
+    for (unsigned a = 0x2168; a < 0x2190; a += 2)
+      cpu_trace_set_wram_watch(0x7e, (uint16_t)a, 2, 0, 0, 1);
+    fprintf(stderr, "label trace: watching $7E:2168..$7E:218F  (needs SNESRECOMP_TRACE=1)\n");
+  }
+#endif
   snes_reset(g_snes, true);
   { const char *e = getenv("SC_WIDESCREEN");
     if (e && *e) {
@@ -4868,10 +8880,15 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_widen_menu = (*e != '0'); }
   { const char *e = getenv("SC_WS_OBJ_CLIP");
     if (e && *e) s_ws_obj_clip = (*e != '0'); }
+  { const char *e = getenv("SC_WS_MARGIN_OBJ");
+    if (e && *e) s_margin_obj_on = (*e != '0'); }
   { const char *e = getenv("SC_WS_OAM");
     if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");
     if (e && *e) { s_force_legacy = (*e == '0'); if (!s_force_legacy) s_render_flags = 1; } }
+  { const char *e = getenv("SC_BANK_PROFILE"); if (e && *e) s_bank_profile = (*e != '0'); }
+  { const char *e = getenv("SC_BANK_PROFILE_PAGE");
+    if (e && *e) s_bank_page_sel = (int)strtol(e, NULL, 16) & 0xff; }
   { const char *e = getenv("SC_WS_CLAMP");
     if (e && *e) { s_ws_clamp = (uint8_t)strtol(e, NULL, 0); s_ws_clamp_auto = false; } }
   { const char *e = getenv("SC_HOST_HDMA");
@@ -4891,19 +8908,29 @@ int main(int argc, char **argv) {
     if (e && *e && *e != '0') s_replay_free = 1; }
   { const char *e = getenv("SC_NINTH_SCROLL");
     if (e && *e) s_ninth_scroll = (int)strtol(e, NULL, 0); }
-  { const char *e = getenv("SC_MAPGEN_TURBO");
-    if (e && *e) { int v = atoi(e); if (v >= 1 && v <= 256) s_mapgen_turbo = v; } }
   { const char *e = getenv("SC_HOST_MAP");
-    if (e && *e && *e != '0') s_host_map = true; }
+    if (e && *e) s_host_map = (*e != '0'); }
+  if (native_only) { s_ws_extra = 0; s_host_map = false; }
   if (s_custom_video.enabled) {
     /* The custom mod owns a separate canvas; guest raster stays native. */
     s_ws_extra = 0; s_host_map = false;
   }
+  /* Say which binary this is, unconditionally.
+   *
+   * "Did you start an old version?" is not a question either of us should have
+   * to answer by inspecting timestamps. The compiler stamps the build, so the
+   * log names it. */
+  fprintf(stderr, "build: %s %s  widescreen=%d ninth=%d hostmap=%d\n",
+          __DATE__, __TIME__, s_ws_extra, s_ninth_scenario ? 1 : 0,
+          s_host_map ? 1 : 0);
   if (s_ws_extra > 0) {
+    if (!explicit_size) s_window_width = (kVideoWidth + s_ws_extra * 2) * scale;
     s_video_w = kVideoWidth + s_ws_extra * 2;
     s_video_pitch = s_video_w * 4;
     PpuSetExtraSpace(g_ppu, (uint8_t)s_ws_extra);
     s_ws_scratch = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
+    s_ws_scratch_bg = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
+    s_ws_obj_layer = (uint8_t *)calloc((size_t)s_video_pitch, kVideoHeight + 1);
     /* The per-frame choice above owns this now -- see the mode note there. */
     fprintf(stderr, "widescreen: %d px per side -> %dx%d\n",
             s_ws_extra, s_video_w, kVideoHeight);
@@ -4934,11 +8961,43 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "loaded state '%s', now at frame %llu\n",
             load_state_path, (unsigned long long)s_frames);
+
+#ifdef SC_AOT_TIER
+    /* The fiber executes its own CpuState, which load_state does not touch --
+     * and Init() pinned it to the reset contract during env parsing, before
+     * any state existed. Left alone, the fiber runs boot registers over
+     * restored WRAM: measured as a hang at $05935A inside 60 frames, while the
+     * same state is fine on the interpreter and the fiber is fine from boot. */
+    /* load_state() adopts into the fiber itself now. */
+#endif
   }
 
   if (qualify_frames) {
     return run_qualification(qualify_frames);
   }
+
+  /* The cartridge's save memory on disk (src/sc_sram.c): saved cities and
+   * scenario win marks survive closing the game. Windowed runs only -- a
+   * --qualify run has returned above, so no tool or comparison ever reads or
+   * writes the player's saves. Opened after --load-state, so the file wins
+   * over whatever SRAM the state carried. SC_SRAM_PATH names the file,
+   * SC_SRAM=0 turns this off. */
+  { const char *off = getenv("SC_SRAM");
+    if (!(off && *off == '0')) {
+      char path[1024];
+      const char *e = getenv("SC_SRAM_PATH");
+      if (e && *e) {
+        snprintf(path, sizeof path, "%s", e);
+      } else {
+        const char *tag = s_rom_fnv == SC_ROM_FNV_US ? "us"
+                        : s_rom_fnv == SC_ROM_FNV_EU ? "eu"
+                        : s_rom_fnv == SC_ROM_FNV_FR ? "fr"
+                        : s_rom_fnv == SC_ROM_FNV_DE ? "de"
+                        : s_rom_fnv == SC_ROM_FNV_JP ? "jp" : "rom";
+        snprintf(path, sizeof path, "urbanrecomp-%s.srm", tag);
+      }
+      ScSram_Open(g_snes->cart->ram, g_snes->cart->ramSize, path);
+    } }
 
   /* SDL3 returns true on success where SDL2 returned 0, so a bare `!= 0`
    * reads a successful init as a failure -- with an empty SDL_GetError(),
@@ -4953,10 +9012,17 @@ int main(int argc, char **argv) {
     fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
     return 1;
   }
+#if SNESRECOMP_SDL3
+  const SDL_WindowFlags window_flags = s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0;
+#else
+  const Uint32 window_flags = s_fullscreen == 2 ? SDL_WINDOW_FULLSCREEN
+                            : s_fullscreen == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
+#endif
   SDL_Window *window = snesrecomp_sdl_create_window(
-      "SimCitySNESRecomp", s_window_width, s_window_height,
-      SDL_WINDOW_RESIZABLE | (s_fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+      "Urban Recomp", s_window_width, s_window_height,
+      SDL_WINDOW_RESIZABLE | window_flags);
   if (!window) { fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError()); return 1; }
+  ScSetWindowIcon(window);
   /* No SDL_RENDERER_PRESENTVSYNC: on some hosts (observed under a VM) the
    * driver's vsync wait blocks for longer than one real display refresh
    * (e.g. ~33ms instead of ~16.67ms), silently halving the whole loop's
@@ -4968,6 +9034,8 @@ int main(int argc, char **argv) {
   /* vsync off deliberately -- see the comment above; pacing is manual. */
   SDL_Renderer *renderer = snesrecomp_sdl_create_renderer(window, false, false);
   if (!renderer) { fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError()); return 1; }
+  { const char *rn = snesrecomp_sdl_renderer_name(renderer);
+    fprintf(stderr, "renderer: %s\n", rn ? rn : "?"); }
   SDL_Texture *texture = SDL_CreateTexture(
       renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
       s_custom_video.enabled ? s_custom_renderer.view.width : s_video_w,
@@ -4979,16 +9047,17 @@ int main(int argc, char **argv) {
    * to blending, so A=0 renders it fully transparent -- a black window, with a
    * frame loop, blit and present that all report success. Pin the mode. */
   SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE);
-  snesrecomp_sdl_set_texture_linear(texture,s_linear_filter);
+  snesrecomp_sdl_set_texture_linear(texture, s_linear_filter);
 
   /* Queued (pushed) audio, not a pull callback: this host owns the DSP drain
    * loop and hands over finished samples. SDL3 removed SDL_QueueAudio and
    * folded the same behaviour into SDL_AudioStream, so the backend difference
    * lives in sc_sdl_compat.h rather than here. */
   ScAudio audio; SDL_memset(&audio, 0, sizeof(audio));
-  bool audio_dev = sc_audio_open(&audio, 32040, 2, 1024);
+  bool audio_dev = s_enable_audio && sc_audio_open(&audio, 32040, 2, 1024);
   if (audio_dev) {
-    fprintf(stderr, "audio: opened freq=%d channels=%d samples=%d\n",
+    fprintf(stderr, "audio: opened driver=%s freq=%d channels=%d samples=%d\n",
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
             audio.freq, audio.channels, audio.samples);
   } else {
     /* Previously silent on failure -- every audio code path below is
@@ -5004,6 +9073,18 @@ int main(int argc, char **argv) {
    * on a slow host (e.g. a VM) tell at a glance whether the emulator itself
    * is keeping up with real time, independent of anything ROM-side. */
   uint64_t fps_window_start = SDL_GetPerformanceCounter();
+  /* SC_PERF=1: once a second, where the wall clock of a host frame went --
+   * guest emulation, texture upload and draw, the pacing sleep, and the
+   * present. Average and worst frame, in ms. */
+  const bool perf_on = getenv("SC_PERF") != NULL;
+  enum { kPerfInput, kPerfEmu, kPerfAudio, kPerfDraw, kPerfSleep, kPerfPresent,
+         kPerfCount };
+  double perf_sum[kPerfCount] = {0}, perf_max[kPerfCount] = {0};
+  int perf_frames = 0;
+  const double perf_ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
+#define SC_PERF_ADD(slot, t0, t1) do { if (perf_on) { \
+    const double _ms = (double)((t1) - (t0)) * perf_ms; \
+    perf_sum[slot] += _ms; if (_ms > perf_max[slot]) perf_max[slot] = _ms; } } while (0)
   uint64_t fps_window_frames = 0;
   /* Manual frame pacer, replacing vsync (see the renderer-creation comment
    * above): target the SNES's real ~60.0988fps, sleeping off any leftover
@@ -5012,8 +9093,24 @@ int main(int argc, char **argv) {
   const double kTargetFrameSeconds = 1.0 / 60.0988;
   uint64_t next_frame_deadline = SDL_GetPerformanceCounter();
   while (!quit) {
+    const uint64_t loop_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
     SDL_Event ev;
-    while (SDL_PollEvent(&ev)) {
+    for (;;) {
+      /* SC_PERF also names a poll that stalls, and the event it returned. */
+      const uint64_t poll_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+      const bool got = SDL_PollEvent(&ev) != 0;
+      if (perf_on) {
+        const double ms = (double)(SDL_GetPerformanceCounter() - poll_t0) * perf_ms;
+        if (ms > 20.0) {
+          unsigned sub = 0;
+#if !SNESRECOMP_SDL3
+          if (got && ev.type == SDL_WINDOWEVENT) sub = ev.window.event;
+#endif
+          fprintf(stderr, "[perf] SDL_PollEvent took %.1f ms (event 0x%x/%u) at frame %llu\n",
+                  ms, got ? (unsigned)ev.type : 0u, sub, (unsigned long long)s_frames);
+        }
+      }
+      if (!got) break;
       if (ev.type == SDL_QUIT) quit = true;
       if (getenv("SC_SCRIPTED_INPUT")) continue; /* owned UI regression window */
       if (ev.type == SDL_KEYDOWN && !ev.key.repeat && SC_EVENT_SCANCODE(ev)==SDL_SCANCODE_F11) {
@@ -5203,6 +9300,7 @@ int main(int argc, char **argv) {
     int drawable_w = 0, drawable_h = 0;
     SDL_GetRendererOutputSize(renderer, &drawable_w, &drawable_h);
     ScViewport viewport = ScVideoViewport(&s_custom_video, drawable_w, drawable_h);
+    if (!s_custom_video.enabled) { viewport.width = s_video_w; viewport.core_x = s_ws_extra; }
     /* A paused frame is retained until simulation resumes, including while
      * resizing its window. Never clear the paused picture for a new canvas. */
     if (s_menu_open && s_custom_video.enabled) viewport=s_custom_renderer.view;
@@ -5226,6 +9324,37 @@ int main(int argc, char **argv) {
     bool scripted_input = getenv("SC_SCRIPTED_INPUT") != NULL;
     static const uint8_t empty_keys[512] = {0};
     if (scripted_input) keys = empty_keys;
+    /* Throw away the pointer delta that accumulated while the window was not
+     * ours.
+     *
+     * SDL_GetRelativeMouseState() reports movement since the LAST call, and
+     * it keeps accumulating while the window is unfocused or the pointer is
+     * outside it. Alt-tab away, move the mouse across the desktop, come back,
+     * and the next call returns that whole journey in one delta -- so the
+     * cursor jumps somewhere far from where the pointer actually is.
+     * Reported from play as the mouse "not on spot when the cursor gets back
+     * to the window".
+     *
+     * The F3 toggle already does exactly this discard for the same reason.
+     * This is that, on regaining focus or the pointer re-entering.
+     *
+     * Polled from the window flags rather than handled as an event, because
+     * the event spelling differs between SDL2 and SDL3 (SDL_WINDOWEVENT with
+     * a sub-type vs SDL_EVENT_WINDOW_*) while these two flags do not. This
+     * file has already been bitten three times by SDL2/SDL3 renames that keep
+     * compiling, so the version-neutral spelling is the safer one. */
+    { static bool had_focus = true;
+      const uint32_t wf = (uint32_t)SDL_GetWindowFlags(window);
+      const bool has_focus = (wf & (SDL_WINDOW_INPUT_FOCUS |
+                                    SDL_WINDOW_MOUSE_FOCUS)) != 0;
+      if (has_focus && !had_focus) {
+#if SNESRECOMP_SDL3
+        { float fx = 0.0f, fy = 0.0f; SDL_GetRelativeMouseState(&fx, &fy); }
+#else
+        SDL_GetRelativeMouseState(NULL, NULL);
+#endif
+      }
+      had_focus = has_focus; }
     if (s_mouse_enabled && !scripted_input) {
       /* SDL reports the pointer delta in HOST SCREEN pixels; the cursor lives
        * in SNES pixels. Feeding one straight into the other made the cursor
@@ -5346,6 +9475,19 @@ int main(int argc, char **argv) {
       if (fdx || fdy) apply_mouse_delta(fdx, fdy);
     }
     uint16_t input = 0;
+    /* The pad through the launcher's keybinds.ini when this build has the
+     * launcher (src/sc_launcher.c); its first run writes the layout below, so
+     * nothing moves for a player who never opens the Controller page. */
+    static int s_keybinds = -1;
+    if (s_keybinds < 0) s_keybinds = ScKeybindsInit() ? 1 : 0;
+    if (s_keybinds) {
+      input = (uint16_t)ScKeybindsRead((const unsigned char *)keys);
+      /* U/H/J/K stay a spare D-pad for testing, unless a binding took them. */
+      if (keys[SDL_SCANCODE_U] && !ScKeybindsUses(SDL_SCANCODE_U)) input |= kPad_Up;
+      if (keys[SDL_SCANCODE_J] && !ScKeybindsUses(SDL_SCANCODE_J)) input |= kPad_Down;
+      if (keys[SDL_SCANCODE_H] && !ScKeybindsUses(SDL_SCANCODE_H)) input |= kPad_Left;
+      if (keys[SDL_SCANCODE_K] && !ScKeybindsUses(SDL_SCANCODE_K)) input |= kPad_Right;
+    } else {
     /* Diamond cluster U/H/J/K as an alternate D-pad, alongside arrow keys,
      * for testing (U=up, H=left, J=down, K=right). */
     if (keys[SDL_SCANCODE_UP] || keys[SDL_SCANCODE_U]) input |= kPad_Up;
@@ -5387,6 +9529,7 @@ int main(int argc, char **argv) {
      * save-state slot hotkeys (Shift+1..Shift+0) without also feeding a
      * Select press into the game every time a state is saved/loaded. */
     if (keys[sc_select]) input |= kPad_Select;
+    }   /* fixed bindings */
     /* Mouse buttons: LEFT = SNES B, RIGHT = SNES A.
      *
      * Lets host-mouse cursor control (F3) actually select and interact, not
@@ -5401,8 +9544,25 @@ int main(int argc, char **argv) {
      * $0100), not the $4218/$4219 hardware layout -- see
      * docs/HANDOVER_metal_marines.md #1. */
     { const uint32_t mb = SDL_GetMouseState(NULL, NULL);
+      /* On a MENU, feed the synthesised d-pad without waiting for a button.
+       *
+       * apply_mouse_delta() pokes $01eb/$01ed, and that is what moves the
+       * cursor in the city view. On the menu pages it does nothing: they
+       * track their own selection, and moving the pointer left the last
+       * d-pad choice selected. Reported from play three ways -- the mouse
+       * not activating buttons in the tax menu, not working on normal menus,
+       * and working only while a button is held. The last one is the tell:
+       * holding LEFT is what lets the synthesised direction through here,
+       * and the direction is the only thing a menu reacts to.
+       *
+       * Not fed unconditionally, because in the city view the poke ALREADY
+       * moves the cursor -- adding the d-pad there would move it twice per
+       * frame. host_map_screen_live() is the existing discriminator: it is
+       * false for exactly the pages that report $14 == 0 without BG2, which
+       * are the menu pages this is for. */
+      const bool mouse_on_menu = !host_map_screen_live();
       if (s_mouse_enabled && s_mouse_dir_frames > 0 &&
-          (mb & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+          ((mb & SDL_BUTTON(SDL_BUTTON_LEFT)) || mouse_on_menu)) {
         input |= s_mouse_dir;
         s_mouse_dir_frames--;
       } else if (s_mouse_dir_frames > 0) {
@@ -5431,9 +9591,8 @@ int main(int argc, char **argv) {
      * audio gets queued (skipping the rest, rather than speeding it up or
      * garbling it) and only its video is presented -- the frame pacer
      * below still targets normal 60fps, so this is a real Nx speed-up in
-     * game-time per real second, not just a faster/choppier render. Also
-     * applied automatically (no key needed) while the map/scenario
-     * generation loop is active -- see s_gen_loop_active_frames above. */
+     * game-time per real second, not just a faster/choppier render. Held, and
+     * only held -- nothing applies it automatically any more. */
     /* DRAG TURBO: run extra guest frames while a mouse button is held.
      *
      * The cursor and the map scroll are not slow because their routines are
@@ -5455,15 +9614,12 @@ int main(int argc, char **argv) {
     const bool dragging = s_drag_turbo > 1 &&
       (SDL_GetMouseState(NULL, NULL) &
        (SDL_BUTTON(SDL_BUTTON_LEFT) | SDL_BUTTON(SDL_BUTTON_RIGHT))) != 0;
-    /* Map generation gets its own, much larger factor. 6x barely dents a wait
-     * the player is staring at; the point is to collapse it, and nothing is
-     * being watched while the generator runs. Tab-held fast-forward keeps its
-     * modest 6x, since that IS being watched. */
-    const bool generating = s_generating || s_gen_loop_active_frames > 0;
-    bool fast_forward = keys[SDL_SCANCODE_TAB] || generating;
-    int frames_this_iter = generating ? s_mapgen_turbo
-                         : fast_forward ? 6
-                         : (dragging ? s_drag_turbo : 1);
+    /* No automatic boost of any kind. The map-generation and decompressor
+     * turbos both existed to collapse waits; the decompiled generator removes
+     * the one that mattered, and the other was advancing the simulation during
+     * ordinary play. Only explicit held gestures remain. */
+    bool fast_forward = keys[SDL_SCANCODE_TAB];
+    int frames_this_iter = fast_forward ? 6 : (dragging ? s_drag_turbo : 1);
 
     /* SC_FRAME_TIME=<ms threshold>: log (rate-limited, 500 hits) wall-clock
      * time for any run_one_frame() call slower than the threshold -- there's
@@ -5472,7 +9628,8 @@ int main(int argc, char **argv) {
      * longer than ~16.67ms on some screen, the game visibly runs below
      * 60fps on that screen specifically, with no other symptom. */
     const char *frame_time_thresh_env = getenv("SC_FRAME_TIME");
-    uint64_t frame_t0 = frame_time_thresh_env ? SDL_GetPerformanceCounter() : 0;
+    uint64_t frame_t0 = (frame_time_thresh_env || perf_on) ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfInput, loop_t0, frame_t0);
 
     /* While the settings menu is open, freeze the game -- skip advancing
      * the emulator entirely and just keep re-presenting the last rendered
@@ -5501,20 +9658,16 @@ int main(int argc, char **argv) {
       }
     }
     if (guard_tripped) break;
+    const uint64_t emu_t1 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfEmu, frame_t0, emu_t1);
+    ScSram_Tick();
 
-    /* REVERTED (see docs/ROM_MAP.md or git history for the attempt):
-     * fast-forward's audio comment above ("only the last of the batch's
-     * audio gets queued, skipping the rest") describes intent that was
-     * never actually enforced -- during a fast-forward batch, the DSP
-     * ring genuinely accumulates several frames' worth of undrained
-     * audio, which plays back later as an audible delay. Two different
-     * attempts to discard that backlog each frame (a hand-rolled
-     * sampleRead assignment, then the shared runner's own
-     * dsp_trimSamples()) both caused a complete, permanent audio freeze
-     * in live testing instead of just fixing the delay -- root cause not
-     * found. Reverted rather than ship a "fix" that's worse than the
-     * original symptom; the delay remains a known issue (see the sound
-     * investigation thread). */
+    /* A fast-forward batch leaves several frames of audio in the DSP ring;
+     * the audio drain below trims it to one frame, so the sound does not
+     * trail the picture afterwards. Two earlier attempts at that froze the
+     * sound for good, because dsp_getSamples() then consumed a fixed 534
+     * samples whether or not they existed. It now takes exactly what it is
+     * asked for, never more than exists. */
 
     if (frame_time_thresh_env) {
       static uint32_t s_frame_time_hits;
@@ -5564,7 +9717,7 @@ int main(int argc, char **argv) {
        * actually running: while the settings menu is open no frames are
        * simulated, so no samples are produced and there is nothing to pace
        * against. (This is the immediate half of the fix below.) */
-      if (!s_menu_open) audio_acc += (double)audio.freq / 60.0988;
+      if (!s_menu_open) audio_acc += kDspSamplesPerFrame;
       /* Hard-clamp the accumulator to exactly the drain condition's upper
        * bound, which is also audio_buf's capacity. Without this, ANY stall
        * of two or more host iterations where the ring hasn't refilled --
@@ -5583,19 +9736,31 @@ int main(int argc, char **argv) {
       int wantN = (int)audio_acc;
       Dsp *dsp = g_snes->apu->dsp;
       uint32_t available = dsp->sampleWrite - dsp->sampleRead;
-      /* dsp_getSamples() always consumes a fixed 534 native samples per
-       * call and resamples them to `wantN` -- gate on that real fixed
-       * quantum, not on `wantN`, or the DSP's own ring-full backpressure
-       * permanently freezes production (see run_qualification()). */
+      /* dsp_getSamples() takes exactly as many native samples as it is
+       * asked for, and never more than exist (runner/src/snes/dsp.c). */
       static uint64_t s_audio_dbg_queued, s_audio_dbg_calls, s_audio_dbg_fails;
-      if (available >= 534 && wantN > 0 && wantN <= 1024) {
+      if (available >= (uint32_t)wantN && wantN > 0 && wantN <= 1024) {
         audio_acc -= (double)wantN;
-        dsp_getSamples(dsp, audio_buf, wantN);
-        int qrc = sc_audio_queue(&audio, audio_buf, (Uint32)(wantN * 2 * sizeof(int16_t)));
+        const uint32_t got = dsp_getSamples(dsp, audio_buf, wantN);
+        const Uint32 queued_samples = sc_audio_queued(&audio) / (2 * sizeof(int16_t));
+        static int16_t rs_buf[kAudioOutMax * 2];
+        const int out_n = sc_audio_rate_control(audio_buf, (int)got, queued_samples, rs_buf);
+        /* Hard cap for a stall the rate control cannot absorb: past a quarter
+         * of a second queued, the frame is dropped rather than played late. */
+        int qrc = 0;
+        if (queued_samples < 8192u && out_n > 0)
+          qrc = sc_audio_queue(&audio, rs_buf, (Uint32)(out_n * 2 * sizeof(int16_t)));
         s_audio_dbg_calls++;
         if (qrc != 0) s_audio_dbg_fails++;
-        else s_audio_dbg_queued += (uint64_t)wantN;
+        else s_audio_dbg_queued += (uint64_t)out_n;
       }
+      /* And on the DSP side: fast-forward (Tab) and drag turbo run several
+       * guest frames per host frame, but only one frame's worth is played.
+       * Whatever is left beyond about three frames is dropped, so the sound
+       * catches up with the picture instead of trailing it by up to the
+       * ring's quarter second. */
+      if (dsp->sampleWrite - dsp->sampleRead > 1600u)
+        dsp_trimSamples(dsp, 534u);
       /* SC_AUDIO_DEBUG: periodic drain-loop status, for diagnosing
        * windowed-only audio issues -- headless qualify mode shows healthy
        * DSP production (92% active frames) as a baseline, so if this
@@ -5605,13 +9770,18 @@ int main(int argc, char **argv) {
        * turned out to be self-inflicted (see the revert above) -- kept
        * for next time. */
       if (getenv("SC_AUDIO_DEBUG") && (s_frames % 180) == 0) {
-        fprintf(stderr, "audio: f=%llu queued_dev=%u drained_total=%llu calls=%llu fails=%llu\n",
-                (unsigned long long)s_frames, sc_audio_queued(&audio),
+        fprintf(stderr, "audio: f=%llu queued=%u dsp_backlog=%u drift=%+.3f%% "
+                        "played_total=%llu calls=%llu fails=%llu\n",
+                (unsigned long long)s_frames,
+                sc_audio_queued(&audio) / (unsigned)(2 * sizeof(int16_t)),
+                (unsigned)(dsp->sampleWrite - dsp->sampleRead), s_audio_drift * 100.0,
                 (unsigned long long)s_audio_dbg_queued, (unsigned long long)s_audio_dbg_calls,
                 (unsigned long long)s_audio_dbg_fails);
       }
     }
 
+    const uint64_t draw_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfAudio, emu_t1, draw_t0);
     void *pixels = NULL; int pitch = 0;
     bool _lok = SDL_LockTexture(texture, NULL, &pixels, &pitch) SC_SDL_OK;
     /* Row-wise, NOT one memcpy of the whole array. s_video_pixels is sized for
@@ -5688,6 +9858,7 @@ int main(int argc, char **argv) {
 
     next_frame_deadline += (uint64_t)(kTargetFrameSeconds * (double)SDL_GetPerformanceFrequency());
     uint64_t now = SDL_GetPerformanceCounter();
+    SC_PERF_ADD(kPerfDraw, draw_t0, now);
     if (now < next_frame_deadline) {
       double remaining_ms = (double)(next_frame_deadline - now) * 1000.0 /
                              (double)SDL_GetPerformanceFrequency();
@@ -5700,6 +9871,27 @@ int main(int argc, char **argv) {
        * drift after a one-off slow frame. */
       next_frame_deadline = now;
     }
+    const uint64_t present_t0 = perf_on ? SDL_GetPerformanceCounter() : 0;
+    SC_PERF_ADD(kPerfSleep, now, present_t0);
+    /* SC_DUMP_DIR + SC_DUMP_INTERVAL, for the INTERACTIVE loop.
+     *
+     * The same pair has worked in run_qualification() for a long time, and I
+     * assumed it worked here too -- it does not, that hook is in the headless
+     * path only. A capture session recorded zero frames because of it, which
+     * matters whenever a defect only shows while the map is moving and so
+     * cannot be caught in a screenshot. */
+    { const char *dd = getenv("SC_DUMP_DIR"), *di = getenv("SC_DUMP_INTERVAL");
+      if (dd && *dd && di && *di) {
+        static unsigned long long cap_frame;
+        const unsigned long long iv = strtoull(di, NULL, 0);
+        if (iv && cap_frame % iv == 0) {
+          char pth[512];
+          snprintf(pth, sizeof pth, "%s/frame_%010llu.ppm", dd, cap_frame);
+          if (!write_ppm(pth))
+            fprintf(stderr, "SC_DUMP_DIR: cannot write %s\n", pth);
+        }
+        cap_frame++;
+      } }
     /* SDL_RenderPresent returns void on SDL2 and bool on SDL3, so it cannot
      * share the SC_SDL_OK spelling with the other calls. */
 #if SNESRECOMP_SDL3
@@ -5721,20 +9913,36 @@ int main(int argc, char **argv) {
                 (int)(SDL_GetRenderer(window) == renderer), SDL_GetError());
       } }
 
+    if (perf_on) {
+      SC_PERF_ADD(kPerfPresent, present_t0, SDL_GetPerformanceCounter());
+      perf_frames++;
+    }
     fps_window_frames++;
     double fps_window_elapsed = (double)(SDL_GetPerformanceCounter() - fps_window_start) /
                                  (double)SDL_GetPerformanceFrequency();
     if (fps_window_elapsed >= 1.0) {
       char title[128];
-      snprintf(title, sizeof(title), "SimCitySNESRecomp -- %.1f fps",
+      snprintf(title, sizeof(title), "Urban Recomp -- %.1f fps",
                (double)fps_window_frames / fps_window_elapsed);
       SDL_SetWindowTitle(window, title);
+      if (perf_on && perf_frames) {
+        static const char *const kPerfName[kPerfCount] = {
+            "input", "emu", "audio", "draw", "sleep", "present"};
+        fprintf(stderr, "[perf] %.1f fps", (double)fps_window_frames / fps_window_elapsed);
+        for (int k = 0; k < kPerfCount; k++) {
+          fprintf(stderr, "  %s %.2f/%.2f", kPerfName[k], perf_sum[k] / perf_frames, perf_max[k]);
+          perf_sum[k] = perf_max[k] = 0;
+        }
+        fputc('\n', stderr);
+        perf_frames = 0;
+      }
       fps_window_frames = 0;
       fps_window_start = SDL_GetPerformanceCounter();
     }
   }
 
   if (audio_dev) sc_audio_close(&audio);
+  ScSram_Flush();
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);

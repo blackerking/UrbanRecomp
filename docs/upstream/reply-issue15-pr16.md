@@ -4,7 +4,7 @@
 
 ---
 
-Tested on SimCity (US), with `pull/16/head` merged onto the runner branch this
+Tested on the US ROM, with `pull/16/head` merged onto the runner branch this
 host builds against.
 
 **Result: no change for this host.** The rendered frame is byte-identical to
@@ -24,7 +24,7 @@ devices around `interp_bridge_run_loop()` rather than calling `RtlRunFrame` —
 so neither call is ever reached. It is the same shape as trap 1 in #22, "the
 beam has two owners".
 
-**Method, since SimCity's HDMA is subtle.** It is observable on exactly one
+**Method, since the game's HDMA is subtle.** It is observable on exactly one
 scanline (row 198) of one screen. Reference measurement, this host's own
 HDMA on vs off: 208 pixels differ on that row. Then:
 

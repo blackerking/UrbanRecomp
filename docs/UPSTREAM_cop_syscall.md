@@ -1,6 +1,6 @@
 # Upstream issue draft: model `COP #$imm` as a call-with-return
 
-For `mstan/snesrecomp`. Written against SimCity (SNES, USA), but the defect is
+For `mstan/snesrecomp`. Written against the US city-builder ROM this host targets, but the defect is
 general: any game that uses `COP` as a syscall instruction loses most of its
 static-recompilation coverage to it.
 
@@ -16,11 +16,11 @@ if insn.mnem == "BRK" || insn.mnem == "COP" {
 ```
 
 A function containing a `COP` is therefore truncated at that instruction and
-cannot be proven AOT-eligible. In SimCity that is the single largest limit on
+cannot be proven AOT-eligible. In this game that is the single largest limit on
 coverage by a wide margin — **69% of all LLE-only instructions are in
 COP-implicated nodes**.
 
-`COP` is not an exotic instruction here. SimCity uses it as its *entire syscall
+`COP` is not an exotic instruction here. The game uses it as its *entire syscall
 mechanism*: `COP #$00` with a service number in `A`, **309 call sites**, 11
 services including the LC_LZ5 decompressor and the game's own wait-for-vblank
 primitive.
@@ -80,7 +80,7 @@ terminator.
 
 ## Measurements
 
-SimCity's manifest at 1068 exact variants / 487 roots (roots seeded from the
+This game's manifest at 1068 exact variants / 487 roots (roots seeded from the
 ROM's own dispatch tables plus entry points confirmed by recorded play
 sessions):
 
@@ -135,7 +135,7 @@ treatment, one level up:
 1. Decode `COP #$imm` as a **call that returns**, so the decode continues at
    the following instruction instead of terminating.
 2. Resolve the target where possible. For a vector-dispatch idiom like
-   SimCity's, the service number is an immediate in `A` at the vast majority of
+   the game's, the service number is an immediate in `A` at the vast majority of
    call sites (`LDA #$000N ; COP #$00`), so the target is statically known and
    the edge can be a real demand edge to the handler.
 3. Where the service number is not statically known, keep the edge unresolved
@@ -151,9 +151,9 @@ analyzer having to prove the vector-dispatch idiom generically.
 ## Reproducing
 
 ```bash
-git clone --recurse-submodules https://github.com/blackerking/SimCitySNESRecomp
-cd SimCitySNESRecomp
-# stage your own legally obtained SimCity (USA) as simcity.sfc
+git clone --recurse-submodules https://github.com/blackerking/UrbanRecomp
+cd UrbanRecomp
+# put your own legally obtained US ROM in the repository root (any file name)
 PYTHON=python bash tools/regen.sh --no-tests
 ```
 
@@ -218,7 +218,7 @@ This matters for any host that advances devices from `cpu->master_cycles`, and
 it makes a bounced-vs-interpreted differential diverge on the master clock even
 when logic is bit-identical.
 
-Reproduce with `cmake --build build --target SimCityAOTDiff && ./SimCityAOTDiff`.
+Reproduce with `cmake --build build --target UrbanRecompAOTDiff && ./UrbanRecompAOTDiff`.
 
 
 ### Also found: `indirect_dispatch` does not cover `JSR (abs,X)`
@@ -239,7 +239,7 @@ has no effect here, because the native analyzer only consults it for **JMP**:
 if insn.mnem == "JMP" && (insn.mode == Mode::Indir || insn.mode == Mode::IndirX) {
 ```
 
-Both of SimCity's dispatchers are `JSR (abs,X)` — opcode `$FC`, not `$7C`:
+Both of the game's dispatchers are `JSR (abs,X)` — opcode `$FC`, not `$7C`:
 
 | site | bytes | what it is |
 |---|---|---|
@@ -262,7 +262,7 @@ Two things would help, in order of value:
    a site**. A directive that silently does nothing is worse than a rejected
    one; it took a before/after manifest diff to notice.
 
-This matters beyond SimCity: `JSR (abs,X)` is the standard 65816 idiom for a
+This matters beyond this game: `JSR (abs,X)` is the standard 65816 idiom for a
 call-through-jump-table, and a game that uses it for its main dispatcher cannot
 currently have that edge resolved by any cfg directive.
 
@@ -277,7 +277,7 @@ call with a proven exit) turned out to be more machinery than the problem
 needs. Two observations shrink it to a handful of lines:
 
 **1. A COP is M/X-transparent by hardware.** It pushes PB/PC/P; the handler
-runs; `RTI` pops P. Whatever the handler does to the width flags — SimCity's
+runs; `RTI` pops P. Whatever the handler does to the width flags — the game's
 dispatcher does `REP #$20 ; REP #$10` immediately — the caller's M/X are
 restored on return. So decode can continue past a COP in the entry widths
 with no assumption, and no exit-M/X proof is required. This is what makes the

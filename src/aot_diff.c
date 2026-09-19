@@ -23,7 +23,7 @@
  * interp816 stepped until PC leaves the routine's extent, which is exact for
  * a straight-line routine like this one.
  *
- * Build: cmake --build build --target SimCityAOTDiff
+ * Build: cmake --build build --target UrbanRecompAOTDiff
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -98,7 +98,8 @@ static RecompReturn (*find_body(uint32_t pc24, int *which))(CpuState *) {
 }
 
 int main(int argc, char **argv) {
-    const char *rom_path = argc > 1 ? argv[1] : "simcity.sfc";
+    if (argc < 2) { fprintf(stderr, "usage: %s <US ROM>\n", argv[0]); return 2; }
+    const char *rom_path = argv[1];
     FILE *f = fopen(rom_path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", rom_path); return 2; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
@@ -126,14 +127,14 @@ int main(int argc, char **argv) {
     int failing_pcs = 0;
     unsigned first_fail[8]; int nfail = 0;
 
-    for (int i = 0; i < SIMCITY_PURE_LEAF_COUNT; i++) {
-        unsigned pc24 = kSimCityPureLeaves[i].pc24;
-        unsigned end  = kSimCityPureLeaves[i].end;
+    for (int i = 0; i < SC_PURE_LEAF_COUNT; i++) {
+        unsigned pc24 = kScPureLeaves[i].pc24;
+        unsigned end  = kScPureLeaves[i].end;
         int which = -1;
         RecompReturn (*body_fn)(CpuState *) = find_body(pc24, &which);
         if (!body_fn) { skipped++; continue; }
 
-        printf("  [%2d/%d] %02X:%04X ...\n", i + 1, SIMCITY_PURE_LEAF_COUNT,
+        printf("  [%2d/%d] %02X:%04X ...\n", i + 1, SC_PURE_LEAF_COUNT,
                pc24 >> 16, pc24 & 0xffff);
         fflush(stdout);
         int body_bad = 0, body_skip = 0;

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@SC_APP_ID@</id>
+  <name>Urban Recomp</name>
+  <summary>A classic SNES city builder, recompiled to run natively</summary>
+  <developer id="io.github.blackerking">
+    <name>blackerking and the Urban Recomp contributors</name>
+  </developer>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT AND LicenseRef-PolyForm-Noncommercial-1.0.0</project_license>
+  <description>
+    <p>
+      Urban Recomp runs a classic Super Nintendo city builder natively, with
+      widescreen, a launcher, mouse control, an in-game settings menu and
+      battery saves. It contains no game data: you need your own copy of the
+      US cartridge.
+    </p>
+  </description>
+  <launchable type="desktop-id">@SC_APP_ID@.desktop</launchable>
+  <url type="homepage">https://github.com/blackerking/UrbanRecomp</url>
+  <categories>
+    <category>Game</category>
+    <category>Simulation</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@PROJECT_VERSION@" date="2026-09-18"/>
+  </releases>
+</component>

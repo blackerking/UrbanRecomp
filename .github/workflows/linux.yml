@@ -1,0 +1,85 @@
+name: Linux build
+
+# Compiles on Ubuntu without a ROM -- there is no src/gen in a checkout, so this
+# is the interpreter build that ships -- installs it into a staging folder, and
+# checks the desktop entry, the icons and that the program starts.
+#
+# Runs on code changes, on release tags and by hand, not on every push, to stay
+# well inside the free Actions minutes.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, widescreen-wood-margins]
+    tags: ['v*']
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'assets/**'
+      - 'snesrecomp'
+      - 'recomp-ui'
+      - '.github/workflows/linux.yml'
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build libsdl2-dev libgl-dev desktop-file-utils appstream
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSNESRECOMP_SDL_BACKEND=SDL2
+          -DCMAKE_INSTALL_PREFIX=/usr/local
+
+      - name: Build
+        run: cmake --build build --target UrbanRecomp
+
+      - name: Install into a staging folder
+        run: DESTDIR="$PWD/stage" cmake --install build
+
+      - name: Check the desktop integration
+        run: |
+          find stage -type f | sort
+          desktop-file-validate stage/usr/local/share/applications/io.github.blackerking.UrbanRecomp.desktop
+          appstreamcli validate --no-net --explain \
+            stage/usr/local/share/metainfo/io.github.blackerking.UrbanRecomp.metainfo.xml || true
+          for s in 16 24 32 48 64 128 256 512; do
+            test -f "stage/usr/local/share/icons/hicolor/${s}x${s}/apps/io.github.blackerking.UrbanRecomp.png"
+          done
+
+      - name: Start without a ROM
+        # --no-settings skips the launcher, so no display is needed. With no ROM
+        # anywhere the game must say so and exit 1 -- which proves the binary
+        # loads its libraries and runs main().
+        run: |
+          set +e
+          work="$(mktemp -d)"
+          URBANRECOMP_HOME="$work" stage/usr/local/bin/urbanrecomp --no-settings 2>&1 | tee "$work/out.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          grep -q "no ROM" "$work/out.txt"
+          test "$code" -eq 1
+
+      - name: Pack the staged install
+        # Unpacks into /usr/local:  sudo tar -xzf UrbanRecomp-linux-x64.tar.gz -C /usr/local
+        run: tar -C stage/usr/local -czf UrbanRecomp-linux-x64.tar.gz bin lib share
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UrbanRecomp-linux-x64
+          path: UrbanRecomp-linux-x64.tar.gz
+          retention-days: 14

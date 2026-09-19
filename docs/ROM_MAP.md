@@ -1,4 +1,4 @@
-# SimCity (SNES, US) ROM map
+# ROM map (US image)
 
 > **CORRECTION:** entries below that describe `$011c`/`$ca`/`$0124` low
 > nibbles as "hardware-guaranteed zero" and treat `AND #$0f00` direction
@@ -108,10 +108,12 @@ confidence notes on each -- summary table only below.
 | `00:928f-92cb` | *(shared edge-detector body)* | Busy-waits on `$4212 & 1` (auto-joypad-read-in-progress) before reading each port; XORs new vs. previous value for edge-detect, writes held/edge state to `$0123,X`/`$c9,X` **and** `$011b,X` (`92c7`) -- confirmed genuinely populates `$011b` with real data, contradicting a naive "always zero" read elsewhere (see `$011b` WRAM entry) |
 | `01:afbe` | *(fast-travel scroll increment, FIXED and confirmed working)* | A 4-way `LSR`/`BCC` bit-ladder over `$01c1` (16-bit `LDA`, but only bits 0-3 tested): bit0 (Right) -> `afc6: INC $01bd`; bit1 (Left) -> `afcc: DEC $01bd`; bit2 (Down) -> `afd2: INC $01bf`; bit3 (Up) -> `afd8: DEC $01bf`. `$01bd`/`$01bf` are map scroll-X/Y. Called from the tail of `01:8d26` once `01:8d36`'s direction-nibble read is fixed (was the actual bug -- see `01:8d26`). Confirmed end-to-end via deterministic `--load-state`+`--input` testing: holding B+Right/B+Up reaches `afc6`/`afd8` respectively, and a before/after WRAM dump shows `$01bd`/`$01bf` genuinely changing |
 | `00:8211` | *(COP syscall dispatcher)* | `CLI ; PHB ; PEA $0000 ; PLB ; PLB ; REP #$20 ; REP #$10 ; ASL A ; TAX ; JSR ($8223,X) ; PLB ; RTI`. An 11-entry service table at `00:8223`, service number in `A`, ~309 call sites ROM-wide. Table: 0/5/6 -> `930d`, 1 -> `86a4`, 2 -> `8ea9`, 3 -> `8e43`, 4 -> `8e75`, 7 -> `9479`, 8 -> `90dd` (LC_LZ5), 9 -> `8f82`, 10 -> `86c8`. Confirmed live by bsnes trace (`A=4` dispatched to `008e75`, `A=0` to `00930d`) |
-| `00:930d` | ***(COP service 0 -- wait for vblank; the LLE-scheduler yield primitive)*** | `SEP #$20 ; STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6 ; RTS`. Spins until the NMI handler releases it with `INC $b9` at `00:80bc` (gated on bit 7 of `$00b1`, which service 4 at `00:8e75` sets). 133 call sites -- the most-used service. **This is SimCity's once-per-frame quiescence point**, i.e. the "which PCs are the yield primitives" answer `snesrecomp/docs/LLE_SCHEDULER.md` asks each game for. Unlike Mega Man X's coroutine-switch yield, this one plainly returns via `RTS` |
+| `00:930d` | ***(COP service 0 -- wait for vblank; the LLE-scheduler yield primitive)*** | `SEP #$20 ; STZ $b9 ; INC $c7 ; LDA $b9 ; BEQ -6 ; RTS`. Spins until the NMI handler releases it with `INC $b9` at `00:80bc` (gated on bit 7 of `$00b1`, which service 4 at `00:8e75` sets). 133 call sites -- the most-used service. **This is the game's once-per-frame quiescence point**, i.e. the "which PCs are the yield primitives" answer `snesrecomp/docs/LLE_SCHEDULER.md` asks each game for. Unlike Mega Man X's coroutine-switch yield, this one plainly returns via `RTS` |
 | `$00c7` | *(spin counter / PRNG seed source)* | Incremented once per spin iteration while `00:930d` waits for vblank, and read by `00:823e` to seed `$59`/`$5b`/`$5d` -- so the PRNG is seeded from how long the player took, which is what makes generated maps vary |
 | `00:824b` / `00:824f` | ***(PRNG step -- NOT a checksum)*** | `CLC ; LDA $59 ; STA $5d ; ADC $5b ; STA $59 ; ADC $5d ; STA $5b ; RTS` -- an additive (lagged-Fibonacci-with-carry) generator over two 16-bit state words, returning the new `$5b` in `A`. It takes **no input**, which is what rules out a checksum: it folds nothing in, it only advances state. Earlier notes here and in the README called it a "shared checksum/hash routine"; the seeding at `03:d840` does fold `$0b27`-`$0b29` in, but that happens once, outside this routine. Proof it is used as randomness: `01:f1fd` calls it and immediately does `AND #$00ff ; CMP #$0056 ; BCS`, i.e. branches on a ~34%/66% split of the returned byte |
 | `03:d840`-`03:d889` | *(map-generation seeding)* | `LDA $0b28 ; EOR #$ffff ; ROL A x5 ; ADC #$1238` seeds `$5b`; a second mix of all three seed bytes gives `AND #$001f -> X`, then `JSL $00824b ; DEX ; BPL` runs the PRNG **1-32 times, a seed-dependent count** (not the fixed 10 iterations previously recorded). Then `JSL $01f1ed` and `JSL $02923f` do the actual work |
+| `01:f8e9` | *(map generator: read a cell)* | Computes `y * 120` with the hardware multiplier, adds x, and reads `$7F0200,X` as a word array masked `AND #$03ff`. **The generator's map is in bank `$7F`, at `$7F0200`** -- rows elsewhere in this file describing the generated map at `$7e0200` point at a different buffer. Measured on a terrain state, `$7F0200` holds 37 distinct tile values over the 12000 cells while `$7E0200` holds 411, which is far too many to be tiles | High (read directly, and cross-checked against live WRAM) |
+| `01:f42c` / `01:f430` / `01:f434` | *(map generator: neighbour deltas and the edge-tile table)* | `f42c` is dx `FF 00 01 00` = -1,0,+1,0 and `f430` is dy `00 01 00 FF` = 0,+1,0,-1, i.e. the four neighbours W,S,E,N. `01:f444` scans them X=3..0 doing `ASL $045b` before each `INC`, so the first visited lands in the high bit and the 4-bit mask reads **N E S W** from bit 3 down. `f434` is the 16-entry mask-to-tile table: `01 07 0A 09 08 01 0B 01 05 04 01 01 06 01 01 01`. Eight masks map to tile `01` (nothing special), including both diagonal-opposite pairs (5 and A), which a four-neighbour scheme cannot express. This is shoreline/edge fitting; most results then coin-toss between the tile and tile+8. Read from the US ROM | High (read directly) |
 | `01:f1ed` / `01:f1f1` | *(terrain feature generator)* | Draws a random byte from `00:824b` and branches: roughly a third of the time `JSR $f22c`, otherwise a chain of five distinct feature routines (`$f380`, `$f5b9`, `$f311`, `$f444`, `$f3a3`). This is the core evidence that map generation is genuinely procedural rather than a table of prebuilt maps |
 | `02:923f` / `02:9243` | *(generation scratch clear + upload)* | Zero-fills `$7EA400`-`$7EBFFF` (7168 bytes) then sets up DMA -- the rendering/upload side of generation |
 | `00:90dd` | *(LC_LZ5 decompressor)* | Nintendo/community-named "LC_LZ5" compression. Input bank/offset via WRAM `$0b`/`$0009`; output to **`$7E8000 + X`**, with `X` loaded from `$000e` (16-bit, so the output window reaches `$7F7FFF`) -- *not* `$7E:0000+X` as this row previously said. Reached via `COP #$00` with `A = 8`. `00:926d` handles a source bank crossing by setting `Y = $8000` and incrementing the data-bank register. See `tools/extract_graphics.py` for a reimplementation verified byte-exact against a live run, and `docs/REFERENCE_map_format.md` for the full decode |
@@ -471,7 +473,7 @@ Sea sand island — which is why it can be Sylt without inventing any terrain.
 
 The game treats it as a scenario: it comes up 1991 JAN, $20 000, population 0,
 with "5 years to complete scenario". The briefing it shows is free play's
-"Welcome to the world of SIMCITY" (index 8 falls off the eight-entry seed
+"Welcome to the world of <title>" (index 8 falls off the eight-entry seed
 tables, so `SC_NINTH` supplies free play's values).
 
 Note index **7** is already the `Free` card, 1991 — the ninth is genuinely
@@ -907,7 +909,7 @@ not just inferred from the option table's ordering.
   unfixed; `SC_AUDIO_DEBUG` (periodic drain-loop stats) was added for the
   next attempt.
 - **Widescreen** (`docs/PLAN_widescreen.md`): scoped, not implemented --
-  the shared engine already has the rendering machinery; needs SimCity-
+  the shared engine already has the rendering machinery; needs game-
   specific BG-layer identification and visual verification.
 
 ## Simulation tick, calendar, seasons, population and the annual budget
@@ -2531,3 +2533,2926 @@ So a menu trigger for it cannot work the way the six do. It needs whatever the
 Boston scenario sets up at load time, and that is the next thing to find —
 `03:ce2e` (scenario map loader) and `03:ddb6` (scenario select) are the places
 to look.
+
+## The title sequence (`$14 = 1`)
+
+`03:d2c6` is the handler. Per frame it:
+
+  - counts `$6e` down toward `#$e0`, one step per 14 frames (`$3c` is the
+    divider) -- the fade/entry timer;
+  - `JSL $0593ae`, which is the whole animation;
+  - checks `$011b` for a button pair (`AND #$3030`) and, on it, zeros
+    `$700000` and `$707ff0` -- the SRAM clear;
+  - on `$c9 AND #$9000`, calls `03:e574` and `03:e349` and `INC $14` to leave.
+
+`05:93ae` is a five-entry phase machine: `LDA $30 / ASL / TAX / JSR ($93c1,X)`.
+The table at `05:93c1` holds only FIVE addresses -- anything read past entry 4
+is code bytes, not handlers.
+
+| `$30` | handler | |
+|---|---|---|
+| 0 | `05:93cb` | waits on `05:2cc6`, `INC $30` when it returns zero |
+| 1 | `05:93d4` | the scroll animation |
+| 2 | `05:941a` | |
+| 3 | `05:93cb` | same waiter as phase 0 |
+| 4 | `05:942e` | |
+
+Phase 1 advances four scroll values at different rates off a frame counter
+`$2c`: `$18` every 2 frames, `$1c` every 4, `$20` and `$24` every 8, each
+masked to `#$01ff` -- the 512 px width of the 64-column BG1 map. `$2a`
+decrements once `$18` passes `#$01e6`. It then calls `05:94be` and `05:952e`,
+which set `$025d`/`$025f`/`$0261` and issue `COP #$00` with `A = 2`.
+
+### There is no "the logo has left the screen" signal
+
+Worth stating because it decides how the widescreen artifact can be fixed. The
+title sign is ordinary tilemap content: it is drawn once and the phase-1
+scroll carries it left, and when it passes x=0 the ROM does nothing at all --
+hardware clips at the screen edge, so there is nothing to do. The mask to
+`#$01ff` means it eventually wraps back around, which is why it reappears
+"when it is needed another time".
+
+So the ROM offers no flag, no counter and no write to hook: any suppression of
+the sign in the widescreen margins has to be a host RENDER rule, and it cannot
+be driven by anything the game itself knows.
+
+### The intro's animation driver (`05:9603`)
+
+Called first by `05:93ae` every frame, before the phase handler. It is a
+table-driven tile-index animator, not a CHR animator: it rewrites the low 10
+bits of chosen tilemap CELLS and leaves the upper 6 (palette/priority/flip)
+alone.
+
+```
+LDX $32 / LDA $9696,X -> $79      ; $79 = the frame's cell list
+INX INX / CPX #$0018 / BNE +      ; 12 lists, walked two bytes at a time
+  $34 = ($34 + 1) % 3 ; X = 0     ; ...and a 3-step variant counter
+STX $32
+LDA ($79) / ASL / STA $7f         ; $7f = count * 2
+$79 += 2                          ; past the count
+$7c = $79 + ($34 + 1) * $7f       ; the variant's value block
+loop:
+  LDA ($79),Y -> X                ; a cell offset
+  LDA $7e2840,X / AND #$fc00 / ORA ($7c),Y / STA $7e2840,X
+  Y += 2 / CPY $7f / BNE loop
+```
+
+So each list is: a count, then that many cell offsets, then THREE blocks of
+that many tile values -- one per variant.
+
+The offsets index a set of shadow tilemaps in WRAM which are DMA'd to VRAM by
+the tail of the same routine (`$968a` holds the VRAM destinations, `$9690` the
+WRAM sources, `$0147`/`$0167`/`$0177`/`$0187` are the queue slots, `$b7 |= 4`
+arms it):
+
+| WRAM shadow | VRAM | what |
+|---|---|---|
+| `$7E2840` | `$5800` | BG2 tilemap |
+| `$7E3040` | `$6000` | BG1 page 0 |
+| `$7E3840` | `$6400` | BG1 page 1 |
+
+An offset is therefore decoded as `$7E2840 + X`, and which map it lands in
+follows from the `$800` spacing -- offsets past `$800` are BG1, not BG2.
+
+The twelve lists at `05:9696`:
+
+| list | at | cells | what the tiles draw |
+|---|---|---|---|
+| 0, 5 | `96ae`, `97da` | BG1 r15/r12, 6 | lit windows |
+| 1, 6 | `97b0`, `96e0` | BG1 r20, 5 | lit windows (tiles `001`-`023`) |
+| 2 | `970a` | BG1 r13-16, 9 | lit windows |
+| 3, 4 | `980c`, `9786` | BG1 r17/r12, 5 | lit windows |
+| 7, 10 | `9858`, `98b4` | BG2 r15, 7 | skyline with a blinking antenna light |
+| 8, 9 | `9836`, `9892` | BG2 r14/r15, 4 | two blinking antenna lights |
+| 11 | `9754` | BG1 r16, 6 | lit windows |
+
+### The title sign is NOT in the animation driver
+
+Decoded the CHR for every tile every list writes. All of it is lit windows and
+blinking antenna lights; the three variants of lists 7-10 differ by a SINGLE
+pixel value, which is the light blinking. There is no lettering anywhere in the
+set.
+
+This matters because two attempts to suppress the sign were built on the belief
+that tiles `001`..`023` were it. They are list 1 and 6 -- a building's lit
+windows -- which is why suppressing that range removed a small building from
+the margins and never touched the sign. The mistake originally came from
+reading a low-resolution ASCII render, where rows of lit windows look exactly
+like letter glyphs.
+
+So the sign is drawn by something else: it is not in the phase machine's
+scroll, and not in the per-frame animator. The remaining candidates are OBJ
+(the earlier OBJ-clip measurement removed 145 margin samples on the title,
+never attributed) and a one-off tilemap write outside this driver.
+
+### The title sign is OBJ (finally located)
+
+Dumped OAM on the title with the sign stuck at the left edge (`SC_TITLE_DUMP`
+now writes OAM and the OBJ tile bases alongside VRAM):
+
+| slot | x | y | tile | size |
+|---|---|---|---|---|
+| 101 | -34 | 119 | `1ec` | 16 |
+| 100 | -18 | 119 | `1ee` | 16 |
+| 99 | -2 | 119 | `148` | 16 |
+| 98 | -34 | 135 | `18e` | 16 |
+| 97 | -18 | 135 | `1cc` | 16 |
+| 96 | -2 | 135 | `1ce` | 16 |
+
+Three 16x16 sprites across by two down -- a 48x32 billboard. Decoding those
+tiles out of the OBJ CHR (`objTileAdr1=$2000`, `adr2=$3000`) gives a bordered
+sign with lettering inside, which is what the seven captured variants are.
+
+So it is NOT a background tile at all. Every earlier attempt aimed at BG1 tile
+ranges was aimed at a building's lit windows, and this is why none of them
+touched the sign.
+
+The other margin sprites there are slots 125-127 and 57 (tile `120`, 64 px
+wide, y=196) -- the row of blinking lights along the bottom -- and a long run of
+parked entries at x=-128, y=0, tile 0.
+
+### CORRECTION: the strict left-hint gate is NOT broken
+
+`PpuWidescreenOamLeftHintAllows` exists to do exactly this job: with
+`wsOamLeftHintStrict` set, an unhinted sprite lying wholly off-screen-left is
+refused. Slots 97, 98, 100 and 101 qualify -- x = -18 and -34 at size 16, so
+`x + size <= 0` -- and they are drawn anyway.
+
+An earlier version of this section claimed the gate was failing. That was
+wrong, and the way it was wrong is worth keeping.
+
+Instrumenting the predicate to print its decision shows `strict=0` on the
+sign's slots -- but ONLY in the first few frames after a save state is loaded.
+The host publishes the hint arrays at `vPos == 0`, and a state loaded mid-frame
+does not reach that point for a few frames, so those frames render with the
+gate disabled. Every `strict=0` reading came from that window.
+
+From BOOT, over 900 frames, there are ZERO gate calls with strict off. With
+strict on the gate decides correctly: slot 127 is `hinted=1` (host-placed, so
+allowed), slot 57 `straddles` (partly on screen, correctly allowed), and a
+sprite lying wholly off-screen-left is blocked.
+
+Two things follow.
+
+There IS a real but narrow bug: **the first frames after a save-state load
+render with OAM hints unpublished**, so anything parked off-screen-left draws
+into the margins until the host's next `vPos == 0`.
+
+And -- more importantly for anyone measuring here -- **a rendering taken from a
+freshly loaded save state is not evidence about normal play**. The sign
+appearing in slot 3's margin is at least partly that artifact: by the time the
+gate goes strict a few frames later, the sign's slots are no longer at negative
+x at all.
+
+## The simulation's data structures, from write attribution
+
+`SC_WRAM_MAP` records the LAST routine to write each WRAM byte. Run over ~12
+ticks of a running city (`savestate_0`, 2500 frames), every large written
+region in bank `7F` resolves to a single owning routine in bank 03. The sizes
+are the interesting part.
+
+| WRAM | size | grid | written by |
+|---|---|---|---|
+| `$7F0200` | 24000 | 120x100 x2 bytes -- **the city map** | `03:b191` (94%) |
+| `$7F6B00` | 3000 | 60x50 | `03:9dc9` |
+| `$7F76B8` | 3000 | 60x50 | `03:9f47` |
+| `$7F8270` | 3000 | 60x50 | `03:9c89` |
+| `$7F8E28` | 3000 | 60x50 | `03:9b87` |
+| `$7FA598` | 1500 | | `03:afc5` |
+| `$7FAB74` | 750 | 30x25 | `03:a01d` |
+| `$7FAFE8` | 195 | 15x13 | `03:9f93` |
+| `$7FB0AB` | 195 | 15x13 | `03:9ac8` |
+| `$7FB16E` | 390 | | `03:828b` |
+| `$7FB2F4` | 390 | | `03:828f` |
+| `$7FB47A` | 390 | | `03:a286` |
+| `$7FB600` | 3000 | 60x50 | `03:a125` |
+| `$7FC1B8` | 3000 | 60x50 | `03:a09f` |
+| `$7FCD70` | 750 | 30x25 | `03:9d2e` |
+| `$7FD05E` | 390 | | `03:a1a4` |
+
+Six 3000-byte arrays at half resolution, two 750-byte at quarter, two 195-byte
+at eighth, four 390-byte. Each has exactly one owner, and the owners are
+distinct routines -- so these are separate per-cell layers maintained
+independently, not one array written from several places.
+
+The sizes and owners above are MEASURED. What each layer holds is not yet:
+a multi-resolution overlay set is how this simulation family is built
+(density, traffic, pollution, land value, crime at half res; service coverage
+at coarser res), but which array is which has not been established here and
+should not be assumed from the resolution alone.
+
+## The tick's pipeline runs twice
+
+`03:8000` is documented above as calling a fixed sequence. Reading it against
+`03:88b4` shows the sequence is not flat:
+
+```
+03:800a  JSR $90a7
+03:800d  JSR $c474
+03:8010  JSR $b84b
+03:8013  JSR $88b4     ; itself: 894c, 821d, 8297, addf, afb0, b152, addf,
+                       ;         9c11, 9e8e, 9ad7, 9c11, 9e8e, 9ad7, 9aa3,
+                       ;         clear $0cdd..$0ce6, $0dfb=1, b42f, addf
+03:8018  JSR $894c     ; again
+03:801b  JSR $821d     ; again
+03:801e  JSR $8297     ; again
+03:8021  JSR $addf     ; again
+```
+
+`03:88b4` is straight-line and ungated, so `894c`/`821d`/`8297`/`addf` run
+TWICE per tick and `addf` four times. The triple `9c11`/`9e8e`/`9ad7` is
+likewise repeated back to back inside it. Repeated passes over the same data
+are how a diffusion step is iterated, which fits the overlay layout above.
+
+`03:b152`, called only from `88b4`, is the map-wide pass: its inner store at
+`03:b191` accounts for 94% of the 24000 map bytes and 264,100 writes over the
+sampled ticks.
+
+### The half-resolution grid is 60x50, from the code
+
+Not inferred from the 3000-byte size. `03:9f47`'s enclosing loop counts an
+inner index to `#$003c` (60) and an outer to `#$0032` (50):
+
+```
+03:9f49  INC $08 ; LDA $08 ; CMP #$003c ; BEQ +     ; 60 columns
+03:9f52  JMP $9eb0
+03:9f55  INC $0a ; LDA $0a ; CMP #$0032             ; 50 rows
+```
+
+So the map's 120x100 is halved on both axes, and a coarse cell covers a 2x2
+block of tiles.
+
+### Working layers and derived copies
+
+Two of the six 3000-byte arrays are not independent -- they are cheap
+transforms of two others, done once per pass:
+
+```
+03:9b75  LDA $7fc1b8,X / ASL A / BCC + / LDA #$ff        ; saturating x2
+03:9b83  STA $7f8e28,X
+
+03:9c81  LDA $7fb600,X / STA $7f8270,X                   ; plain copy,
+03:9c89  STA $0c ...                                     ; accumulating a
+                                                         ; 32-bit total in
+                                                         ; $00:$02, a maximum
+                                                         ; in $1c and a count
+                                                         ; in $14
+```
+
+| working | derived | transform |
+|---|---|---|
+| `$7FB600` (`03:a125`) | `$7F8270` (`03:9c89`) | copy, with total/max/count |
+| `$7FC1B8` (`03:a09f`) | `$7F8E28` (`03:9b87`) | doubled, saturated at 255 |
+
+So the six half-res arrays are really two working layers, two presentation
+copies of them, and two more (`$7F6B00`, `$7F76B8`) that are filled by a
+different kind of pass -- see below. That halves the number of distinct
+quantities to identify.
+
+### `03:9dc9`'s pass reads the MAP, not another layer
+
+Its loop masks a value to ten bits -- the map cell width -- skips zero, and
+branches on tile-value thresholds to accumulate weights:
+
+```
+03:9dcc  AND #$03ff        ; a map cell
+03:9dcf  BEQ +             ; empty, skip
+03:9dd1  CMP #$0028 ; BCS +
+03:9dd6  LDA $22 ; ADC #$000f ; STA $22    ; accumulate 15 for this class
+```
+
+That is the shape of a map-to-coarse-grid tally: walk the tiles, classify each
+by its index, and add a per-class weight into the 60x50 cell that contains it.
+The thresholds are the tile taxonomy, so reading them out is the way to learn
+what the tile ranges mean -- which is also what the map generator work left
+open.
+
+**Disassembly note**: `03:9dc9` is mid-instruction. Starting a listing there
+produces plausible nonsense (`BRK`, an absolute-indexed `ADC`); the real
+instruction boundary is `03:9dcc`. The write-attribution PC is the address of
+the store's NEXT instruction in several of these cases, so treat an attributed
+PC as "in this routine", not as an instruction boundary.
+
+### The tile weight ladder, `03:9e0c`
+
+Takes a map cell in `A` and returns a signed weight. Read out in full:
+
+| tile range | weight |
+|---|---|
+| `$000`-`$03f` | 0 |
+| `$040`-`$04f` | 10 |
+| `$050`-`$05f` | 25 |
+| `$060`-`$07e` | 0 |
+| **`$07f` exactly** | 60 |
+| `$080`-`$1fc` | 0 |
+| `$1fd`-`$244` | 50 |
+| `$245`-`$266` | 0 |
+| `$267`-`$276` | 60 |
+| `$277`-`$286` | 0 |
+| `$287`-`$2b9` | 60 |
+| `$2ba`-`$363` | 0 |
+| **`$364` exactly** | **-40** |
+| `$365`+ | 0 |
+
+`$07f` and `$364` are tested first and by equality, so they are single tiles
+singled out of ranges that otherwise weigh 0 and 0. `$364` is the only negative
+weight in the table.
+
+Two of the branches are easy to misread: at `03:9e45` `Y` is loaded with 60
+BEFORE the comparison, and `BCC $9e5c` then throws it away by reloading 0. So
+`$245`-`$266` weigh 0 despite the `LDY #$003c` immediately above them, and the
+same trick appears again at `03:9e52`.
+
+### What the caller does with it, `03:9dcc`
+
+```
+AND #$03ff                 ; a map cell
+BEQ out                    ; empty contributes nothing at all
+CMP #$0028 ; BCC low       ; below $28:
+    $22 += 15              ;   add 15 and stop -- no weight, no count
+CMP #$02bf / #$0354        ; inside [$2bf,$354),
+CMP #$0307 / #$0310        ;   excluding $307 and $310 exactly:
+    $22 = 255              ;   saturate
+JSR $9e0c ; $0e += weight  ; every non-empty cell contributes its weight
+CMP #$0030 ; BCS +
+    INC $10                ; and cells >= $30 are counted
+```
+
+So one pass produces three things per coarse cell: a saturating quantity `$22`
+that low tiles nudge by 15 and one specific tile band pins to maximum, a
+weighted sum `$0e`, and a plain count `$10` of tiles at or above `$30`.
+
+The tile numbers here are the same 10-bit values the map generator writes, so
+this ladder is a second, independent source on what the tile ranges MEAN -- the
+generator produced values `$00`-`$25` and this classifier treats everything
+below `$28` as one class and everything below `$30` as uncounted. Those two
+readings agree, which is worth noting because they were derived from completely
+different code.
+
+What the three quantities ARE is still not established, and the shape alone
+should not be used to name them.
+
+### The overlay layers are selected by `$0d49` (`02:91a0`)
+
+The layers are not anonymous after all -- bank 02, the UI bank, picks between
+them from a single view-mode byte:
+
+```
+02:919d  LDA $0d49
+02:91a0  CMP #$0b / BEQ -> LDA $7f6b00,X
+02:91a4  CMP #$0a / BEQ -> LDA $7f76b8,X
+02:91a8  CMP #$09 / BEQ -> LDA $7f8270,X
+02:91ac  CMP #$08 / BEQ -> LDA $7f99e0,X
+02:91b0            else -> LDA $7f8e28,X
+```
+
+| `$0d49` | layer read |
+|---|---|
+| 8 | `$7F99E0` |
+| 9 | `$7F8270` |
+| 10 | `$7F76B8` |
+| 11 | `$7F6B00` |
+| anything else | `$7F8E28` |
+
+So four view modes each have their own map and everything else falls back to
+one shared layer. `$0d49` is written at `02:84d6`, `02:85d0` and `02:862c`, and
+indexes a second table at `02:86a4` that gives a per-mode kind (0..3) --
+modes 0-3 kind 1, 4-5 kind 0, 6-7 kind 2, 8-11 kind 0, 12-13 kind 3. The four
+overlay modes share kind 0 with modes 4 and 5.
+
+`$7F99E0` is a FIFTH layer that the earlier region scan missed: it begins
+exactly where the `$7F6B00` block ends, so it was the boundary rather than a
+region. `03:88f3` reads it too. Its owning writer has not been attributed.
+
+### What is now known, and what names them
+
+Measured: five display layers, which view mode selects each, the 60x50 grid,
+which two are cheap transforms of working layers, and the tile weight ladder
+that feeds one of the passes.
+
+NOT measured: which layer is which quantity. The view modes are contiguous
+(8, 9, 10, 11), so they are almost certainly consecutive entries in the game's
+own map-view menu -- and the order of that menu names them directly. That is a
+question for someone who can read the menu, not something to infer from the
+weight table.
+
+### The diffusion step, `03:a0c4`-`a137`
+
+The pass that produces `$7FB600` from `$7FC1B8` is a five-point stencil:
+
+```
+for row  $02 = 0..49
+ for col $00 = 0..59
+    sum = 0
+    if col != 0    sum += $7FC1B7,X      ; left    (base-1)
+    if col != 59   sum += $7FC1B9,X      ; right   (base+1)
+    if row != 0    sum += $7FC17C,X      ; above   (base-60)
+    if row != 49   sum += $7FC1F4,X      ; below   (base+60)
+                   sum += $7FC1B8,X      ; self
+    $7FB600,X = min(250, sum >> 2)
+```
+
+Two things worth drawing out.
+
+**It amplifies as well as spreads.** Five terms divided by four: a uniform
+neighbourhood comes out 1.25x higher than it went in, and the clamp at 250 is
+what stops it running away. This is not an average, it is a
+spread-and-grow step with a ceiling.
+
+**The edge handling confirms the grid independently.** `CPY #$003b` (59) is the
+last column and `CPY #$0031` (49) the last row, so out-of-bounds neighbours are
+dropped rather than wrapped. That is a third measurement of 60x50, after the
+loop bounds at `03:9f47` and the 3000-byte array size.
+
+The sum is kept as 16 bits across `$04`/`$05` with `INC $05` on each carry, so
+five bytes at 250 cannot overflow it.
+
+### The layer chain so far
+
+```
+$7FC1B8  (03:a09f)   a working quantity
+   |
+   +--> $7FB600  (03:a125)   diffused: 5-point stencil, >>2, clamp 250
+   |       |
+   |       +--> $7F8270  (03:9c89)  copy, plus 32-bit total, max, count
+   |
+   +--> $7F8E28  (03:9b87)  doubled, saturated at 255
+```
+
+`$7F8E28` is the fallback the UI shows for every view mode outside 8-11, and
+`$7F8270` is view mode 9. So one quantity feeds two different views of itself:
+raw-doubled, and diffused.
+
+### How much CPU the simulation actually costs (`SC_BANK_PROFILE=1`)
+
+Counted per-bank opcodes over 2500 frames of a running city:
+
+| bank | opcodes | share |
+|---|---|---|
+| 00 | 6,514,275 | 21.1% |
+| 01 | 2,690,673 | 8.7% |
+| 02 | 3,086,117 | 10.0% |
+| **03** | **18,633,532** | **60.3%** |
+
+and within bank 03, by page:
+
+| page | share of bank 03 | what lives there |
+|---|---|---|
+| `03:8400` | 25.2% | |
+| `03:8300` | 17.7% | |
+| `03:8200` | 14.5% | `821d`, `8297` -- two tick pipeline stages |
+| `03:b100` | 11.6% | `b152`/`b191` -- the map-wide pass |
+| `03:a000` | 8.8% | `a09f`, `a0c4` -- the diffusion kernel |
+| `03:a200` | 8.3% | `a29a`, `a2f5` -- index and multiply helpers |
+| `03:9d00`, `9b00`, `a100`, `9c00` | 10.1% | the overlay passes |
+
+Those ten pages are 96.2% of bank 03, so **the simulation is about 58% of the
+guest's entire opcode workload** (0.603 x 0.962).
+
+### What replacing it would and would not buy
+
+It would NOT make rendering faster. The host already renders every frame well
+inside budget -- `SC_FRAME_TIME` reports no frame exceeding the threshold -- so
+the guest's opcode count is not what limits the picture.
+
+What it would buy is the thing DRAG TURBO exists to paper over: bank 03 holds
+the CPU for about four consecutive frames at a time, and the bank-01 cursor
+dispatcher does not run at all during those, giving the 4-on/4-off duty cycle
+that makes the cursor and map scroll feel starved. Removing 58% of the guest's
+work is removing most of what starves them.
+
+The bar is much higher than the map generator's, though, and worth stating
+before anyone starts. The generator was a pure function: one seed in, 12000
+cells out, verifiable by comparing a finished map. The simulation is stateful
+and continuous -- an error does not show up as a wrong pixel, it shows up as a
+city that evolves differently over an hour of play. Any replacement has to be
+checked by running both and comparing WRAM tick by tick, and the layers it
+maintains are not all identified yet.
+
+### The map cell accessors, `03:849e` (read) and `03:84c4` (write)
+
+The hottest page in the simulation is not a simulation rule at all -- it is
+address arithmetic.
+
+```
+03:849e  read  cell(x,y) -> A        03:84c4  write cell(x,y) = Y
+    ASL A ; STA $0b3f                    (identical arithmetic)
+    STZ $0b40                            ...
+    LDA #$00 ; XBA          ; y*256      TYA
+    PHA ; ASL x4 ; STA $0b3d ; y*16      STA $7f0200,X
+    PLA ; XBA ; SEC ; SBC $0b3d
+    CLC ; ADC $0b3f         ; + x*2
+    TAX ; LDA $7f0200,X
+```
+
+Both compute the same index:
+
+```
+index = y*256 - y*16 + x*2   =   y*240 + x*2
+```
+
+240 is the row stride: 120 cells at 2 bytes each. The 65816 has no addressing
+mode for a 240-byte stride, so every single map access pays a shift-and-
+subtract sequence plus two scratch stores at `$0b3d`/`$0b3f`.
+
+`03:8400`-`84ff` is **25.2% of all bank-03 opcodes**, and bank 03 is 60.3% of
+the guest's total -- so roughly **15% of the entire game's CPU time is spent
+computing map cell addresses**.
+
+That is worth knowing for two reasons. It is the strongest single argument for
+moving the simulation to native code, where the same index is one multiply the
+compiler will strength-reduce to a shift-add and no memory traffic at all. And
+it means the profile's hot pages should not be read as "these are the important
+rules" -- the top page is plumbing, and the actual per-tick rules sit further
+down the list.
+
+`$7F0200` is the same map the generator writes, so the accessors, the tile
+weight ladder at `03:9e0c` and `src/sc_mapgen.c` are all three looking at
+one array in the same 10-bit format.
+
+### The per-tile attribute table, `03:84eb`
+
+This is the tile taxonomy, and it is a plain byte table indexed by the 10-bit
+tile index. `03:8297`'s per-cell loop dispatches on its BITS:
+
+```
+03:82dc  LDA $84eb,Y ; AND #$01 ; if set: $7f02f0,X |= $4000 ; JSR $90c5
+03:82ff  LDA $84eb,Y ; AND #$20 ; if set: JSR $a73d
+03:8310  LDA $84eb,Y ; AND #$40 ; if set: JSR $a493
+03:831f  LDA $84eb,Y ; AND #$10 ; if set: JSR $a7da
+```
+
+So each bit selects a rule that applies to that tile. Four are identified from
+the dispatch above; the rest (`b1`, `b2`, `b3`, `b7`) are consumed further down
+the same stage and elsewhere.
+
+The table's shape, by contiguous runs of equal attribute:
+
+| tiles | flags | note |
+|---|---|---|
+| `$001`-`$013` | `08` | one class |
+| `$014`-`$027` | `04` | another |
+| `$028`-`$02f` | `00` | no rules at all |
+| `$030`-`$03e` | `48`/`44`/`d4` | a 15-tile group |
+| `$040`-`$04e` | `48`/`44`/`d4` | the SAME pattern again |
+| `$050`-`$05e` | `48`/`44`/`d4` | and again |
+| `$060`-`$06e` | `98`/`94`/`b4` | a fourth, different |
+| `$070`-`$07e` | `28`/`24` | a fifth |
+| `$080`-`$3bd` | `84`, with `85` at intervals | the large region |
+| `$354`-`$363` | `40` | an exception inside it |
+| `$364`-`$365` | `00` | and another |
+
+Three consecutive 15-tile groups sharing one flag pattern (`$030`, `$040`,
+`$050`) line up with the weight ladder giving those same ranges 0, 10 and 25 --
+the same structure repeated at three levels.
+
+**The `$080`-`$3bd` region is built from 9-tile groups.** 82 tiles there carry
+bit 0, and the spacing between them is exactly 9 in 72 of 81 cases (the
+exceptions are 10, 16 x3, 21, 25, 26). Nine tiles with a flag on the first is
+what a 3x3 object looks like with its anchor marked, and bit 0 is the one that
+sets `$4000` in the map cell and calls `03:90c5` -- i.e. it fires once per
+object, not once per tile.
+
+Measured: the table, the bit-to-routine dispatch, the run structure and the
+spacing. Inferred: that a 9-run is a 3x3 building and bit 0 marks its anchor.
+The inference is strong -- 72 of 81 exact -- but it is still an inference, and
+the way to settle it is to read `03:90c5` and see whether it treats the cell as
+the corner of a 3x3.
+
+### `03:90c5` -- the once-per-object dispatcher
+
+Reached only from the bit-0 path of the attribute table, so it runs once per
+object rather than once per tile. It calls `03:9137` and then routes on the
+tile index in `$0b89`:
+
+| tile | goes to | also |
+|---|---|---|
+| `< $080` | nothing | |
+| `$080`-`$128` | `03:937a` | |
+| `$129` exactly | `03:91df` | `INC $0e1f` |
+| `$132` exactly | `03:9207` | `INC $0e1f` |
+| `$137`-`$1f3` | `03:92ce` | |
+| `$249`-`$2ba` | `03:aa9f` | |
+| `$2bb`-`$375` | `03:ae25` | `INC $0e1f` |
+| `$307`, `$310`, `$36b` | `03:aa9f` | singled out by equality |
+| `$376`-`$399` | `03:937a` | |
+| `>= $39a` | `03:92ce` | |
+
+`03:937a` and `03:92ce` each serve two disjoint ranges, and they sit beside the
+three accumulators at `03:924f`/`92fb`/`93b1` this document already links to
+the capacity contribution for `$0b89`. `$0e1f` counts objects from three
+specific classes.
+
+### `03:9137` -- the neighbour probe, and 3-cell object spacing
+
+It biases the cell index by `-$2d0` and then reads with constant bases, so the
+net offsets are what matter:
+
+```
+LDA $0b49 ; SEC ; SBC #$02d0 ; TAX
+$7F04D6,X  ->  index + 6     ; 3 cells RIGHT   (6 bytes = 3 cells x 2)
+$7F04CA,X  ->  index - 6     ; 3 cells LEFT
+$7F07A0,X  ->  index + $2d0  ; 3 rows DOWN     (720 = 3 x 240)
+```
+
+and it uses them to check whether a partner tile is where it should be --
+`$37a` expects `$383` three cells right, `$383` expects `$37a` three cells
+left, `$38c` expects `$395` three rows down -- returning early when the pair is
+intact.
+
+**Three-cell steps in both axes is object spacing**, which supports the 3x3
+reading of the 9-tile attribute runs. Note the scope honestly though: this
+routine only does the check for tiles `>= $37a`, so it demonstrates 3-cell
+structures for that range rather than proving every 9-run is a 3x3. The
+attribute-table spacing (72 of 81 gaps exactly 9) and this are two independent
+pieces of evidence pointing the same way, which is stronger than either, and
+still short of reading a handler that walks all nine cells.
+
+### The three zone handlers, and how they reach population
+
+`03:922f`, `03:92ce` and `03:937a` are the same routine three times over with
+different constants. Each is reached from `03:90c5`'s tile-range dispatch, so
+each runs once per object of its class.
+
+| | `03:922f` | `03:92ce` | `03:937a` |
+|---|---|---|---|
+| locals reserved | 8 | 8 | 10 |
+| objects counted in | `$0b91` | `$0b95` | `$0b8d` |
+| capacity helper | `03:847a` | `03:8456` | `03:842f` |
+| flat capacity above a threshold | -- | `6` for tiles >= `$39a` | `$30` (48) for tiles >= `$376` |
+| extra special case | -- | -- | tile `$084` -> `03:9a3e` |
+| accumulates into | `$0b8f` | `$0b93` | `$0b8b` |
+| accumulator instruction | `03:924f` | `03:92fb` | `03:93b1` |
+| constant passed to `03:9035` | -- | `5` | `$23` (35) |
+
+Those three accumulator addresses are the ones this document already listed as
+"three sibling accumulators" without saying what they accumulated. They are the
+three terms of the population formula recorded above:
+
+```
+population = (($0b8f + $0b93) * 8 + $0b8b) * 20
+```
+
+so two classes are weighted x8 and one x1.
+
+**The flat capacities are chosen to match after that weighting.** `03:937a`
+gives 48 and is weighted x1; `03:92ce` gives 6 and is weighted x8. Both come to
+48. That is a useful check on the whole reading -- the formula, the handler
+identification and the constants were recovered from three separate places, and
+they agree.
+
+All three share one pair of counters: `$0e1b` for objects whose capacity came
+out non-zero and `$0e1d` for those that came out zero. So the game separately
+tracks how many objects of any class are producing nothing.
+
+### The overview map's per-cell display path (`02:9150`, `02:91d2`)
+
+Reported from play: entering the visual/overview map from the menu takes a long
+time, while the graph screen next to it appears instantly.
+
+Two pieces of that path are read:
+
+`02:91d2` converts one layer value to a colour. It halves with rounding five
+times (`LSR ; ADC #$00` x5, i.e. divide by 32 rounding up), clamps to 8, and
+indexes a table at `$00AA75`. That is cheap.
+
+`02:9150` computes the cell address, and is not cheap. Per cell it masks NMI
+(`$b3` -> `$b1`), writes both hardware multiplier ports, burns the mandatory
+delay, reads `$4216`/`$4217`, and restores NMI -- the same expensive shape the
+map generator's range primitive uses, and roughly 60-80 cycles of overhead
+before any actual work.
+
+**This is a candidate for the slowness, NOT a diagnosis.** The arithmetic says
+3000 cells of that costs single-digit frames and 12000 costs under a second,
+which is not "a huge time" -- so either the loop is larger than the display
+grid, or entering the screen recomputes the simulation layers rather than just
+drawing them, or the cost is somewhere else entirely. Guessing between those
+from the listing is exactly the mistake that cost three reverts on the title.
+
+To settle it: a save state taken immediately before pressing B, then
+`SC_BANK_PROFILE=1` across the load. That gives the hot pages directly and
+distinguishes "display path" from "recompute the whole simulation", which need
+completely different fixes.
+
+**RESOLVED -- and it is none of the three guesses above.** Measured from
+`savestate_3.bin` (menu, cursor on the spot, B injected at frame 60):
+
+| frames | what the screen does |
+|---|---|
+| 60 | B pressed |
+| 70 | 11,784 px change -- the menu tears down |
+| 70-210 | **nothing. Frozen for 140 frames (~2.4 s).** |
+| 210 | 45,191 px change -- the map appears, in a single frame |
+| 210+ | 100-300 px per frame -- normal animation |
+
+The map is drawn all at once at the end, so nothing is slow about drawing it.
+Isolating the frozen window by subtracting a `--qualify 70` profile from a
+`--qualify 210` one:
+
+    frames 70-210: 1,815,038 opcodes over 140 frames
+      bank 00  48.4%    bank 02  46.1%    bank 03  5.3%
+      = 13k opcodes per frame
+
+Bank 03 -- the simulation -- is **5.3%**, so "entering the screen recomputes
+the simulation layers" is wrong. An earlier 900-frame profile put bank 03 at
+48.4% with `03:b100` hottest, which looked exactly like recomputation; that
+window was mostly *post-load* simulation ticking. Profile the window, not the
+session.
+
+**13k opcodes/frame is the CPU running flat out, not idling.** This is worth
+stating plainly because the first reading of these numbers got it backwards.
+The 65816 runs at 3.58 MHz, so one 60 Hz frame is about 59,600 CPU cycles, and
+at ~5 cycles for an average instruction that is roughly **10k instructions per
+frame** -- not the "several hundred thousand" a first guess suggests. The
+harness agrees independently: `master=89327400` over 250 frames is 357,309
+master cycles per frame against the 357,955 a real SNES has. So the guest is
+saturated for all 140 frames. The freeze is compute-bound.
+
+Per-page during the freeze (`SC_BANK_PROFILE_PAGE` was added to get this --
+the breakdown used to be nailed to bank 03, which is why the load first looked
+like a simulation problem):
+
+    bank 00                          bank 02
+      00:9100  53.8%  (3318/frame)     02:8b00  35.4%  (2110/frame)
+      00:9300  24.5%  (1511/frame)     02:8900  29.0%  (1730/frame)
+      00:9200  11.2%   (691/frame)     02:9100  13.3%   (793/frame)
+
+`00:9100`/`00:9200` are an LZ-style decompressor (`AND #$e0 ; CMP #$e0`,
+bit-shifting, streaming through `$0000,Y` with a `JSR $926d` refill).
+`02:8900` is the VRAM upload: it writes the DMA channel registers
+(`$4300`-`$4306`) and the VRAM address (`$2116`/`$2117`), fires the transfer
+with `STA $420b`, then calls `JSL $008206`.
+
+`00:8206` is `PHP ; REP #$20 ; LDA #$0000 ; COP #$00 ; PLP ; RTL` -- a COP
+syscall. The handler at `00:8211` dispatches through `JSR ($8223,X)`, and
+entry 0 is the vblank wait at `00:930d`:
+
+    00:930d  SEP #$20
+    00:930f  STZ $b9        ; clear the NMI flag
+    00:9311  INC $c7        ; spin...
+    00:9313  LDA $b9
+    00:9315  BEQ $9311      ; ...until the NMI handler sets it
+    00:9317  RTS
+
+**That wait is NOT where the time goes, and a fix aimed at it does nothing.**
+Instrumenting entries to `00:930f` over 250 frames of the load counts only
+**81 waits in total**, eight of them from the upload sites
+(`02:8839`, `02:887e`, `02:88c3`, `02:8908`, twice each). One-DMA-per-vblank
+would need ~140. `00:9300`'s 1511 opcodes/frame is the spin *inside* those few
+waits, about 12% of the window; the other ~88% is real work.
+
+A hook that collapsed this wait was written, gated on force-blank, and thrown
+away: `INIDISP` reads `0f` throughout, so the display is **on at full
+brightness** for the whole freeze -- the screen is static, not blanked -- and
+the gate never fired. Both halves of that idea were wrong, the premise and the
+gate. What makes the intermediate uploads invisible is the layer/tilemap state,
+not force-blank.
+
+So the 2.4 seconds is authentic: a real SNES spends the same time, because the
+work genuinely costs ~1.8M instructions. The graph screen next door is instant
+because it has almost nothing to decompress.
+
+Making it faster therefore means doing the *work* on the host, the way
+`src/sc_mapgen.c` replaced the generator -- not adjusting timing. The
+target is the decompressor at `00:9100`/`00:9200` (31% of the window) and
+whatever `02:8b00` is (35%, and still unidentified -- it holds no
+`JSL $008206`, so it is not part of the upload pacing). That is an HLE with the
+same bar the generator had to clear: byte-exact output verified against the
+guest before it is trusted.
+
+### `02:899b` -- the overview map is software-rendered, not loaded
+
+`02:8b00` was 35% of the load window and unidentified. It is the per-cell tile
+classifier, and the routine around it is the whole answer to where the 2.4
+seconds goes.
+
+Getting there needed a new tool. `dis_mx.py --starts` fixes one (m,x) for a
+whole range, and this code changes width every few instructions: read at
+`m1x1`, `02:8b00` disassembles as plausible nonsense (`BRK #$90`, `MVN`,
+`ORA [$e0],Y`) and looks like data. `tools/dis_cov.py` decodes each address at
+the width it *actually ran at*, taken from an `SC_MX_BITMAP` capture, and the
+same bytes become obvious code. The page runs `m0x0` -- 16-bit A and 16-bit
+index. **Two separate wrong readings this session came from assuming a width;
+the bitmap is ground truth and costs one run.**
+
+The outer loop, `02:899b`:
+
+    02:899b  REP #$30
+    02:899d  STZ $0d63          ; cell index
+    02:89a0  STZ $0d61          ; row
+    02:89a3  STZ $0d5f          ; column          <- row loop
+    02:89a6  LDY #$0000                           <- 8-column group
+    02:89a9  PHY                                  <- per-cell, 8 times
+             JSR $8b34          ; classify -> colour byte in A
+    02:89b8  STA $0d57,Y        ; into the 8-byte staging row
+    02:89c1  $0d63 += 2         ; cells are words
+    02:89c8  CPY #$0008
+    02:89cb  BNE $89a9
+    02:89cd  JSR $909d          ; transpose the 8 bytes into $7EA000,X
+    02:89d6  $0d5f += 8
+    02:89dc  CMP #$0078         ; 120 columns
+    02:89df  BCC $89a6
+    02:89e1  INC $0d61
+    02:89e7  CMP #$0064         ; 100 rows
+    02:89ea  BCC $89a3
+    02:89ec  RTS
+
+120 x 100 = **12,000 cells**, 1,500 transposer calls. The classifier's measured
+295,338 opcodes over 12,000 calls is 24.6 each, which is what a call-per-cell
+predicts, so the loop and the profile agree.
+
+`02:8b34` reads the city map and classifies the tile:
+
+    02:8b36  LDX $0d63
+    02:8b39  LDA $7f0200,X      ; the map, at the documented address
+    02:8b3d  AND #$03ff         ; the documented 10-bit tile mask
+    02:8b40  TAX                ; then ~300 instructions of ladder
+
+It is a long comparison ladder over tile ids (`$0030`, `$007f`, `$0354`,
+`$0355`, `$0364`, `$0365`, `$0080`, `$0137`, `$01f4`, `$0245`, `$0257`,
+`$0297`, `$02bb`, `$0356`, `$0366`, `$0376`, `$039a` ...) ending in table
+reads -- `$02948e`, `$02937d`, `$029401`, `$0293f1` -- and it branches on
+`$0d49`, the overlay selector already documented above. Animated tiles (ids
+`$14`-`$25`, when `$3e`==3) add a 4-bit animation counter kept at `$0b3b`,
+which the classifier *increments as a side effect*. Some paths use the
+hardware divider (`$4204`/`$4206` -> `$4214`/`$4216`) with the NMI-masking
+`$b3` -> `$b1` dance, the same expensive shape `02:9150` uses.
+
+`02:909d` is the bitplane transposer. For each of eight output bytes it shifts
+one bit out of each of `$0d57`-`$0d5e` and rotates it into A
+(`LSR $0d57 ; ROL A` x8), then stores to `$7EA000,X`. That is eight pixel rows
+becoming one planar SNES tile. `02:8900` then DMAs `$7E____` to VRAM in 2 KB
+chunks.
+
+So **the overview map is not loaded from anywhere. The game software-renders
+the entire city into a bitmap, one tile at a time, then uploads it.** That is
+what 1.8M instructions buy, and why the graph screen next door is instant.
+
+#### What that means for making it fast
+
+`02:899b` is a clean HLE boundary: one RTS-terminated routine, no arguments.
+Its inputs are the map at `$7F0200`, the overlay selector `$0d49`, `$3e`,
+`$40`, the animation counter `$0b3b`, and four ROM tables. Its outputs are the
+bitmap at `$7EA000`, the loop variables `$0d5f`/`$0d61`/`$0d63`, the staging
+bytes `$0d57`-`$0d5e`, and the updated `$0b3b`. Verification is the same bar
+the map generator had to clear: run the guest routine, snapshot `$7EA000`
+onward, run the HLE from the same state, compare byte for byte.
+
+**Measured ceiling, so the work is not oversold.** The map builder is bank 02's
+share of the window: 46%. The other 48% is bank 00, and that one really is a
+decompressor -- re-read at its true `m1x0` width it is a 3-bit command / 5-bit
+length stream (`AND #$e0` / `AND #$1f`, count in Y, `LDA $0000,Y`, dispatch on
+`$00`/`$20`/`$40`), confirming the first reading rather than overturning it.
+So HLE-ing `02:899b` alone takes the load from ~140 frames to roughly 76 --
+worth having, but it halves the wait rather than removing it. Removing the
+wait means doing the decompressor too.
+
+### `00:90dd` -- the stream decompressor, decompiled and replaced
+
+48% of the overview-map load. `src/sc_decomp.c` does the same work on the
+host; `SC_DECOMP_FAST` is on by default, `=0` disables it.
+
+The listing came from `tools/dis_cov.py`, and that mattered here: this routine
+runs at `m1x0`, and the first attempt to read it assumed `m1x1`. That happened
+to be close enough to produce a *nearly* right answer, which is worse than an
+obviously wrong one. Use the bitmap.
+
+The format is one command byte `c`:
+
+    c == $FF                  end of stream
+    (c & $E0) == $E0          long form:  cmd = (c << 3) & $E0
+                                          len = (((c & 3) << 8) | next) + 1
+    otherwise                 short form: cmd = c & $E0
+                                          len = (c & $1F) + 1
+
+Long form packs its command into bits 4-2, so the `<< 3` lifts those bits into
+the position the short form's command already occupies and both feed one
+dispatch. Then, for `len` bytes:
+
+| cmd | at | what |
+|---|---|---|
+| `$00` | `00:9150` | copy `len` bytes straight from the source |
+| `$20` | `00:916b` | one byte, repeated |
+| `$40` | `00:9187` | two bytes, alternating |
+| `$60` | `00:91c8` | one byte, incrementing each time |
+| `$80` | `00:91e5` | back-reference, 16-bit offset from the START of the output |
+| `$A0` | `00:91e5` | same, each byte XOR `$FF` |
+| `$C0` | `00:9245` | back-reference, 8-bit offset back from the write position |
+| `$E0` | `00:9245` | same, each byte XOR `$FF` |
+
+Both back-reference forms share one loop at `00:9222` -- `$C0` computes its
+read pointer and branches into `$80`'s body -- and they copy a byte at a time
+*through the output*, so an overlapping run (offset 1, length 40) legitimately
+repeats what it just wrote. Do not turn that into a memmove.
+
+Output goes to `$7E8000,X`, X starting from `$000e`. Source is `DB:Y` from
+`$000b`/`$0009`, and `00:926d` handles running off the end of a bank by setting
+Y back to **`$8000`**, not `$0000` -- LoROM maps only the upper half of each
+bank, so the byte after `$xx:FFFF` is `$(xx+1):8000`.
+
+#### Verification
+
+`SC_DECOMP_VERIFY=1` runs the C into a scratch copy of WRAM, lets the ROM run
+untouched, and compares at the RTS. It changes nothing; it only reports. This
+exists because of what the map generator cost: that generator looked plausible
+and was wrong for a whole session, and what caught it was comparing against the
+guest instead of eyeballing the output.
+
+Result, across two unrelated sessions -- the overview-map load and a cold boot
+through the intro:
+
+    decomp: verified=13 mismatched=0
+    cmd hits  00=6003  20=3705  40=3068  60=19  80=1431  a0=53  c0=2752  e0=0
+    bank-wraps=2
+
+Seven of the eight commands and the bank-crossing path are confirmed byte-exact.
+**`$E0` has never been observed executing**, so it is unverified, and the fast
+path *declines* any stream that uses it -- it decompresses into scratch, checks
+the `$E0` counter, and hands the work back to the ROM rather than trusting code
+no measurement has confirmed. A `declined` count appears in the report if that
+ever fires. It has not yet.
+
+#### Measured effect
+
+Overview-map load, B pressed at frame 60:
+
+| | map appears | frozen for |
+|---|---|---|
+| before | frame 210 | 150 frames (~2.5 s) |
+| after | frame 151 | 91 frames (~1.5 s) |
+
+At frame 161 the accelerated screen differs from the original map by **7 pixels
+out of 57,344**, the residue being animation phase rather than content.
+
+The cold boot is a stronger check, because the intro is a long animated
+sequence. Cross-correlating the two runs frame by frame, the accelerated one is
+**exactly 105 frames ahead throughout, at 0.0% pixel difference at every
+matched point** -- identical content, 1.75 s earlier. `qualify` passes both
+ways with matching `logic_changes` and `nmi_serviced`.
+
+The other half of the load is the software renderer at `02:899b` (46%), still
+interpreted. With both replaced the freeze should be a handful of frames.
+
+#### The decompressor HLE must not skip PCs the game hooks
+
+The first version of the `00:90dd` substitution entered at `90dd` and emulated
+the RTS. It was byte-exact and it broke the Sylt scenario, because this project
+hooks PCs *inside* that routine: `00:90eb` captures the source address into
+`s_sylt_decomp_src`, and `00:9106` -- the `PLB` on the end-of-stream path --
+calls `sylt_write_brief_tilemap()`. Jumping from the entry to the return
+stepped over both, so Sylt's briefing and map swap silently never happened.
+Reported from play; **no automated check could have caught it**, because Sylt is
+this project's own addition and nothing in the qualify harness selects it.
+
+The fix generalises, and it is the rule for every HLE here:
+
+* **Enter after the ROM's own prologue**, at `00:90ee` -- DB set from `$000b`,
+  X from `$000e`, `$0011` cleared, no stream byte consumed yet -- so `90eb`
+  executes natively.
+* **Leave by pointing PC at the ROM's own exit**, `00:9106`, instead of
+  unwinding the stack by hand. The ROM runs its real `PLB`/`PLP`/`RTS`, the
+  stack takes care of itself, and any hooked PC in between still fires.
+
+Before replacing a routine, grep for hooks on PCs inside it. `02:899b` was
+checked this way before any code was written: no bank-02 PC is hooked anywhere.
+
+### `02:8b34` -- memoised rather than transcribed
+
+The classifier is ~300 instructions of ladder with a hardware-divider path.
+It is **not** ported to C. It is a deterministic function of the 10-bit tile id
+plus `$0d49`, `$3e` and `$40`, so there are at most 1024 distinct answers and a
+real city uses ~500. The ROM computes each one once; the result is cached; every
+repeat skips the ladder.
+
+That is exact *by construction* -- the numbers come from the ROM, not from a
+reading of it -- which is a far better bargain than hand-porting a ladder whose
+every branch is a chance to be subtly wrong. The map generator is the standing
+warning: transcribed by hand, plausible, and wrong for a whole session.
+
+Two things are never cached. Tile ids `$14`-`$25` are animated: `02:8b83`
+increments `$0b3b` *as a side effect* and folds it into the table index, so the
+answer legitimately differs call to call, and those always run the ROM. And the
+whole cache is flushed when `$0d49`, `$3e` or `$40` change, since the ladder
+branches on all three.
+
+The skip enters at `8b36`, after the entry `REP #$30`, so the widths are
+already what the ROM would leave; it exits via the real `RTS` at `8b96`. Same
+shape as the decompressor's `9106` exit, for the same reason.
+
+`SC_MAPCLS_VERIFY=1` caches but still runs the ROM and compares every call:
+
+    mapcls: cached=8899 distinct=504 mismatched=0
+
+8,899 predictions, 504 distinct tiles, zero mismatches. The ~2,600 uncounted
+calls are the animated ids, which deliberately run the ROM.
+
+### Where the overview-map load now stands
+
+B pressed at frame 60; the map is drawn in a single frame at the end.
+
+| | map appears | frozen for |
+|---|---|---|
+| stock | frame 210 | 150 frames (~2.5 s) |
+| `00:90dd` on the host | frame 151 | 91 frames (~1.5 s) |
+| plus `02:8b34` memoised | frame 129 | 69 frames (~1.15 s) |
+
+**54% of the wait removed, with both substitutions verified against the guest
+rather than judged by eye.** At frame 131 the result differs from the stock map
+by 204 pixels of 57,344 -- animation phase, not content.
+
+The remaining 69 frames are the parts of `02:899b` still interpreted: the
+12,000-iteration outer loop, the bitplane transposer at `02:909d`, the address
+calculation at `02:9136` (which uses the hardware multiplier with the NMI-mask
+dance, once per 8-cell group), and the animated-tile classifier calls. Removing
+those means replacing the whole loop in C, which needs the classifier in C too
+-- so the memo cache does not compose with it, and it is a bigger job than
+either step so far.
+
+### `01:f11a` -- why moving objects die at the right edge
+
+Reported from play: the locomotive and the selector pins are missing "only in
+widescreen". That framing is right, and an earlier note here calling it
+"culling" was too vague. The mechanism is an **8-bit overflow**, not a clip:
+
+    01:f124  LDA $7e21b5,X     ; sprite Y in shadow OAM
+    01:f128  CMP #$e0          ; parked? -> skip
+    01:f12c  LDA $7c           ; per-frame delta
+    01:f130  LDA $7e21b4,X     ; sprite X -- EIGHT BITS
+    01:f135  ADC $7c
+    01:f137  STA $7e21b4,X
+    01:f13b  BCC $f175         ; no carry: still on screen, done
+    01:f13f  JSL $00c22c       ; CARRY: X went past 255 -> despawn
+
+So an object is destroyed at the moment its X would exceed 255. Measured
+independently before the code was found: `SC_OAM_TRACK=1` across a 240-frame pan
+shows slot 109 walking 200, 204, 208 ... 248, **252** at 4 px a frame and then
+ceasing to exist, and of 43 slots seen near the edge not one ever holds an X
+through 256.
+
+The ROM's model has no room for the margin. X in shadow OAM is one byte; the
+9th bit lives in the separate high-OAM table the ROM manages elsewhere, and
+this routine cannot reach it. Nothing in OAM to reveal, so no decode setting,
+hint or compositing change can help -- consistent with the marquee-lights
+finding above, and with `SC_WS_OBJ_CLIP` and the right-hints both measuring 0 px.
+
+**What a fix would take.** A host hook on the carry path at `01:f13b`: instead
+of letting it despawn, keep the object alive and carry its X into the 9th bit
+for the width of the margin, then despawn at 256 + extraRight. That is a
+behaviour change, not a presentation one -- the same conclusion the marquee
+lights reached -- and it has to cope with the ROM continuing to add to a value
+it believes is 8-bit.
+
+The selector's missing pins are the same family seen from the other end: the
+ROM emits a pin per card it believes is on screen, so the columns widescreen
+reveals get none. Recorded already as a known gap for the ninth card; it is the
+same for the outer shipped ones.
+
+## The train and the plane: what they actually are
+
+Asked for as "decomp the train function and the plane function". There is no
+such function, and finding that out took ruling out two plausible systems.
+
+### Ruled out: `$0ced` is not a traffic table
+
+`$0ced` is real -- 10 slots of 6 bytes, free marker `$ffff`, allocator
+`03:c42a` taking a type in `A` -- but it holds **news characters**, not
+vehicles. Every allocation site, with the event each posts through `03:be04`:
+
+| site | type | event | |
+|---|---|---|---|
+| `03:ba3a` | `$0A` | `$23` | disaster block |
+| `03:ba7a` | `$07` | `$09` | |
+| `03:bb15` | `$0E` | `$0A` | |
+| `03:bba3`, `03:bbf5` | `$0B` | `$20` | the monster, already known |
+| `03:bc77` | `$0C` | `$21` | |
+| `03:bd37` | `$14` | `$30` | |
+| `03:bdf6` | `$08` | `$24` | |
+| `03:c3f4` | `$13` | `$31`/`$2f` | population milestone |
+| `03:c4cc` | `$01` | `$27`/`$26` | milestone, gated on pop >= `$7530` |
+| `03:c624`, `03:c66d`, `03:c682` | `$00` | -- | tutorial setup |
+
+The only per-frame consumer of the type is the drawer at `02:b66a`, which adds
+`$10` and uses it as a graphic index. Nothing steps a position. The dialog
+block confirms the cast: Bowser, earthquake, fire, flood, plane crash,
+tornado, meltdown, shipwreck -- and **no train-crash message at all**.
+
+### Ruled out: the `02:bc8f` sprite cluster
+
+Draws ids `$0D`, `$0E`, `$0F`, `$10`, `$0C` at hardcoded coordinates
+(`$80,$80`, `$88`, `$32`, `$74`). A fixed panel, not map objects.
+
+### What they are: animated tiles
+
+Both are **map tiles whose graphic index carries a rolling phase**, not
+sprites and not entities. The whole mechanism is `02:8b34`:
+
+```c
+unsigned classify(unsigned cell) {
+  unsigned tile = map[cell] & 0x03ff;          /* $7f0200,X */
+  unsigned cls;
+  if      (tile < 0x30)                cls = tile;   /* terrain maps 1:1 */
+  else if (tile == 0x7f  ||                          /* monster stamp   */
+           tile == 0x364 || tile == 0x365) cls = 0x28;
+  else if (tile == 0x354 || tile == 0x355) cls = 0x01;
+  else return other_ladder(tile);              /* 02:8b97 */
+
+  if (cls >= 0x14 && cls < 0x26) {             /* the animated band */
+    if (mode == 3 && scenario == 7) cls = 0x14;      /* pinned */
+    else {
+      anim = (anim + 1) & 0x0f;                /* $0b3b, 02:8b83 */
+      cls += anim;
+    }
+  }
+  return cls;
+}
+```
+
+`$0b3b` advances **once per classified cell**, not once per frame. So
+consecutive animated cells along a road or a rail receive consecutive frames,
+and that rolling phase down a line of tiles is what reads on screen as a
+vehicle travelling along it. Nothing holds a train's position because no train
+exists as an object: classes `$14`-`$25` are the animated band, and the
+apparent motion is an artefact of the counter's phase walking the cells.
+
+**Why this matters for widescreen.** The counter is a side effect of
+classification, so the number of cells classified sets the phase. The host map
+renderer classifies the margins as well as the guest's columns, so its phase
+runs ahead of the guest's, and a vehicle that reads as continuous inside the
+authentic 256 need not line up across the boundary. That is the shape of
+"shown just one tile and then it disappears suddenly", and it is a phase
+problem, not a clipping one -- which is why the OAM work never found it.
+
+### Still open
+
+Which class in `$14`-`$25` is the train and which is the plane. The band is 18
+entries and nothing here names them; the map is `tile id -> graphic`, and that
+table has not been read. A capture with a train on screen, or the tile set in
+`extracted_assets/`, would settle it in one step.
+
+## The main menu, and a retracted claim about `00:98BB`
+
+**Retraction.** An earlier commit described the table at `00:98BB` / `00:98F7`
+as the main menu's strip table. It is not, or at least nothing here shows that
+it is. It sits immediately after the `RTL` of `00:98A0`, which is what made it
+look like that routine's data. Three tests say otherwise: its values run past
+511, beyond the 512 tiles of the menu's artwork packet; decoded as indices into
+that sheet they spell nothing; and its thirty nine-value runs appear as
+consecutive tilemap cells in 2 of 30 cases -- the same 2 in the menu capture,
+the in-game capture and the selector capture alike, which is the rate at which
+consecutive runs occur by chance, not a match. Its role is unknown.
+
+What is established about the menu:
+
+| | |
+|---|---|
+| `00:98A0` | Confirmed by disassembly, but it is a state setter, not a drawing routine. Called as `PHP ; JSL $0098A0 ; <a> <b> ; PLP`, it reads the two inline bytes, steps the return address past them, and writes `dp[$03 + a] = b`. The same inline-operand convention as `03:a3cf`. The German build has it at `$009896`. |
+| `$05ABF1` | The menu's BG3 tilemap -- 1024/1024 words against a live capture at VRAM `$3000`. **Byte-identical to the German ROM's copy** (`$05BB24`). Not a linear layout: it draws sheet rows in a permuted order, `[32, 96, 48, 112, 64, 128, 80, 144]`, pairing each text row with its shadow row. |
+| `$04A571` | The menu's artwork, 4bpp, 16 tiles wide, tile index = row*16 + col. Rendering `$05ABF1` against it reproduces `RESUMESAVED` / `CITYPRACTICEAR` / `SCENARIO`. |
+| `$04A65B` | The German counterpart. Rendering the **US** map against it gives clean German words -- `UEBUNGSSPIEL`, `GESPEICHERTE`. |
+
+That last row is the interesting one. Both regions share the map, the German
+artwork is correct against it, and yet swapping only the artwork produces
+`GSSPIEL`, `STNESCHAUPUBUN`, `LATZE STADTUE` in play -- German words sliced at
+English boundaries. So what differs between the regions is not the layout and
+not the pixels but **where each line's window onto them starts**, and that is
+neither in a packet nor in any text table.
+
+`SC_VRAM_WATCH=<hex word addr>[+<count>]` exists to catch it: a per-frame diff
+of a VRAM range with the frame and screen that changed it, plus every layer's
+scroll as it moves. `SNESRECOMP_DMA_LOG` would have been the obvious tool and
+is inert in this target -- `ppudma_record_dma` is stubbed off the AOT tier.
+
+## A second message table: `00:859E`
+
+Separate from the 53-record dialog block, and not previously mapped. A pointer
+table at `00:859E` into a text block in bank `$01` around `$009980`. Bytes are
+ASCII biased by `$80`, with a separate large-capital bank: a capital opening a
+word is stored as ASCII-`$20`, so `SAVE` reads as `3AVE` under a naive decode.
+`$00` is a space. German accents take the lowercase slots -- `d` is a-umlaut,
+`t` o-umlaut, `a` u-umlaut, `{` eszett.
+
+It holds the Save/Load and "please wait" text (`ONE MOMENT PLEASE...` /
+`BITTE WARTEN...`, `UNABLE TO SAVE.` / `SPEICHERN NICHT MOEGLICH.`,
+`SAVE COMPLETED.`, `GOOD BYE.`) and the HUD advisor lines -- traffic jams,
+blackouts, fire and police department demands, the scenario countdown.
+
+## Correction: `SC_LABEL_TRACE` never fires in this target
+
+Commit 9ad16f5 added `SC_LABEL_TRACE` and described it as arming cpu_trace's
+WRAM watch on the label sprites so that "a hit names the routine". It does arm
+-- the watches report ARMED for every slot -- but it never fires, and neither
+does anything else built on that machinery. Measured, not assumed: a watch on
+`$7E:2000`, sprite 0's shadow slot, which the OAM captures show being written
+constantly, produced no hits either.
+
+The reason is structural. All of that instrumentation lives on the
+AOT/CpuState write path -- `cpu_write8`/`cpu_write16` in `cpu_state.c` -- and
+**this target executes through the interp816 core**, so those functions are
+never called. The same applies to the two watchpoints reached by defining
+`SNES_COSIM` (`SNESRECOMP_WRITE_WATCH` in `cpu_state.c`, `SNESRECOMP_WRAM_WATCH`
+in `WatchdogCheck`): both compile and link here, and both stay silent.
+`SNESRECOMP_WLOG_ADDR` fails for a different reason -- `wlog_addr_note_direct`
+is live in an AOT build, but nothing in the pinned `snes/` sources calls it, so
+the interpreter's writes never reach it.
+
+So there is currently **no hook on the write path this target actually uses**.
+Catching the routine that places the building labels needs one added to the
+interpreter's own WRAM store in the submodule, reporting `g_interp816_cur_pc`
+(interp816.c) -- which is the 65816 PC of the writing instruction, and exactly
+the answer wanted. That is a submodule change, so it is left as a decision
+rather than made in passing.
+
+Two things from the attempt are worth keeping regardless: the CMake fix that
+makes `-DSNESRECOMP_ENABLE_TRACE=ON` link for this target (it was inert here,
+it only failed), and the knowledge that `SNES_COSIM` can be turned on for a
+diagnostic build with three no-op stubs for the co-simulation entry points.
+
+## Correction: `00:859E` is not a message table
+
+d3d1aa1 recorded a "second message table" with a pointer table at `00:859E`
+into a text block in bank `$01`. The text block is real. The pointer table is
+not its index.
+
+`$01:859E` is read at `01:B878` and `01:B89D`, both as
+`ASL ; TAX ; LDA $01859E,X ; PHA`, and the walk that follows adds byte pairs
+to `$0205`/`$0207` and rejects them against `#$78` and `#$64` -- 120 and 100,
+the map dimensions. It is a table of **coordinate lists**, and it only looked
+like a text index because it points into the same address range the text
+happens to occupy. Records 0-5 decoded as sentences by coincidence of
+overlap; 6-15 decoded as garbage, which should have been the tell.
+
+What IS established about the status/advisor text:
+
+| | |
+|---|---|
+| Where | `$009824..$009C9C` in the US, `$00981E..$009CD7` in the German -- about 1.1KB, same region in both |
+| Encoding | byte − `$80`, then **two glyph banks**: codes under `$40` are the large bank and mean ASCII − `$20` (`$00` space, `$0E` `.`, `$01` `!`, `$33` `S`), `$41`-`$5A` are ordinary capitals. German accents sit in the lowercase slots (`d` = a-umlaut, `t` = o-umlaut, `a` = u-umlaut, `{` = eszett, `y` = O-umlaut) |
+| Contents | the advisor lines (`MORE RESIDENTIAL ZONES NEEDED.`, `BLACKOUTS REPORTED.`, the scenario countdown), plus the Save/Load and shutdown text (`UNABLE TO SAVE.`, `ONE MOMENT PLEASE...`, `GOOD BYE!`) |
+
+Decoded with the banks above the whole block reads cleanly in both languages,
+digits and punctuation included, so the encoding is settled.
+
+**How the game indexes it is not.** Not `00:859E`; not a fixed stride (the
+gaps between terminators run 20 to 50 bytes); and not by counting `.`, because
+the German `yFFENTL. VERKEHRSNETZ MU{ VERBESSERT WERDEN.` carries a period
+inside one message -- splitting on terminators yields 38 messages for the US
+and 39 for the German, and that extra one is the abbreviation. Translating
+this block needs its reader found, the same way the building labels needed
+theirs. SC_WRAM_WATCH is the wrong tool here -- this text goes to a tilemap,
+not to a WRAM staging buffer -- so the equivalent probe would have to watch
+the VRAM the message box draws into.
+
+## `01:8F25` -- the building-label writer, and what limits a label
+
+Decompiled in full, because its record format is the ceiling on how long a
+translated building label can be.
+
+```
+01:8F25  REP #$30
+         LDA $020d ; ASL ; TAX          ; the tool index
+         LDA $018FC4,X ; PHA            ; that tool's record pointer
+         LDY #$0000 ; TYX               ; Y = record cursor, X = OAM cursor
+         PHK ; PLB                      ; DB = $01, the record's bank
+ loop1:  LDA ($01,S),Y ; INY ; INY      ; packed position
+         CLC ; ADC #$AF07               ; + base: y = $AF (175), x = $07
+         STA $7E2088,X                  ; -> OAM slot 34
+         LDA ($01,S),Y ; INY ; INY      ; tile + attributes
+         STA $7E208A,X
+         INX x4 ; CPY #$0014 ; BCC loop1   ; 20 bytes = 5 sprites
+         LDX #$0000
+ loop2:  ... same, STA $7E2160,X         ; -> OAM slot 88
+         INX x4 ; CPY #$003C ; BCC loop2   ; 60 bytes = 15 sprites in total
+```
+
+So a record is **60 bytes, fifteen (position, tile) word pairs**: the first
+five drive the price line at OAM slots 34-38, the remaining ten the label text
+at slots 88-97. Every sprite carries its own x and y, which is why the y IS
+the one-or-two-line decision, and why no table of tile runs exists to be
+found -- see 0cfa447.
+
+The limits, should a label ever need more room:
+
+| | |
+|---|---|
+| `CPY #$003C` at `01:8F6F` | the record length. 60 bytes, hardcoded |
+| `CPY #$0014` at `01:8F52` | where the price line ends and the text begins |
+| ten sprites | the most a label can use, slots 88-97 |
+| slots 96-99 | contended. An OAM capture shows another routine rewriting them every frame (the cursor), so in practice a label has **eight** dependable sprites, 88-95, and the shipped records blank the tail with tile `$0BF` |
+
+Raising the ceiling therefore means three things together, not one: a longer
+record, the loop bound to match, and OAM slots that nothing else claims. The
+first two are easy; the third is the real constraint.
+
+### A closed lead: `01:B79A` is not a text reader
+
+Searching for code referencing the status text block turns up `01:B7B1`,
+`LDA $9b51,X ; PHA ; LDA $9b59,X ; PHA ; LDA ($03,S),Y` -- the same
+stack-relative walk the label and coordinate tables use, with operands that
+land inside the block. It reads neither. `01:B79A` loads `$020d`, indexes
+`$018040,X` and `$018051,X`, and bounds-checks the result against `#$0078`
+(120, the map width): it is the building-placement coordinate checker, and
+its `LDA $9b51,X` resolves through a `DB` of `$00`, not `$01`. Any search for
+references into that block has to account for DB before it means anything.
+
+## `05:9653` -- how the main menu places its text
+
+The menu is reachable headlessly: hold ~8-10 seconds at the title, then Start.
+That makes it measurable without a capture session, and it settles what
+d3d1aa1 could not.
+
+The text is NOT written to VRAM by the drawing code. `00:8D43` is a DMA
+uploader -- a pending-mask in `$b7` selects among eight queued transfers, each
+with its VMADD in `$0143,X`, source in `$0163,X` and size in `$0183,X` -- so a
+VRAM write probe attributes every byte to the instruction that triggered the
+transfer. The menu is composed in WRAM first, at `$7E:2840`, and DMA'd from
+there.
+
+`SC_WRAM_WATCH` on that buffer names the composer: **`05:9653`**.
+
+```
+05:962F  LDA ($79),Y ; ASL ; STA $7f    ; entry count -> byte length
+05:9634  INC $79 ; INC $79              ; past the count
+05:9638  LDA $79 ; LDX $34
+05:963C  CLC ; ADC $7f ; DEX ; BPL      ; skip $34 records of $7f bytes
+05:9642  STA $7c                         ; -> the chosen record
+05:9647  LDA ($79),Y ; TAX               ; destination offset
+05:964A  LDA $7e2840,X ; AND #$fc00      ; keep the attribute bits
+05:9651  ORA ($7c),Y ; STA $7e2840,X     ; merge in this record's tile
+05:9659  CPY $7f ; BNE                   ; one entry per destination
+```
+
+So a block is: **a count, then that many destination offsets, then one record
+of tiles per variant**, with `$34` choosing the variant. `$79` is loaded by
+`05:9611`; observed values are `$96AE`, `$970A`, `$97B0`, all bank `$05`.
+
+`$05:96AE` reads `06 00` then `0BC2 0BC4 0BC6 0BC8 0BCA 0C0C` then
+`0024 0025 0026 0027 0028` -- six destinations and the tile run the probe
+caught being written. The structure decodes exactly.
+
+### Why the artwork-only swap failed, and what a fix needs
+
+3fb8871/d3d1aa1 established that the menu tilemap packet is byte-identical
+across regions and only the artwork differs, so swapping the artwork put
+German pixels at English positions (`GSSPIEL`, `STNESCHAUPUBUN`). The reason
+is now visible: the **destination offsets and the tile records live together**
+in these bank `$05` blocks, and a longer German word needs both -- more
+entries and different tiles.
+
+The blocks at `$96AE`, `$970A` and `$97B0` are identical between the US and
+German ROMs, so they are not the words. Of the 133 differing bytes in
+`$05:9600-$9C00`, most are 2-byte pointer shifts -- among them `$9126`,
+`$913F` and `$9158`, which hold the compressed-packet addresses `$9224`,
+`$942B`, `$966B` in the US and `$A15F`, `$A366`, `$A5A6` in the German, the
+same packets paired in 3fb8871. The one substantial run, `$05:9B90` for 1110
+bytes, contains CODE (`REP #$30 ; LDA $4e ; AND #$00ff`), so it cannot simply
+be copied from the donor: the German code sits where it does because its data
+moved.
+
+What is left is to find which blocks hold the menu words, which is now a
+bounded search of a known structure rather than an open question.
+
+### `05:9653` is language-independent -- so it is not the menu's words
+
+Follow-up measurement on the block structure above, and it narrows rather
+than delivers.
+
+`05:960E` is `LDA $9696,X ; STA $79`: the block pointers come from a table at
+`$05:9696`, indexed by `$32`. Twelve blocks are used -- `$96AE $96E0 $970A
+$9754 $9786 $97B0 $97DA $980C $9836 $9858 $9892 $98B4` -- captured by watching
+`$0079` while the menu drew.
+
+**All twelve blocks, and the pointer table itself, are byte-identical between
+the US and German ROMs.** So this whole path is language-independent, and the
+menu's words cannot come through it, however plainly it writes tiles into the
+buffer the menu is DMA'd from.
+
+That leaves the model incomplete rather than finished. The composer merges
+tiles into `$7E:2840`, which uploads to VRAM `$5800` -- BG2's map on the menu
+screen -- so it does draw part of that screen. Which part is not established:
+rendering BG2's map against the CHR bases the sidecar reports does not
+reproduce the menu options.
+
+What is now excluded for the menu words: the tilemap packet (identical across
+regions, 3fb8871), the artwork alone (swapping it scrambles the text in play,
+d3d1aa1), and this composer path (identical across regions). The remaining
+candidates are a second composer, or a different variant index reaching
+different blocks in the German build -- `$32` and `$34` both come from
+somewhere this has not yet traced.
+
+## The main menu: its words are SPRITES (`00:8EA9`, table `$00:A164`)
+
+Settled by a bsnes capture of the German ROM, which is the one thing this
+project cannot measure for itself -- the recomp only runs the US image.
+
+The menu's words are **sprites**: 16x16, two characters each. `UB` of
+UEBUNGSSPIEL is char 98, `UN` char 100, and the umlaut dots are a separate
+8x8 sprite at char 232. Nothing on any background layer carries them. That
+retrospectively explains three dead ends, each of which was individually
+correct and collectively misleading:
+
+* the menu tilemap packet is byte-identical across regions -- it never
+  carried the words (3fb8871)
+* swapping the artwork alone scrambles the text -- German pixels landing at
+  English sprite positions (d3d1aa1)
+* `05:9653`'s composer is language-independent -- it draws the menu's icons
+  and numerals, not its options (654b185)
+
+Sprites mean shadow OAM, and `SC_WRAM_WATCH` on `$7E:2000` named the writer
+immediately: `00:8EF2` / `00:8F2F` / `00:8F38` -- the **same shared sprite
+emitter the building labels use**. Its entry is `00:8EA9`:
+
+```
+00:8EA9  REP #$30
+         LDA $0261 ; ASL ; TAY
+         LDA $a164,Y ; PHA          ; pointer table at $00:A164
+         LDY #$0000
+         LDX $0253                   ; OAM cursor
+         LDA #$0008 ; STA $0251
+         LDA ($01,S),Y ; STA $025b   ; flags, then walk the record
+```
+
+`$0261` selects the record -- ROM_MAP already noted it being read here "as a
+jump-table selector (`ASL A`; index into `$00a164,Y`)" without knowing what
+the table was.
+
+**Every** entry of that table differs between the US and German ROMs, and the
+records fill `$00:A100-$AFFF` as one continuous data blob. The recompiler
+finds no code in `$00:A000-$AFFF` -- zero entry points -- so the region can be
+taken from the donor whole. The table lives inside the copied span, so its
+pointers stay valid.
+
+Translating the menu therefore needs two things, and the artwork was always
+only half:
+
+```
+--rom-copy 0x002100-0x003000   the sprite records and their table
+--swap 0x04A571                the artwork the records index into
+```
+
+Verified by driving to the menu headlessly (Start after ~8-10 seconds at the
+title) and rendering the captured OAM against the patched artwork: it reads
+`- SCHAUPLAETZE -`, umlaut dots included.
+
+### ...but `--rom-copy 0x002100-0x003000` breaks the title. Do not use it
+
+Reported from play: title screen frozen, tiles corrupt. The recipe above is
+wrong, and the reason matters.
+
+`$00:A164` is not the menu's table. It is the **general** sprite-text table,
+and `00:8EA9` serves every screen through it -- the first OAM capture of this
+project caught `00:8EF2` writing on screen `$00`. Copying `$00:A100-$AFFF`
+whole therefore replaces the TITLE's sprite records as well, with German ones
+that index German artwork the title never loads. German records against
+English tiles: corrupt tiles, and the title sits there.
+
+That the recompiler finds no code in the region was necessary but not
+sufficient. The region is shared across screens, and only the menu's half of
+it has matching artwork installed.
+
+`--qualify` does not catch this. Headless runs pass 1400 frames and reach the
+menu, because the damage is graphical rather than a hang.
+
+A correct fix has to narrow the copy to the records the MENU uses -- which
+means finding the `$0261` values for the menu's entries, taking only those
+table slots and their records, and relocating the records into free ROM so
+their pointers can be repointed without disturbing the rest of the table.
+Alternatively the title's own artwork could be swapped so its German records
+match, but that widens the change rather than narrowing it.
+
+## `00:8EA9` decompiled -- the shared sprite-text emitter
+
+Every screen's sprite text goes through this: the menu's options, the title,
+the building labels' price line. Decompiled in full so a replacement renderer
+can be written against it.
+
+```
+00:8EA9  REP #$30
+         LDA $0261 ; ASL ; TAY
+         LDA $a164,Y ; PHA            ; record pointer, pushed for ($01,S),Y
+         LDY #$0000
+         LDX $0253                     ; OAM cursor, byte offset into shadow OAM
+         LDA #$0008 ; STA $0251        ; sprite budget: 8
+         LDA ($01,S),Y ; STA $025b     ; flags word
+  loop:  LDA ($01,S),Y ; AND #$00ff    ; X byte
+         LSR $025b ; BCC ; ORA #$0100  ; X high bit, shifted out of the flags
+         CMP #$0100 ; BEQ done         ; terminator: X == 0 with its flag set
+         CLC ; ADC $025d               ; + X base
+         STA $7e2000,X                 ; OAM X
+         ...                            ; high table at $7e2200: X bit 8 + size
+         LDA ($01,S),Y ; ADC $025f     ; Y byte + Y base
+         STA $7e2001,X                 ; OAM Y
+         LDA ($01,S),Y                 ; tile + attributes
+         STA $7e2002,X
+         INY x2 ; INX x4
+         DEC $0251 ; BEQ done ; BRA loop
+```
+
+**Record format**: a flags word, then up to eight sprites of
+`X byte, Y byte, tile+attr word`. So 34 bytes at most. Ended either by the
+budget in `$0251` or by an X of 0 whose flag bit is set.
+
+**Parameters**: `$0261` record index, `$0253` OAM cursor, `$025d` / `$025f`
+the X and Y bases, `$0251` the sprite budget.
+
+Verified against a live capture: German record `$10` at `$A594` decodes to
+tiles `$0C0`-`$0CE` along y=172, which is exactly the `SCHAUPLAETZE` strip the
+OAM watch recorded.
+
+### What this limits, and what it does not
+
+Eight sprites per record is the ceiling, and the words are 16x16 sprites
+carrying **two characters each** -- so sixteen characters per menu entry, and
+the pairs are pre-rendered, not composable.
+
+Raising `$0251` is NOT safe on its own: US record `$0D` uses all eight sprites
+with no terminator, so a larger budget would run it off the end of its data.
+Any change to the budget has to come with terminators added to every record
+that relies on the count.
+
+The artwork does carry an 8x8 alphabet -- sheet row 0 is `A`-`P` at tiles
+0-15, row 1 `Q`-`Z` then `! ? - . ,` at 16-30 -- so per-letter rendering is
+possible at 8x8 without any new artwork, at one sprite per character.
+
+### Menu records cannot be copied from a donor at all -- the indices differ
+
+c5665a1 relocated the donor's records for `$0C $0D $0F $10` instead of
+copying the whole region, which fixed the title but broke the menu: no
+option text, sprites in the wrong places, the title logo gone.
+
+The indices do not mean the same thing in the two builds:
+
+| index | US | German |
+|---|---|---|
+| `$0C` | 1 sprite, tile `$0C2` | 8 sprites, `$04C $04E ...` |
+| `$0D` | 8 sprites, `$0B9 $12F ...` | 8 sprites, `$0AF $0B9 ...` |
+| `$0F` | 8 sprites, `$0E0-$0E6` at y=44 | **1 sprite**, `$19E` |
+| `$10` | 8 sprites, `$120-$12C` | 8 sprites, `$0C0-$0CE` (SCHAUPLAETZE) |
+
+The German build reassigned them: its title strip lives at `$10` where the US
+keeps a different element, and its `$0F` is a single sprite where the US has
+an eight-sprite record. Dropping the donor's `$0F` over the US `$0F` replaces
+an eight-sprite record with a one-sprite one, which is precisely the missing
+logo.
+
+So there is no index-wise correspondence to copy along, and pairing them by
+what they draw would be guesswork against artwork that also differs. Both
+donor routes are now closed: whole-region (breaks the title) and per-index
+(breaks the menu).
+
+**What remains is to author our own records**, keeping the US indices and
+their meanings, with text rendered by us. That needs an 8x16 font, and the
+8x8 alphabet in the artwork is a different, smaller face -- so the glyphs
+have to be harvested from the existing word strips, whose contents are known.
+The record format (7dd2072) is fully understood and the filler at `$00:FB4C`
+is available to write into, so only the font stands between here and
+arbitrary text.
+
+## The menu font: 8x16, and already complete in the artwork
+
+The menu's words are 16x16 sprites carrying **two characters each**, so a
+character is 8 wide and 16 tall: two stacked 8x8 tiles, the top at tile `T`
+and the bottom at `T+16`, one sheet row lower.
+
+No harvesting from word strips is needed, which was the expectation. The
+artwork at `$04A571` already holds the whole uppercase alphabet in exactly
+that form:
+
+| rows | tiles | contents |
+|---|---|---|
+| 0-1 | `$000`-`$00F` / `$010`-`$01F` | `A` to `P` |
+| 2-3 | `$020`-`$02D` / `$030`-`$03D` | `Q` to `Z`, then `!` `?` `-` `.` |
+
+And it is the **same face** the strips use, not a lookalike: composing
+`RESUME` from these glyphs reproduces the `RESUMESAVED` strip at rows 4-5
+byte for byte, all six characters, both halves. Verified rather than eyeballed.
+
+So any string can be composed by copying glyphs into free artwork tiles --
+`tools/text_tool.py`'s `menu_compose()` does it -- and `SCHAUPLATZE`,
+`UBUNGSSPIEL`, `GESPEICHERTE STADT` and `NEUE STADT` all compose with no
+missing characters.
+
+Two things it does not cover. The alphabet has no umlauts or eszett: the game
+draws them by placing a separate 8x8 dots sprite above the base letter (the
+`Ue` of UEBUNGSSPIEL is char 232, spotted in bsnes), so a record composing
+German has to carry that extra sprite too. And the 8x8 alphabet elsewhere in
+the sheet is a different, smaller face -- an earlier lead, and the wrong one.
+
+### Still open: which record draws which menu option
+
+`$10` is the title **logo** -- its tiles `$120`-`$12C` are rows 18-19 of the
+sheet, which is logo artwork, not text. That is why dropping the German `$10`
+(their SCHAUPLAETZE) onto it blanked the logo in play. The records that draw
+the option lines have not been identified: an OAM watch reports only changes,
+and the menu's sprites are set on screen `$02` and persist unchanged into
+`$03`, so a change-triggered capture of `$03` sees nothing.
+
+## The main menu, mapped: `SC_OAM_DUMP`
+
+`SC_OAM_WATCH` reports changes, which is the wrong shape for a screen that is
+composed once and then sits there -- the menu sets its sprites on screen `$02`
+and they persist unchanged into `$03`, so a change-triggered capture of `$03`
+sees nothing. `SC_OAM_DUMP=<path>` with `SC_OAM_DUMP_ON=<hex $14>` and
+`SC_OAM_DUMP_WAIT=<frames>` writes all 128 sprites once: index, x (with bit 8
+from the high table), y, tile, attributes and size.
+
+With that, the menu:
+
+| element | y | sprites | tiles |
+|---|---|---|---|
+| Title logo | 23, 39 | 14, 16x16 | `$100`-`$10C`, `$120`-`$12C` |
+| cursor / box | 55-71 | 15, 8x8 | `$0b9`, `$10e`-`$13f` |
+| practice line | 112 | 5 | `$0c2` `$066` `$068` `$06a` `$06c` |
+| start-new-city line | 136 | 7 | `$022` `$06e` `$0c4` `$0c6` `$0c8` `$062` `$064` |
+| select-scenario line | 160 | 7 | `$0ca` `$0cc` `$0ce` `$0e0` `$0e2` `$0e4` `$0e6` |
+
+Reading those against the artwork bands -- rows 4-5 `RESUMESAVED`, rows 6-7
+`CITYPRACTICEAR`, rows 12-13 `- >T NEW SELECT`, rows 14-15 `SCENARIO` -- each
+line is assembled from **character pairs borrowed across bands**: y=160 is
+`EL` `EC` `T ` from rows 12-13 then `SC` `EN` `AR` `IO` from rows 14-15.
+
+### Why the tiles cannot simply be overwritten
+
+The bands are **shared between lines**. `$0c8` (` S`) serves y=136 while
+`$0ca` onward serves y=160, both out of the same rows 12-13 band. Rewriting a
+tile in place would change every line that borrows it.
+
+So composing translations means **authoring new records** that point at freshly
+composed tiles, not editing the tiles the shipped records use. Everything for
+that is now known: the record format (7dd2072), the 8x16 alphabet and
+`menu_compose()` (1a0c97e), the filler at `$00:FB4C`, and the on-screen
+geometry above. What must NOT be done is reusing a donor's records -- the
+indices mean different things in each build (449bea6).
+
+## `02:BC94` -- the menu's draw caller, and which record gets which base
+
+Traced by watching the emitter's own parameters (`$025d`, `$025f`, `$0261`)
+with `SC_WRAM_WATCH`, which names the writing instruction. Everything else in
+the log is the emitter writing its own scratch; the caller is bank `$02`.
+
+```
+02:BC94  LDA #$0080 ; STA $025d ; STA $025f   ; bases 128, 128
+02:BC9D  LDA #$000d ; STA $0261 ; COP         ; record $0D -- box / cursor
+02:BCAA  LDA #$0010 ; STA $0261 ; COP         ; record $10 -- title logo
+02:BCB7  LDA #$0088 ; STA $025d               ; x base 136
+02:BCBD  LDA $44 ; BEQ $bcd0                  ; saved-game flag
+02:BCC1    LDA #$000e ; STA $0261 ; COP       ;   record $0E, then falls into
+02:BCCE    BRA $bcd6                          ;   $0F as well
+02:BCD0  LDA #$0074 ; STA $025f               ; y base 116
+02:BCD6  LDA #$000f ; STA $0261 ; COP         ; record $0F -- option lines
+02:BCE7  LDA #$32   ; STA $025d               ; x base 50
+02:BCF1  LDY $44 ; ... ; LDA $d37c,X ; STA $025f  ; y from a table on $3e/$44
+02:BD01  LDA #$0c   ; STA $0261 ; COP         ; record $0C -- cursor arrow
+02:BD0D  RTL
+```
+
+The emitter is reached by `LDA #$0002 ; COP #$00`, which is the COP dispatch
+`$0261` was already noted as feeding.
+
+Bases confirm the geometry exactly. Record `$10` at (128,128): its `y=167`
+lands at `(167+128)&255 = 39` and `y=151` at `23` -- the logo's two rows.
+Record `$0F` at (136,116): `y=44` lands at `160` (the scenario line) and
+`y=252` at `112` (the practice line), so **one record draws two option
+lines**, four sprites each.
+
+When `$44` is non-zero -- a saved game exists -- `$0E` is drawn as well and
+execution falls through into `$0F`, so both appear.
+
+### Why German still does not fit
+
+`ÜBUNGSSPIEL` and `SCHAUPLÄTZE` are 11 characters each, six 16x16 sprites
+apiece, and they share record `$0F`'s budget of eight. Twelve will not fit.
+
+Raising the budget is not available: `$0251` is set to 8 inside the emitter
+(`00:8EBA`), and **19 of the records end on that count rather than on a
+terminator**, so a larger budget would run every one of them off the end of
+its data. Relocating and terminating 19 records is a bigger change than the
+problem warrants.
+
+What is left is to restructure which record draws which line -- which is
+exactly what the German build did, and why its indices do not match the US
+ones. The caller is short, straight-line and now fully mapped, so adding or
+re-pointing a call is tractable; it is ROM code patching rather than data,
+which is a different risk class from everything done so far.
+
+### Record `$0F` owns SCENARIO and PRACTICE -- proved by marking it
+
+Blanking `$0F` (setting its first sprite's X to 0 with the flag bit, so the
+emitter terminates at once) removed all three option lines, but that was
+misleading: with `$0F` drawing nothing, the OAM cursor never advances and
+later records land in its slots.
+
+Marking instead is decisive. Setting all eight of `$0F`'s tile words to
+`$1ff` and snapshotting shows exactly which sprites are its:
+
+```
+ 29  179 160 $1ff      33  122 112 $1ff
+ 30  163 160 $1ff      34  106 112 $1ff
+ 31  147 160 $1ff      35   90 112 $1ff
+ 32  131 160 $1ff      36   74 112 $1ff
+```
+
+Four sprites are `SCENARIO` at y=160 and four are `PRACTICE` at y=112. The
+rest of each line -- `SELECT` before the first, `START NEW CITY` entirely, and
+the `>` arrow -- comes from records not yet identified.
+
+### And rows 2-3 are NOT free artwork
+
+Composing `UBUNG` and `SZENARIO` into rows 2-3 and repointing `$0F`'s tiles
+renders both correctly in play. It also breaks the line above them:
+`START NEW CITY` becomes `UNART NEW CITY`, because that line draws tile `$022`
+-- inside rows 2-3.
+
+The earlier scan that called rows 2-3 "entirely unreferenced" only walked
+records reachable from `$00:A164` with pointers in a plausible range. The
+record behind `START NEW CITY` is not among those, so its tiles never entered
+the used-set. **A free-space claim about this artwork cannot be made by
+scanning the table**; it has to be made from observation -- mark a candidate
+tile, run, and see whether anything on any screen changes.
+
+That is the outstanding blocker for composing menu text: not the font, not the
+record format, not the caller, all of which are now understood -- but knowing
+which tiles are genuinely spare.
+
+### The marker sweep: which artwork tiles are genuinely spare
+
+Scanning the record table cannot answer this -- it called rows 2-3 free and
+composing there broke `START NEW CITY`. The answer has to come from what is
+actually on screen.
+
+`SC_OAM_DUMP` on every screen that loads `$04A571`, taking the union of the
+tiles displayed (16x16 sprites expanded to their four tiles, parked and
+off-screen sprites excluded):
+
+| screen | distinct tiles displayed |
+|---|---|
+| `$01` title | 48 |
+| `$02` transition | 53 |
+| `$03` menu | 141 |
+| `$0f` in game | 7 |
+| **union** | **178 of 512** |
+
+Rows 20-31 appear on none of them. That this packet is only resident on the title and menu screens, so that
+nothing else could be looking at it, was wrong: the scenario selector and the
+new-city screens unpack it too. See "The menu's artwork is shared" below. Rows 30-31 are also blank in the artwork, which makes them the safest
+choice of the free bands.
+
+Composing `UBUNG` and `SZENARIO` there and repointing record `$0F` gives, in
+play, `> UBUNG` / `START NEW CITY` / `SELECT SZENARIO` -- the two translated
+lines correct and the third **intact**, which is the check the rows 2-3
+attempt failed.
+
+That was the first pass, and it capped a line at eight characters because it
+only repointed the four sprites record `$0F`'s first chunk draws there.
+Decompiling the emitter lifted the cap -- see "Translating the menu into any
+language" below, where `--menu-text` takes all three lines and 36 characters.
+
+### Why the menu lines are mixed, and where that stops
+
+In play the scenario line reads `SELECT SZENARIO` -- one English word, one
+German. Reported from play, and the cause is that a menu LINE is not one
+record.
+
+Marking every record in `$00:A164` with a unique tile and snapshotting the
+menu attributes each on-screen sprite:
+
+| sprites | record |
+|---|---|
+| y=112, x 74-122 | `$0F` |
+| y=160, x 131-179 | `$0F` |
+| y=112, x 50 (the arrow) | `$0C` |
+| logo, box | `$10`, `$0E`, and others |
+| **y=136 all, and y=160 x 74-106** | **unmarked -- not from the table at all** |
+
+So `START NEW CITY` and `SELECT` are drawn by the same emitter but from
+records reached without the table, through a second entry point that takes a
+pointer directly. Searching the ROM for their tile sequence finds
+`START NEW CITY` at **`$00:A3F4`**, immediately after `$0F`'s record, whose
+six sprites decode to screen (154,136) through (74,136) exactly.
+
+`SELECT` was not found the same way: the tile sequence `$0CA $0CC $0CE` does
+match at `$00:A5AE`, but that record's sprites decode to (119,32) and (103,32)
+under the menu's bases, so it is a different element and the match is
+coincidental. Bases vary per call, which makes tile-sequence search
+suggestive rather than conclusive.
+
+What this means practically: a record's tiles can be repointed without knowing
+its caller -- that is how `$0F` was translated -- so `$00:A3F4` is directly
+translatable too. But covering a whole line means finding every record that
+contributes to it, and the search has to be confirmed by decoding positions,
+not by the tile sequence alone.
+
+**Retracted in part.** "Records reached without the table, through a second
+entry point" is wrong: there is no second entry point, and `$A3F4` is not a
+record. The emitter runs on past its eight-sprite budget into the next chunk
+of the SAME record, so all three lines belong to `$0F`. The next section has
+the decompilation.
+
+### The menu's sprite-text emitter, decompiled
+
+`$00:8EA9` is COP function 2, and it is what draws every line of the main
+menu. Decompiled in full it settles the questions the tile-sequence searches
+above could only guess at.
+
+```
+00:8ea9  REP #$30
+00:8eab  LDA $0261 / ASL / TAY / LDA $a164,Y / PHA   ; record pointer on the stack
+00:8eb4  LDY #$0000
+00:8eb7  LDX $0253                                   ; OAM byte cursor
+00:8eba  LDA #$0008 / STA $0251                      ; eight sprites a chunk
+00:8ec0  LDA ($01,S),Y / STA $025b                   ; the FLAGS word
+00:8ec5  INY / INY
+00:8ec7  TXA / LSR x4 / AND #$fffe -> $0255          ; high-table word index
+00:8ed2  TXA / LSR / AND #$000e   -> $0257           ; which sprite in that word
+00:8eda  LDA ($01,S),Y / AND #$00ff                  ; the entry's X byte
+00:8edf  LSR $025b / BCC / ORA #$0100                ; flag bit -> X bit 8
+00:8ee7  CMP #$0100 / BEQ $8f4d                      ; X=0 with its flag set: end
+00:8eec  CLC / ADC $025d                             ; + the X base
+00:8ef2  STA $7e2000,X                               ; low byte -> OAM
+00:8f00  AND #$0100 ...                              ; bit 8 -> the high table
+00:8f11  LSR $025b / BCC / ORA $8f62,Y               ; next flag bit -> size
+00:8f19  STA $7e2200,X
+00:8f25  LDA ($01,S),Y / CLC / ADC $025f             ; Y byte + the Y base
+00:8f36  LDA ($01,S),Y / STA $7e2002,X               ; tile + attribute, verbatim
+00:8f42  DEC $0251 / BEQ $8f4a
+00:8f47  JMP $8ec7                                   ; next sprite
+00:8f4a  JMP $8eba                                   ; budget spent: NEXT CHUNK
+```
+
+Three things follow, and each of them was a blocker before.
+
+**A record is a chain of chunks, not a 34-byte blob.** `$8F4A` does not
+return. It jumps back to `$8EBA`, which reloads the eight-sprite budget and
+reads a *fresh* flags word from the next two bytes. So a record simply carries
+on, eight sprites at a time, until a chunk terminates. Record `$0F` is
+therefore one record of three chunks -- `$A3CE` (8 sprites), `$A3F0` (8) and
+`$A412` (2 and the terminator) -- covering **all eighteen** text sprites of
+all three option lines.
+
+That retracts the reading above. `$00:A3F4` is not "a record reached through a
+second entry point": there is no second entry point. Nothing points at `$A3F0`
+or `$A412` because nothing needs to. The 16-bit value `$A3F4` appears once in
+the whole ROM, in unrelated data, which is exactly what the chain predicts.
+
+**The flags word is two bits a sprite, and the first is part of X.** Bit `2i`
+is OR'd into the entry's X byte as bit 8 *before* the base is added; bit
+`2i+1` is the 16x16 size bit. For an on-screen sprite the first bit has to be
+whatever carry the 8-bit sum produces, so it is really a sign extension: entry
+byte `$C2` plus base 136 is `$14A`, and only the flag bit, making it `$24A`,
+keeps bit 8 of the result clear.
+
+Writing new X bytes and leaving the US flags word alone puts sprites 256 pixels
+to the right. That happened on the first run of the new generator: five of the
+six sprites of the top line sat at x = 330..410, one of them by luck at 122.
+The x-high bit is written from the sum at `$8F00`, so it cannot be left to the
+old value.
+
+**The terminator is one byte, not one entry.** `CMP #$0100 / BEQ` at `$8EE7`
+tests the X byte together with its flag bit, and the record ends there. Record
+`$10` is pointed at `$A41D`, immediately after the `$00` at `$A41C` that ends
+the `$A412` chunk -- which is how the one-byte length was confirmed, and it is
+also why the pool cannot grow past eighteen in place -- though it can be
+grown by moving `$10` out of the way, which a later section does.
+
+### Translating the menu into any language
+
+Because each entry carries its own X, Y and tile word, the eighteen sprites
+are a free pool: any of them can be given to any line. The US split of
+4 / 7 / 7 is not fixed by anything, and that is what lifts the eight-character
+cap. Eighteen 16x16 sprites, two characters each, is 36 characters across the
+three lines in any split, and **48** once the pool is grown to 24.
+
+They were located by signature rather than by following pointers: an entry
+stores X and Y as offsets from the caller's base (136, 116), so searching the
+record region for the three bytes of a sprite seen on screen finds its entry.
+Eighteen of the nineteen sprites on the option lines resolve uniquely and
+contiguously, at `$00:A3D0` through `$00:A418`. The nineteenth is the cursor
+arrow, drawn from base (50, 112) by record `$0C`, and it is left alone.
+
+The generator writes, per publish: every entry's four bytes, every chunk's
+flags word, and the composed glyphs. Spare sprites are pointed at a blank
+pair, so a short set does not leave a fragment of `SCENARIO` on screen.
+
+```
+text_tool.py packets --menu-text "UEBUNGSSPIEL|NEUE STADT|SCHAUPLAETZE"
+```
+
+| line | US | sprites |
+|---|---|---|
+| y=112 | `PRACTICE` | 4 |
+| y=136 | `START NEW CITY` | 7 |
+| y=160 | `SELECT SCENARIO` | 7 |
+
+German needs 6 / 5 / 6 and leaves one spare; French
+(`ENTRAINEMENT` / `NOUVELLE VILLE` / `SCENARIOS`, with the accents) needs
+exactly 18 and leaves none.
+
+#### Accents, without a sprite to spend on them
+
+The font has no accented letters, and there is no room to add a sprite for the
+marks -- the German cartridge draws the dots of `UEBUNGSSPIEL` as an extra 8x8
+sprite at y=104, and this pool has no spare entry for one.
+
+So the mark is composited into the character cell. The cell is 8x16 and the
+letters fill all sixteen rows, but they are drawn as a vertical colour ramp,
+so two rows can come out of the middle without changing the shape: the squash
+drops the rows that differ least from the row above, which lands on the plain
+vertical strokes every time. The letter keeps its apex and its base, loses two
+rows of ramp, and the mark goes in the space that frees up, shaded like the
+rows it replaced. Diaeresis, acute, grave, circumflex, tilde, ring and cedilla
+are built this way, covering the Latin-1 letters.
+
+#### What the check has to cover
+
+Two failures earlier in this file came from checking too little, so the
+verification is fixed:
+
+1. The title screen's OAM must be **byte-identical** between a plain and a
+   patched run. Screens `$01` and `$02` both are.
+2. **All three** option lines must be rendered and read, not just the ones
+   expected to change. Reading them back from a live VRAM capture and matching
+   each 8x16 cell against the font gives `UEBUNGSSPIEL` / `NEUE STADT` /
+   `SCHAUPLAETZE` at a bit distance of zero.
+
+The live OAM also confirms the free bands directly, and more cheaply than the
+marker sweep did: the highest tile any sprite references on `$01`, `$02` or
+`$03` is `$13F`, the last tile of row 19. Rows 20-31 are unused on those
+screens -- and only on those. The scenario selector loads the same artwork and
+draws its win marks from rows 27 and 29; see "The menu's artwork is shared"
+below.
+
+### Growing the pool to 24, and the French import
+
+Eighteen sprites is enough for German. It is not enough for French: the
+French cartridge's own wording is `ENTRAINE-TOI` / `NOUVELLE CITE` /
+`CHOISIS SCENARIO`, unaccented, and it spends **20** sprites on it -- read
+straight off that cartridge by capturing its menu and matching each 8x16 cell
+against the font, which returns all three lines at a bit distance of zero.
+
+So the chain grows. `$0F` ends at `$A41C` only because record `$10` starts at
+`$A41D`, and `$10` is reached **only** through the table at `$00:A164`. A
+record's entries are self-contained -- x, y, tile, attribute, no internal
+pointers -- so its whole 61-byte chain copies verbatim into the bank-0 filler
+at `$00:FB4C` and the table entry at file `$002184` is repointed at the copy.
+That frees `$A41D` onward, and the chain becomes:
+
+| chunk | was | now |
+|---|---|---|
+| `$A3CE` | 8 sprites | 8 |
+| `$A3F0` | 8 sprites | 8 |
+| `$A412` | 2 + terminator | 8 |
+| `$A434` | record `$10` | flags word + terminator |
+
+**24 sprites, 48 characters.** The filler is the 1140 bytes of `$FF` ending at
+the cartridge header, and nothing else in this repo uses it: the one thing
+that ever wanted it, Truttle1's powered-cell patch, is implemented host-side
+here precisely so that no ROM space is needed.
+
+Record `$10` is the logo, which has broken this screen before, so the check is
+the strict one. Against a plain US run the patched menu differs in exactly 25
+OAM slots: the 24 pool sprites and the cursor arrow, which moves six slots
+later because `$0F` now emits six more sprites before it. Every other slot,
+the logo included, is byte-identical, and so is the whole of screens `$01` and
+`$02`.
+
+One trap the growth introduced. The sprites past the original eighteen sit on
+bytes that used to be record `$10`, so inheriting the attribute byte per
+sprite -- which worked while the pool was eighteen -- gives the last sprites of
+a long line the wrong palette. French would have drawn its final two sprites
+at attribute `$18` instead of `$30`. The pool takes one attribute, from the US
+line text, for all of it.
+
+#### A cell can need translating without its entry changing
+
+The donor is free to reuse a tile index for a different glyph, and it does.
+San Francisco's first disaster line is tiles `$0BE`..`$0C3` in both ROMs --
+`Earthquake` in the US one, `Tremblement` in the French one, at the same
+indices. Taking artwork only for cells whose tilemap ENTRY changed left that
+line in English while the second line, which the donor does move, came out
+French: the card read `Earthquake de terre`.
+
+So the artwork of an unchanged cell is taken too, but only inside the card
+rectangles, and only when no cell outside them shares the tile. The screen
+around the cards is left alone, and so is Sylt's card, which the host composes
+after this packet.
+
+German never showed this, because the German cartridge moves those cells to
+different indices: its count of reused tiles is zero. French has six.
+
+One thing the French cards do not get: Sylt's disaster line reads
+`Inondation` where Rio's reads `Inondation cotiere`. Sylt takes a single
+six-tile strip from the donor, which is a whole word in German
+(`Hochwasser`) and only the first line of two in French.
+
+#### Words are packed whole
+
+Both cartridges lay their lines out by word, not by character, and it is worth
+copying: a word of n letters takes ceil(n / 2) sprites, and an odd-length word
+leaves its last half blank, which *is* the space before the next word. Only
+after an even-length word does the space cost anything, and then it costs 8
+pixels of position rather than a sprite. `NOUVELLE CITE` is 6 sprites that
+way and 7 laid out densely.
+
+Checked against the French cartridge, which is the one that spends carefully:
+`NOUVELLE CITE` comes out at offsets 0 16 32 48 72 88, exactly its own, and
+`CHOISIS SCENARIO` within a pixel of its own.
+
+#### The French build
+
+```
+text_tool.py import  --donor fr.sfc --briefs --out translation_fr.bin
+text_tool.py packets --donor fr.sfc --hud \
+    --menu-text "ENTRAINE-TOI|NOUVELLE CITE|CHOISIS SCENARIO" \
+    --out translation_fr_selector.scpk
+```
+
+53 messages and 12 briefing pages, 90 scenario-card cells with none left in
+English, 78 building-label tiles and 87 repositioned placement sprites. It
+qualifies clean over 1200 frames, and all three menu lines read back out of
+live VRAM at a bit distance of zero.
+
+Checked: the menu and the scenario cards, by rendering them from live VRAM
+captures -- all ten cards French, all three menu lines at a bit distance of
+zero. The building labels were checked a different way, because they are
+sprites sliced out of a sheet and reaching the toolbar takes a played game:
+for every tile the PATCHED placement records slice, the patched sheet is
+compared against the donor's. 83 tiles for French, 92 for German, none
+differing.
+
+That check is worth keeping. It is what shows that the `Nuclear` still
+sitting in the French sheet is harmless: tiles `$1B0`..`$1B5` are dead space
+in the French cartridge, which left the US bytes there, and no French
+placement record references them. German does reference them, and translates
+them -- which is the same six tiles the `$036200` truncation once lost.
+
+### The message box is 24 characters wide, and German text is written for 25
+
+Reported from play: the Dr. Wright intro came out as `Hallo! Ich bin Dr. Wrigh` /
+`tund Du mußt der neue` / `  Bürgermeister sein. Ha` -- every line one
+character short of the cartridge's, so the text slides further out of step
+with every row.
+
+A message record is a flat grid, not a string with line breaks. The renderer
+writes a fixed number of characters, then skips to the next tilemap row, and
+the runs of spaces inside a record are what pad each line out to the edge:
+
+```
+01:e592  LDA $0397 / ASL / TAX
+01:e597  LDA $0fa800,X / TAX          ; the message pointer
+01:e59f  LDA #$0018 / STA $79         ; 24 characters a line
+01:e5a4  LDA $0f0000,X / AND #$00ff   ; one character
+01:e5ab  CMP #$00ff / BEQ             ; $FF ends the record
+01:e5b0  ORA #$0800                   ; its tile attribute
+01:e5b5  STA $7e3948,X                ; into the tilemap shadow
+01:e5bd  DEC $79 / BNE                ; until the line is full
+01:e5c1  TYA / CLC / ADC #$0010 / TAY ; then skip 8 words to the next row
+01:e5c7  BRA                          ; and start another line
+```
+
+24 characters plus 8 words is 32 words, one tilemap row. The German and French
+cartridges run the same routine at the same address with `LDA #$0019` and
+`ADC #$000E`: 25 plus 7, the same 32 words.
+
+| region | columns | skip |
+|---|---|---|
+| US, EU | 24 | `$0010` |
+| French, German | 25 | `$000E` |
+
+Measured as well as read, because a table like that is worth checking: wrap
+every record at each candidate width and count the boundaries that fall inside
+a word. On the US records 24 scores 75 of 496 and the next best is 161; on the
+French ones 25 scores 4 of 491. The residue is line-end hyphens and the
+records that are not prose.
+
+So the fix is two operand bytes, carried as ordinary cart spans in the packet:
+`$01:E5A0` and `$01:E5C4`. `--columns N` sets it, and on the donor path it
+**defaults to the donor's own measured width**, since the text this packet is
+paired with came from that donor. Forgetting a flag is how this would come
+back.
+
+The German record 27 wrapped at 24 reproduces the broken screenshot character
+for character, and at 25 reproduces the cartridge's own line breaks:
+
+```
+Hallo! Ich bin Dr. Wright     Hallo! Ich bin Dr. Wrigh
+und Du mußt der neue          tund Du mußt der neue
+Bürgermeister sein. Hab'        Bürgermeister sein. Ha
+ich recht? Laß uns doch       b' ich recht? Laß uns do
+        at 25                          at 24
+```
+
+Reflowing the text to 24 instead was the alternative and is worse: it would
+have to guess which line-end hyphens are soft (`Ver-` + `binde` is one word,
+`Wohn-` before `und` is not), and it adds a line per paragraph to a box of
+fixed height.
+
+### The menu's artwork is shared, so its glyphs are applied on the menu only
+
+Reported from play: on the scenario selector, the red X marking a won scenario
+came out as coloured fragments of `STADT`.
+
+The sprite artwork at `$09:A571` is not the menu's alone. Tracing every unpack:
+
+| screen | when |
+|---|---|
+| `$02` | into the menu: from the title, back from the selector (X), back from the new-city screens |
+| `$04` | the new-city screens |
+| `$0a` | the scenario selector |
+| `$12` | into the menu from a city (GOTO MENU); the same loader, `$02:BB23` |
+
+The packet patch matched entries by source address only, so the glyphs composed
+for the menu were laid over every one of those unpacks. The selector draws each
+win mark as sprite-text record `$29` -- `03:DED0` sets the emitter's base from
+`$DF30`/`$DF20` and calls COP 2 with `$0261 = $29` -- and that record's four
+sprites are tiles `$1B0 $1B2 $1D0 $1D2`. The generator had written glyphs into
+`$1D0` and `$1D2`.
+
+The earlier observation was true as far as it went: rows 20-31 are unused on the
+title and menu. What did not follow was that they were free, because the marks
+only draw once a scenario has been won and no capture had any wins. Walking every
+record in the table with the chunk rule shows the "free" bands referenced
+throughout, and only 8 two-by-two units in the whole sheet are referenced by no
+record at all, against the 24 the pool needs. Moving the glyphs elsewhere was
+never an option.
+
+So a packet entry can now name its screens. SCPK v2 adds a count and a list of
+screens after each entry's address, and the runtime applies such an entry only
+while `$14` is one of them. An empty list means every screen, which is what a v1
+file means, and v1 files still load that way. The menu artwork entry is written
+for `$02` and `$12`, the two screens the menu's own loader runs on.
+
+Checked:
+
+- A selector unpacked fresh after the menu had applied its glyphs matches the
+  original artwork on all 512 tiles.
+- On the `savestate_1` path, where the marks draw (28 sprites, seven wins), the
+  patched selector's sprite art and OAM are byte-identical to a run with no
+  translation and no packet.
+- Entering the new-city screens no longer applies the glyphs.
+- The German and French menus still read back at a bit distance of zero, with
+  their sprite tables unchanged.
+
+### The accent glyphs moved out of the notice table's punctuation
+
+Reported from play: the in-city "Save completed." dialog ended in a wrong
+character.
+
+The accent glyphs of a translated message font went at their CP437 codes,
+`$81`..`$9B`, because the US message records never use those codes. That was
+true and not enough. The in-city notice table in bank 01, `$01:9824`..`$01:9C9C`
+("More Residential zones needed", "Save completed."), draws from the same font
+with every character stored as its code plus `$60`, so its space, punctuation
+and digits are `$80`..`$9F`. The German blob's accents overwrote `!`, `,`, `.`,
+`3`, `4` and `7` there; the wrong last character was the full stop at `$8E`.
+
+Tiles `$E0`..`$FE` of the US font are blank and used by neither the messages
+nor that table, so the accents now go there in order, and the translated
+records are rewritten to point at them. German's 203 and French's 276 accented
+message bytes all moved; the blobs are the same size.
+
+Checked inside a city entered fresh, so the font was unpacked with the new
+blob: the notice table's `.` `!` `,` `3` and the message full stop are the
+original glyphs, and all 16 German accents sit at `$E0`..`$EF`.
+
+The notice table itself is still English; it is not among the 53 messages.
+
+Scoping to `$02` alone was one screen short. Reported from play: after going
+back from a city to the main menu the German lines were missing. Traced in
+that session: GOTO MENU passes through game state `$12`, which runs the same
+menu loader at `$02:BB27` and unpacks the artwork while `$14` is `$12`, so the
+entry skipped it. A save state taken nine frames before that transition
+reproduces it headless.
+
+## In-city notices: reader, format, and import
+
+The two-line boxes over the city ("More Residential zones needed.",
+"Blackouts reported.", the scenario countdown, "Save completed.") are not among
+the 53 messages. Their reader is at `$01:9C9D`, byte-identical in all four
+cartridges:
+
+```
+01:9c9d  LDA $0381 / ASL / TAX / LDA $0197E3,X / STA $79   string pointer
+01:9ca8  LDA #$0610 / STA $7C                              tilemap offset
+01:9cad  LDA $0381 / TAX / LDA $0194FB,X / AND #$FF / TAX  width class
+01:9cb9  LDA $01978C,X / AND #$FF / SEC / SBC #2 / STA $7F characters a line
+01:9cc6  LDA #2 / STA $82                                  two lines
+01:9cd2  LDA $010000,X / AND #$FF / ORA #$2C00 / STA $7E3840,Y   byte = tile
+```
+
+This settles what the correction above left open: the index is `$0381`, the
+pointer table is `$01:97E3` (33 words), and the text is not terminated at all --
+each notice is exactly two lines of its class width.
+
+| | |
+|---|---|
+| width classes `$01:978C` | 14 17 21 25, minus 2 = 12, 15, 19, 23 characters a line; the same in all regions |
+| class per notice `$01:94FB` | also read by the box frame at `$01:9797`; German and French change 19 and 16 of them |
+| byte | the tile number. The font holds a recoloured copy of its glyphs `$60` up, so a notice byte is the CP437 code plus `$60` (German ue `$E1`, ss `$FB`) |
+| written by | `$01:9473`, `$03:B020` (26), `$03:CB37` (31), `$03:CBD5` (30), `$00:D2C7` (32) |
+
+`text_tool.py template` exports them as `notices` (id, width, two lines),
+`translate` imports them, and `packets --notices` takes the donor's. The text
+runs up to the reader, so a translation cannot stay in place: it goes to the
+`$FF` filler at `$01:F924` (1756 bytes) and all 33 pointers and the class table
+are rewritten. German needs 1224 bytes, French 1274.
+
+Accented letters need their own slots. The notice copies of the glyphs sit
+exactly where the message font's accents now live (`$E0`..`$EF`), so a notice
+accent takes a slot from `$F0`..`$FE` and its glyph comes from the donor's own
+notice bank, already in the notice colours, as a packet span on the in-city
+font `$09:C0FB`.
+
+Checked: the US notices round-trip identically through export and import;
+the German and French imports decode back to their cartridges on all 33
+notices with identical classes; in a freshly entered German city the five
+notice accents are at `$F0`..`$F4`, the notice bank `$80`..`$DF` is untouched
+and the 16 message accents are intact. Not yet seen: a notice drawn on
+screen -- none fired in 2600 frames of a new city, and nothing headless can
+set `$0381`.
+
+## Report screens: budget, evaluation, overview, events
+
+Pictures, not text: one 2048-byte tilemap per screen over a shared 2bpp tile
+set, found by matching live captures against every packet in the ROM.
+
+| screen | tilemap | load site |
+|---|---|---|
+| budget | `$0B:BF0E` | `$02:A36C` |
+| evaluation | `$0B:C0C9` | `$02:A441` |
+| overview | `$0B:C29F` | `$02:A4A2` |
+| events | `$0B:C488` | `$02:B626` |
+| tile set | `$09:875C` | `$02:A132` (reports, `$14 = $00`), `$03:DF77` (briefing, `$14 = $0C`) |
+
+The German and French cartridges keep the four screens in the same order,
+so their tilemaps are the four 2048-byte packets from the budget map's twin.
+Byte agreement alone pairs them wrongly (three US maps matched one German
+one), because the donors number their tiles differently.
+
+The tile set cannot be swapped whole. It differs on 714 of 1024 tiles, and
+the game draws words from it at runtime at tile numbers fixed in the US code:
+the city category is one ("Metropolis" is `$197`..`$19D`, a fragment in the
+German set). So the import changes only what the picture changes. A cell's
+tile is redrawn in place if no other cell uses it; otherwise an identical
+untouched tile is reused, or a free one is taken -- blank, unreferenced by the
+four maps, not seen written at runtime, and not on a sheet row holding any
+unreferenced artwork, which is where runtime word strips and their padding
+live. All entries are scoped to `$14 = $00`, so the briefing keeps its tiles.
+
+`text_tool.py reports --out DIR [--from ROM]` exports the four screens as
+PNGs; `packets --reports-from DIR` imports painted ones and `packets
+--reports` takes the donor's, colour attributes included.
+
+Checked offline: US export and import changes nothing; the German import
+matches the German screens on all 1024 cells of all four, pixels and colour
+attributes, uses 60 of 296 free tiles, and leaves every runtime tile and all
+264 unreferenced artwork tiles untouched; French uses 83. Not yet seen in
+play.
+
+### Correction: menu glyph rows 24-27 were not free
+
+The save list (screen `$11`, through RESUME SAVED CITY) draws its digits from
+the menu artwork as 8x8 sprites, tops `$190`..`$199` and bottoms `$1A0`..`$1A9`.
+The sweep that called rows 20-31 free never visited that screen, and the ninth
+sprite of GESPEICHERTE STADT spilled into the band at `$180`, whose lower half
+is `$190`/`$191` -- reported from play as the "1" missing its top. The bands
+at rows 24-27 are gone from the list, and the spare menu sprites now share one
+blank pair so the saved-game line still fits. Checked against a capture of
+the save list: no tile it draws is written any more.
+
+## Map window titles
+
+The map analysis window ("COMPREHENSIVE", "POWER GRID", fourteen maps) draws
+its title as four 32x32 sprites over tiles `$100`..`$13F`, and the game copies
+the strip for the current map into those tiles when the window opens. The
+strips are pre-rendered in the window's graphics packet `$0A:D381` (4bpp,
+1024 tiles): fourteen of them, 16 tiles wide and 2 rows tall, at packet tiles
+512..959. Located by finding the title tiles of two live captures inside the
+packet.
+
+The German and French cartridges keep all fourteen at exactly the same
+tiles, GESAMTUEBERBLICK where COMPREHENSIVE is, and every tile either donor
+changes lies inside 512..959 (German 383 tiles, French 364). So a title is
+translated tile for tile, with no copy table and no layout.
+
+`text_tool.py maptitles --out PNG [--from ROM]` exports the sheet;
+`packets --maptitles-from PNG` imports an edited one and `packets --maptitles`
+takes the donor's, as a packet entry on `$0A:D381` scoped to `$14 = $00`.
+Checked offline: the US export imports to no change, and both German routes
+reproduce the German packet exactly.
+
+A trap found on the way: `scan_packets` with a large minimum length does not
+step over the shorter packets in front of the one wanted, so a false stream
+decoded from inside them can swallow its start. At 32768 this packet was not
+found at all; at 512 it is. Scans now use 512 and filter afterwards.
+
+### Open: reported from play on the German build, not yet fixed
+
+Reported after the report screens, notices and map titles went in. Listed
+with the lead each one has, where there is one; none is investigated yet.
+
+- **Map select and PLEASE WAIT are English.** Fixed, see "The map select screen" below.
+- **Evaluation title misaligned.** Fixed. The year is four big digits drawn by
+  `$02:B51F` at row 1, column 6; the German cartridge draws them at column 2,
+  left of STATISTISCHE, and that operand is now taken. See "Report cells follow
+  the donor" below.
+- **Evaluation: Kategorie and Schwierigkeitsgrad come out misspelled.** The
+  US code draws the category and level words ("Village", "Easy") at US
+  cell positions, and the longer German labels run into those cells. Fixed
+  with the word strips and the donor's cells, same section.
+- **Evaluation: the runtime digit lands on the % of "% JA" / "% NEIN".** Fixed:
+  the German number layout puts those digits one column left, and it is copied.
+- **Evaluation: the "($)" after Wert der Stadt shows wrong tiles; overview:
+  one wrong tile each in Feuerwehrstationen and Wasserflaechen; Kategorie and
+  Schwierigkeitsgrad misspelled.** Fixed: the import had allocated new tiles in
+  rows 46-48, and nine slots there (`$2EC`..`$2F1`, `$2F4`, `$304`, `$30B`) are
+  where our translation runtime writes the accented briefing glyphs whenever
+  this shared set unpacks. Those rows are now excluded.
+- **Events: title correct, event lines English.** Fixed for German, see "Event lines and month names" below.
+- **Main menu: WEITER over the end of GESPEICHERTE STADT.** Fixed: the NEXT
+  button had been taken on every screen, and its tiles are the lower halves
+  of the saved-game line's last sprites. See "Tile-for-tile sets" below.
+- **Loan screen letter still English** (2026-09-16, savestate 2). Fixed, see
+  "The loan letter" below.
+- **Widescreen showing the new city before the fade** (2026-09-16, savestate
+  3: loading the practice city from the in-city dialog). Fixed in the
+  compositor, see `docs/WIDESCREEN_HOST_MAP.md`, "Loading a city".
+
+## The map select screen
+
+The new-city screens (unpacked on `$14 = $04`) are one device on two layers.
+
+| layer | tile set | tilemap | pages |
+|---|---|---|---|
+| BG1 | `$08:DEA2`, 4bpp | `$0B:9BA4` | 3: the device, "Please wait..." |
+| BG3 | `$08:C4DB`, 2bpp | `$0B:A10B` | 4: MAP SELECT; "Enter name of the city"; "Select game level", Easy/Medium/Hard and their funds; "Is this OK?  Yes  No" with the chosen level and funds |
+
+The first version of this section looked only at page 1 of each tilemap and
+said both were identical in the German cartridge, and that NEXT was the same
+in both. Both were wrong, and the name entry, level select and confirmation
+pages stayed English:
+
+- BG1's three pages are identical; 21 tiles differ ("Bitte warten...").
+- BG3's first page keeps its layout (LANDKARTEN, 22 tiles). Pages 2-4 are laid
+  out anew: "Name der Stadt", "Waehle Schwierigkeitsgrad" with "1 Leicht
+  2 Mittel 3 Schwer", "Ist das richtig?  Ja  Nein" -- other cells, other
+  tiles, other palettes.
+- NEXT is not on either layer. It is a sprite from the menu art `$09:A571`,
+  tiles `$172`-`$174`, which German draws as WEITER; it is taken with the
+  tile-for-tile sets below.
+
+BG1's later pages also name tiles past the set's 256, from another part of
+VRAM. Those cells are left out of the picture (orange) and of the import;
+before that, a US picture redrew 195 tiles.
+
+So BG1 imports tile for tile, and BG3 cell by cell like the selector: a
+changed cell takes an identical tile if there is one, else a redrawn one --
+a tile all of whose cells changed, or a blank tile no page uses -- and its
+palette and priority come from the picture's colour ramp. `$08:C4DB` is also
+the scenario selector's set, and the selector's entry is not scoped, so the
+BG3 entries are scoped to `$04` and write every tile the new pages use, not
+just the redrawn ones. The new tilemap goes in whole, also scoped.
+
+The confirmation's first line is not all tilemap. Choosing a level runs mode
+`$15`, which writes six BG3 words over the page before it shows:
+
+```
+03:d9eb  LDA $0B57 (level) / ASL / TAY
+         LDA $DAAF,Y -> $7E41D4    four cells of the level's name
+         LDA $DAB5,Y -> $7E41D6
+         LDA $DABB,Y -> $7E41D8
+         LDA $DAC1,Y -> $7E41DA
+         LDA $DAC7,Y -> $7E41DE    the funds' first two digits
+         LDA $DACD,Y -> $7E41E0
+```
+
+The code is the same in all three cartridges, shifted (German `03:DA0D`,
+French `03:DA10`); the 36-byte table after it (German `$03:DAD1`, French
+`$03:DAD4`) holds each donor's own tile numbers. With the pages imported and the US table left alone, Leicht came out
+right by chance and Mittel and Schwer as fragments, and French showed the
+wrong words. Some of the table's tiles are on no page (the 1 of 10, the 5, a
+blank), so the import counts the eighteen entries as cells like the pages'
+and writes the table back, as cart spans; the AOT code reads it at run time
+(`cpu_read16`), so no `force_lle` is needed. The table is found through the
+code in front of it.
+
+`text_tool.py mapselect --out FILE` writes one 512x1024 picture: BG3's four
+pages on the left in four colours (a cell in a colour ramp has a palette of
+its own), BG1's three on the right in sixteen, and under BG1, from cell row 97,
+the level table as three rows of six BG3 cells (Easy, Medium, Hard). A picture
+from before the table, with those cells orange, keeps the US words and their
+tiles. `packets --mapselect` takes the donor's, `--mapselect-from FILE` (or
+the graphics folder) a painted one.
+
+Checked offline: the US picture imports to nothing, with or without the table;
+the German and French pictures import to exactly the donor routes, and with
+the donor route applied the pages and all three table rows draw as the
+cartridge does, pixels and attributes. Checked in play on the German- and
+French-patched US builds, from a cold boot through name entry, level select
+and the confirmation of each level.
+
+## Event lines and month names
+
+Decompiled:
+
+```
+02:b2ec  string N at the position of event type T:
+         position = $02:BAB9[T], offset = $02:BAD9[N] & $0FFF
+02:b328  bytes from $02:B8B4 + offset are TILES; $FE ends the line (the
+         caller draws one more a row down), $FF the string; offsets under
+         $5E get $100 added -- the large-font word strips, entries 0-12
+02:b6d0  month names from $02:B708: 12 x (three tile words, $0FFF), 96 bytes
+02:b66a  the events loop: position types 6-15 are the ten rows, string =
+         event id + 16
+```
+
+Entries 13-15 are Easy/Medium/Hard (the evaluation's level field, 6 cells),
+16-36 the events. The small font is A-Z `$00`-`$19`, a-z `$30`-`$49`, digits
+`$20`-`$29`, space `$1F`, `, . '` at `$1C`-`$1E`, `$ ? ! " + -` at `$2A`-`$2F`,
+`%` at `$4A`. Position types 0-5 are the evaluation's runtime fields (problems,
+category, level).
+
+The German cartridge runs a different drawer (`$02:B2F7`): its bytes are ASCII
+and CP437 drawn from a second copy of the face at tile `$270` + code, and `$FD`
+breaks a line nine cells further left. So its strings are decoded as text and
+re-encoded for the US drawer, which starts every line at column 12: 18 cells,
+to column 29, two lines. 22 of 24 German entries fit once re-wrapped; two are
+shortened (`EVENT_SHORTER`): the "Bevoelkerung erreicht die ...-Marke" lines
+become "Bevoelkerung / 30,000 erreicht". `template --from` a donor applies
+the same re-wrapping and shortening to lines that do not fit as they stand,
+so a template seeded from the German or French cartridge builds unedited
+(before, `translate` stopped at German entry 17); lines that fit keep their
+breaks, and a US template is unchanged.
+
+Correction: the width was first taken as 17, which cost "Hohe
+Luftverschmutzung!" its exclamation mark and French a short form. The US
+itself writes "A deluge occurred!" in 18 cells, and column 29 is paper on the
+US, German and French events screens alike (compared cell by cell against
+column 28), so the lines now run to column 29.
+
+The German list, word strips included, is 630 bytes against the US 523, so it
+moves to the `$FF` filler at `$02:FCEC` and the base operand at `$02:B336` is
+repointed (which only works on the interpreter -- see the correction below).
+Accented letters get glyphs from the donor's `$270` face -- the US letter with
+dots -- in free report tiles below `$100`, because a string byte can only name
+a tile below `$100`. `packets --events` takes the donor's; `template` exports
+`events` and `months` and `translate` imports them.
+
+Checked offline: all 24 entries decode to the intended text, and the months
+read JAN FEB MAER APR MAI JUN JUL AUG SEP OKT NOV DEZ. French fits too, with no
+short form at 18 cells. Its level names fit as they are, one right-aligned
+field of the donor's own width.
+
+### Correction: the report import must never redraw the small font
+
+The event lines, the month names and every number are drawn at runtime from
+the small font `$00`-`$5F`. The report import redrew a tile in place whenever a
+single map cell used it, and R (`$11`) is used once by a label -- so
+"Reaktorunfall" and "APR" lost their R. `$00`-`$5F` are now protected; the
+report screens still match the German cartridge on every cell.
+
+### Correction: patched code bytes never reached play
+
+The event import above repointed the list base, an operand inside `$02:B328`,
+and was checked offline only. In play it could not have worked: the build
+runs `$02:B328` as recompiled C, and the generator writes every operand into
+that C as a constant, read from the ROM when `src/gen` was generated. A packet
+patch lays its bytes over the cart image at startup, and only the interpreter
+tier reads code from there. Data -- the offset table, the list, the month
+names -- is read through memory at runtime and was never affected.
+
+So a function whose code a translation changes has to run on the interpreter.
+`recomp/bank02.cfg` declares `force_lle` for `$02:B328` (the word drawer: list
+base and art threshold) and `$02:B51F` (the report title year). A forced
+function needs its exit width declared too: the analyzer cannot see how an
+interpreted callee returns, so every caller's continuation goes unproven and
+the callers drop to the interpreter as well. Without `exit_mx_at` the forced
+functions (with `$02:A66E`, tried and dropped) took some forty more variants
+off AOT, as far up as `$00:961C`; with it, exactly the four variants of the
+two functions leave, and nothing else in `src/gen` changes.
+
+`src/gen` is rebuilt by `tools/regen.sh`. On Windows run it with
+`PYTHON=python` set: the script prefers `python3`, which can be the Microsoft
+Store stub, and the failure is easy to miss behind a pipe.
+
+## Report cells follow the donor
+
+What the game prints over the four report screens sits at cells fixed by the
+US layout, and the donor places several of them differently to suit its own
+labels. Three kinds, all taken by `packets --reports` / `--events`:
+
+**Numbers** are placed by data. The number printer `$02:B266` reads a layout
+from `$02:B77C` up to the word list; the German and French cartridges have the
+same table, same length, at `$02:B787`. German differs in 18 words -- JA/NEIN
+one column left (so the digit no longer covers the `%`), the problem
+percentages one left, the overview's right column two right -- French in 9.
+The words that differ are copied.
+
+**The title year** is `$02:B51F`: four big-font digits at `LDX #$004C`, row 1
+column 6 (`#$004E` when `$01FB = 2`). German draws at `#$0044`, French at
+`#$0046`. The operand is found by the code around it in both cartridges and
+copied; being code, it relies on the `force_lle` above.
+
+**The word strips** are entries 0-12 of the word list: the evaluation's
+problems (0-6) and city category (7-12); entries 13-15 are the level names.
+The US draws the strips as artwork at report tiles `$181`..`$1DC` through the
+`$100` rule. The German drawer has no such rule. Its problems are squeezed
+lettering at its tiles `$320`..`$35F`, "Megametropole" is art at `$280`..`$28A`,
+and "Dorf", "Stadt", "Hauptstadt" and "Metropole" are plain text right-aligned
+in eleven cells ("Grossstadt" too, but its sharp s is byte `$9B`, not ASCII, so
+it is copied as art). French draws all thirteen as art.
+
+Art entries go first in the list, their glyphs copied into report tile rows
+`$18`..`$1D` -- the US strips' own rows, which no map uses (German needs 72
+tiles, French 73). Text entries follow in the small font. The threshold
+operand at `$02:B32C` is set to where the art ends (`$58` German, `$65` French),
+and the donor's first cell for each string type (`$02:BAB9`) comes along: the
+German category starts at column 18, four left of the US 22, the problems one
+left. Level names keep their spaces and may be as wide as the donor's widest.
+The report import no longer lets a static label reuse an unreferenced tile on
+those rows, since the strips may be redrawn; that changes nothing for German
+today (469 tiles, all four screens still identical to the donor's).
+
+Checked offline by running the US drawer's logic over the patched image: the
+nine German art strips match the donor pixel for pixel; the four text strips
+and the level names come out in the US small font, the same style as the
+donor's face and a few pixels apart on some capitals and digits; the number
+layout equals the donor's; the year operand reads `$44`.
+
+Not taken: German also moves the budget's tax rate digits (`STA $7E2B28`.. in
+`$02:A66E`) two columns right. Nothing collides there, and it would put one
+more function on the interpreter.
+
+### Save states taken on a report screen cannot check these screens
+
+**Update (2026-09-17): the cause is fixed for new states.** The device
+snapshot held the PPU's registers and memories but not its CPU-port latches
+(the VRAM pointer, VMAIN's increment-on-high bit, the CGRAM/OAM write state),
+so a state saved while the game was uploading tiles sent the uploads after
+the load to the wrong place. States now carry those latches, the host's
+master clock and its HDMA walker behind a versioned header (taken from the
+adaptive-renderer PR, blackerking/UrbanRecomp#1). A save/restore at
+frame 3300 of a San Francisco run matched the uninterrupted run for 300
+frames -- WRAM hash, CPU registers, master clock -- and all 12 captured
+pictures byte for byte. Old states still load, with a warning, and behave as
+they did; save them again to get the fix. `SC_SAVE_AT`/`SC_SAVE_PATH` and
+`SC_STATE_TRACE` under `--qualify` reproduce the check. The text below is
+what was measured with the old format.
+
+Loading a state saved while a report screen is open does not redraw it. Frame
+0 is the saved picture; within 40 frames the tiles break up, and pad input at
+60 and 150 frames changes nothing visible. Plain US, with no translation and
+no packet patch, does exactly the same, and so does `SC_FIBER=0`. These fixes
+are therefore checked by opening the screens fresh in play. Any test run from
+a save state also needs `SC_REPLAY_MENU=0`, or the replay automation takes the
+pad within a few seconds.
+
+## In-city panels
+
+The panels the icon bar opens -- GAME SPEED, OPTION, DISASTERS, INFORMATION,
+LOAD SAVE -- draw their title strip and icon captions from one 4bpp sheet,
+`$0A:A523` (384 tiles, unpacked to `$7E8000` on `$14 = $00`). The window around
+them is the same in the German cartridge (its bank 01 row tables, such as the
+ones `01:d94f` blits, differ only in pointers); what changes is which sheet
+tile lands in which cell.
+
+```
+01:d729  REP #$30 ; LDA $01df ; ASL ; TAX
+         LDA $03e5cf,X             ; list for page $01df (5-7 reuse page 0's)
+         LDA #$03 ; PHA ; PLB      ; the list is read in bank 03
+         (cell, sheet tile) word pairs until $FFFF, each
+         MVN 32 bytes $7E8000 + tile*32 -> $7EC000 + cell*32
+01:d77d  page 3 only: two 3x3 groups, cells from $01:d6f3, the nine sheet
+         tiles $15A-$162 from $01:d717, a group copied when its $01e7 bit is clear
+```
+
+German keeps the code and the window, redraws 175 sheet tiles and uses longer
+lists. Its titles fill all twelve cells of the strip (SPIELGESCHWINDIGKEIT,
+AUTO-FUNKTIONEN, KATASTROPHEN, INFORMATIONEN, LADEN SPEICHERN) where the US
+leaves the ends of a short title undrawn, and the captions change in their own
+cells (KARTE, KURVEN, STEUERN, UMFRAG, GESAMT, MODELL, MUSIK, ZUM MENU, ENDE).
+Its lists take 1426 bytes against the US 1362, and bank 03 has 190 free.
+
+So an import writes the table and the lists to bank 0F, into the `$FF` run at
+`$0F:9B97`-`$A80F` just before the message block at `$0F:A868`, and repoints the
+reader's two operands: the long table address and the `LDA #$03` before `PLB`.
+`recomp/bank01.cfg` keeps `$01:D729` on the interpreter for that, with
+`exit_mx_at 01d729 0 0`; exactly its two variants leave AOT.
+
+`text_tool.py panels --out PNG [--from ROM]` exports the five pages, 16x12
+cells each and stacked, with page 3's nine extra tiles in a band below, in the
+sixteen `LABEL_PAL` colours; a cell a page does not draw is solid orange.
+`packets --panels-from PNG` (and `translate --panels-from`) imports a painted
+sheet, `packets --panels` the donor's. The import rebuilds the lists and the
+sheet from the pictures. `$01:D729` is the only code that copies out of the
+unpacked sheet -- the `ASL x5 / ADC #$8000` idiom occurs twice in each
+cartridge, both inside it -- so every tile but page 3's extras may be
+redrawn (the 41 no US list reads are blank), and tiles already holding a
+wanted glyph are kept.
+
+Checked offline: the US export imports to no change; the German donor and the
+German PNG produce identical patches (344 distinct tiles, 161 redrawn, lists
+1442 bytes at `$0F:9C00`), and reading the patched image back through the
+relocated reader reproduces every German page and extra exactly. French does
+the same with 322 tiles, 123 redrawn, 1394 bytes.
+
+## Graphics: one folder out, one folder in
+
+Every translatable picture has an exporter and an importer, so a language
+without a donor cartridge can be painted, and a donor's pictures can be
+touched up before they go in:
+
+```
+python tools/text_tool.py graphics --out DIR [--from ROM]
+python tools/text_tool.py packets   ... --graphics-from DIR
+python tools/text_tool.py translate ... --graphics-from DIR
+```
+
+`graphics` writes each exporter's file into `DIR` with a `README.txt`; an
+import takes whichever files are present. Each also works alone, as
+`text_tool.py NAME --out ...` and `--NAME-from`:
+
+| file | what | how it imports |
+|---|---|---|
+| `reports/` | budget, evaluation, overview, events, the loan letter | redraw, reuse or allocate per cell, with colour attributes |
+| `maptitles.png` | map window titles | tile for tile |
+| `labels.png` | toolbar building labels | tile for tile, slices fixed |
+| `panels.png` | in-city panels, five pages + page 3's extras | lists and sheet rebuilt, lists in bank 0F |
+| `mapselect.png` | the new-city display's four pages, Please wait... | BG3 per cell with colour attributes, BG1 tile for tile |
+| `strips.png` | evaluation problems and categories | art in report rows `$18`-`$1D`, columns from the picture |
+| `accents.png` | accented glyphs: message font, notices, report face, briefing | glyph source instead of a donor |
+| `selector.png` | card names, disaster lines, Sylt's line | per cell, with colour attributes |
+| `tilesets/` | city zone letters, bank window, graph title, gift signs, RCI meters, PUSH START, NEXT, police and fire stations, toolbar icons, in-city window words | tile for tile |
+| `saveload/` | save/load dialog: sheet, prompt runs, month names | sheet up to 176 tiles, runs and months repointed |
+
+Two conventions run through all of them. Colours are palette indices: the
+sixteen `LABEL_PAL` colours for 4bpp sets, the first four for 2bpp, and the
+grey `REPORT_RAMP` on the report screens; orange means a cell that is not
+drawn. And in the tilemap pictures -- reports, selector and map select's
+BG3 -- a cell whose
+palette or priority differs from the US tilemap is shown in a ramp of its
+own (one hue per palette, paler for priority), which the import reads back
+as that cell's attribute -- plain pictures from before still import as they
+did.
+
+A donor flag (`--reports`, `--panels`, `--mapselect`, `--events`) still wins
+over the folder for its own set. What a picture cannot carry stays with the
+donor or the US: the report screens' number cells and title year column, and
+the text of every string, which lives in the translate JSON.
+
+Checked offline, per set and as a whole:
+
+- A US folder imports to nothing: the packet it builds is byte-identical to
+  the plain packet without it.
+- German and French donor builds were byte-identical before and after the
+  pictures went in, and the reports and selector pictures of both import to
+  exactly what the donor routes produce, colour attributes included.
+- A German folder reproduces the German cartridge: map select, accents and
+  panels identically to the donor routes; the strips drawn through the US
+  drawer match every German cell and both columns (as art in 79 tiles, where
+  the donor route uses 72 plus text); the selector on all 2048 cells, pixels
+  and attributes, with Sylt's line equal to the donor route's.
+
+## Tile-for-tile sets, and what the packet inventory still shows
+
+Every LZ5 packet of the US cartridge was paired with its German counterpart
+(same decompressed length, best byte agreement) and the differing tiles
+looked at. Six sets differ only in words drawn at the same tile numbers, and
+each pairing is confirmed by the code that loads it (the `LDX #addr` / `LDA
+#bank` before the unpacking `COP #$00`):
+
+| set | US packet | German | loader US / German | tiles DE / FR |
+|---|---|---|---|---|
+| city map tiles: zone letters R, C -> W, G | `$07:E584` | `$07:E6E1` | `00:96C2` / `00:96B8` | 17 / 20 |
+| report screens BG1: BANK, LOANS, Yes/No, Go With Figures | `$08:E422` | `$08:E630` | `02:A119` / `02:A116` | 68 / 38 |
+| graph window title GRAPHS | `$0A:FCE1` | `$0B:8B11` | `02:98F9` / `02:98F9` | 16 / 24 |
+| gift building signs | `$0A:C4CF` | `$0A:CB37` | `01:CD6C` / `01:CD6F` | 54 / 64 |
+| RCI demand meter, city sprites | `$0A:81E9` | `$0A:8522` | `01:E45C` / `01:E45F` | 3 / 0 |
+| RCI demand meter, menu sprites | `$0A:8F68` | `$0A:92A2` | `01:E477` / `01:E47A` | 4 / 0 |
+| title: PUSH START, tiles `$118`-`$11F`, `$138`-`$139` | `$07:A680` | `$07:A680` | `05:90B5` / `05:90B5` | 10 / 10 |
+| NEXT button, tiles `$172`-`$174`, on `$00` and `$04` | `$09:A571` | `$09:A65B` | `01:A10E` / `01:A149`, and three more | 3 / 3 |
+| in-city BG3 set past its font, tiles `$100`-`$27F` (2bpp) | `$09:C0FB` | `$09:C223` | the notices' font | 30 / 15 |
+| police and fire stations on the map, PD FD -> PH FH | raw `$05:C000`, four `$1400` frames | same address | -- | 16 / 32 |
+| toolbar icons: R C PD FD -> W G PH FH; 10/120 Year | raw `$07:8000`-`$A680` | same address | -- | 21 / 24 |
+
+`text_tool.py tilesets --out DIR [--from ROM]` writes each as a 16-tile-wide
+sheet; `packets --tilesets` takes the donor's differing tiles and
+`--tilesets-from DIR` (or the graphics folder) painted ones. All but NEXT
+have no screen scope: the German art is what the German game shows wherever
+these unpack.
+
+The last two are taken only in part. The title set differs in 111 tiles
+(French 87), but only "DRUECKE START" ("PRESSE START") is text; the rest is the
+German cartridge's trademark sign and copyright lines, which are not ours to
+change, and recoloured street lights and filler. The menu art differs in 97
+tiles, which are the menu's own words (composed by the menu import, see "The
+menu's artwork is shared" above) and the save list's glyphs `$19C` and
+`$1AC`; only WEITER (SUITE) is taken. The button is sprite-text record `$2C`,
+drawn on the new-city screens and by the in-city screen at `01:9FD1` that
+shows the city's name, and it was first scoped to `$04`. Taking it wherever
+the art unpacks was wrong: reported from play as WEITER over the end of
+GESPEICHERTE STADT, because the menu composer's fourth band is `$160` and its
+sprites' lower halves are `$170`-`$17F`, where the saved-game line's last two
+sprites land. It is scoped to `$04` and `$00` (the city, where `01:9FD1`
+runs) now -- confirmed from play on 2026-09-16, WEITER shows in the city --
+and `write_packets` notes any bytes two entries of one packet write
+differently on a screen they share. The German title set sits at the
+US address, hidden from a packet scan by a false stream in front of it, so a
+donor's copy is looked for there first.
+
+The in-city set `$09:C0FB` is the notices' font below tile `$100` (German
+reorders it, and the notices import writes its accents at `$F0`-`$FE`), and
+window words above: TOP (French MAX), R and C on frames, R-1..., LOW MID
+UPPER HIGH (ABW. MITTE AUFW. HOCH). Only `$100`-`$27F` is taken, exported as
+four colours.
+
+Checked offline: the US sheets import to nothing, the German sheets to exactly
+the donor route.
+
+Not taken, and why:
+
+- `$0B:86F7`, the save/load dialog sheet: taken separately, see "The save/load
+  dialog" below. (An earlier note here said German calls the sheet's loader
+  from one more site, `01:E110`. It does not: that is the clear routine
+  `00:CADD`, the German twin of `00:CA9D`, which the US calls at `01:E10D`.)
+- `$0B:BCAD` (loaded by `02:B58C`): 94% of its bytes differ from German
+  `$0B:CBE6`, and this note said that drawn with each cartridge's own tiles the
+  two were the same picture. Wrong: it is the loan screen's letter, English in
+  the US and German in the German cartridge, which writes it in ASCII at `$270`
+  + code where the US has its own arrangement of the face. Reported from play
+  (savestate 2) and taken now, as a fifth report screen -- see "The loan
+  letter" below.
+- `$0C:87CB` is a 2048-byte tilemap page of the briefing screen, which the
+  translation runtime composes from strings; six differing words there are
+  not tiles.
+- The many small "differences" in banks 00-03 and 0F are false streams --
+  code and message text that happen to decode as LZ5.
+
+## The save/load dialog
+
+The dialog's sheet `$0B:86F7` (4bpp, 162 tiles, unpacked to `$7E9000` by
+`00:CAE0`) holds the city-category houses of the save list, the name
+keyboard's letters, the CANCEL/YES/NO buttons and the prompts. Houses,
+keyboard and buttons sit at the same tiles in the German and French sheets:
+the houses are built by `01:CEBC` from 4x4 lists at `$01:CD8A` that are
+identical in all three cartridges, and the copy routines and their slot
+tables in bank 00 (`00:CB12` with `$00:CAFA`, `00:CB44` with `$00:CB32`) are
+the same code shifted.
+
+What differs are six operands and one table. Six sites in four dialog
+functions copy a prompt as a run of sheet tiles:
+
+```
+LDA #$9000 + tile*32 ; LDX #count ; JSR $CB12      (at most 12 tiles)
+
+site      US                          German                       French
+00:c7e0   Which to load?   85 x11     Welches Spiel laden?  80 x12  85 x10
+00:c8e0   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+00:c947   save?           155 x5      Speichern?            72 x8  155 x6
+00:c987   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+00:c9f5   save?           155 x5      Speichern?            72 x8  155 x6
+00:ca35   Where to save?   72 x12     Welche Position?     163 x12  72 x9
+```
+
+And the save list's month names are a 36-byte table after `00:cd36`, three
+sheet codes a month (tile = code + 96: digits, then A-Z). German writes MAER,
+MAI, OKT and DEZ, its A-umlaut being tile 162; French FEV, AVR, AOU, DEC.
+Both donors' sheets are 176 tiles long, and German's last run is the
+"Welche Position?" prompt and the umlaut. (German also inserts a character
+remap into the name drawer, `CMP #$0028 / LDA #$0041` at `00:CDE1`; that is
+new code, not taken.)
+
+A packet patch may write past the US length -- the spans land in WRAM, and a
+donor's own sheet reaches just as far -- so the import takes the sheet whole,
+repoints the six (tile, count) operands and copies the month table.
+`recomp/bank00.cfg` keeps the four dialog functions (`00:C7DA`, `00:C8DA`,
+`00:C941`, `00:C9EF`) on the interpreter, with their exit widths: `00:c7da`
+returns in m0x0 from `00:c82c` and in m0x1 from `00:c8cd`, the rest in m0x0.
+Declared that way, the `$01DF` menu handlers that call them stay AOT. 34
+variants leave AOT -- the four functions' eight, and the copy routines and
+drawing helpers only these dialogs call -- and one other joins it.
+
+`text_tool.py saveload --out DIR` writes `sheet.png` (16 tiles wide, 11 rows,
+orange past the end) and `prompts.json` (the six runs and the twelve months as
+tile numbers); `packets --saveload` takes the donor's, `--saveload-from DIR`
+(or the graphics folder) painted ones. Checked offline: the US folder imports
+to nothing; the German and French folders import to exactly the donor routes
+(German: 83 tiles differ, six runs, months changed; French: 87), and the runs
+read back from the patched image are the donor's.
+
+## What the packet inventory could not see
+
+The inventory above compares LZ5 packets, and play still showed English on
+the confirmation page, over the scenario selector, on the toolbar and on the
+police and fire stations. None of it is in a packet that differs. Two more
+passes found them.
+
+**Code banks, aligned.** Banks 00-03 and 05 of the US and German images were
+aligned with a byte diff (difflib) and every non-trivial replacement looked
+at; lone operands shifted by the local offset are relocations. Besides the
+event strings and relocated tables already handled:
+
+- `03:D9EB`'s level table, see "The map select screen".
+- `$03:CF32`, the scenario cities' names, see below.
+- `03:C500`, the scenario deadline. The in-city notices "5 years to complete
+  scenario" ... "1 year" (notices `$14`-`$16`, `$18`, `$19`) are counted down
+  by calendar year against the end years at `$03:C5B3`, and in the US the
+  same routine judges the scenario when the end year arrives (`03:C548`,
+  result in `$0D87`). German and French keep the countdown but judge in a
+  routine of their own (`03:C571`, called from the frame loop at `03:80CA`)
+  when `$0B51` -- apparently the time played, 48 to a year -- equals a value
+  per scenario (`$03:C5F7`: 239, 479, 239, 481, 241, 479, 479, none). The US
+  carries an unused table of 240, 192, ... 0 at `$03:C5CF`. Game logic,
+  left as in the US by decision (`docs/REGIONS.md`).
+- `$05:C000`-`$FFFF`, four frames of the map's animated tiles: PD and FD on
+  the police and fire stations. At the same address in all three, raw.
+
+**Banks at the same address.** Bank 04 is identical; bank 06's differences
+are all in the HUD region `--hud` already copies; bank 07 is aligned up to
+`$07:A7C0`.
+
+**The toolbar, traced.** The icons stayed English with `--hud` applied. A
+VRAM and OAM dump of a city (`SC_VRAM_DUMP`, `SC_OAM_DUMP`, the capture's
+bytes being plain VRAM) showed the toolbar as 16x16 sprites on tiles
+`$100`-`$12F`, and more than half of those tiles match not the HUD region but
+a raw table at `$07:8000`: both states of every icon, copied to VRAM as an
+icon is drawn. German changes 21 of its tiles (R C PD FD, and "10 Year" /
+"120 Year" of the graph window), French 24. The same dump showed BG3 of the
+city as `$09:C0FB`, whose window words differ too.
+
+All three raw sets and the BG3 set are tile-for-tile sets now (the table
+above). Checked offline: picture and donor routes agree for US, German and
+French, and the patched frames and icon table equal the donor's. Checked in
+play (German, San Francisco): toolbar W G PH FH, the police station PH; and
+reported from play on 2026-09-16, the graph window's "10 Jahr" / "120 Jahr".
+
+## Scenario city names
+
+Starting a scenario, or the practice map, names the city:
+
+```
+03:cf19  LDA $CF32,Y / STA $79      Y = scenario * 2, nine pointers
+         copy length + 1 bytes from ($79) to $0B5B
+```
+
+The list is CISCO, BERN, TOKYO, DETROIT, BOSTON, RIO, LASVEGAS, FREEDOM and
+PRACTICE, the practice map being entry 8, in the city-name codes: 0-9, A-Z
+(`$0A`-`$23`), then `,` `.` `-` and space (`$24`-`$27`). The name is drawn as
+sprites by `01:A312` (halves from `$03:E57F`/`$03:E5A7`), in the save list by
+`00:CD98`, and on the name entry page.
+
+French renames BERN and PRACTICE (BERNE, ENTRAIN). German renames PRACTICE
+UBUNG with an U-umlaut, code `$28`, which only new German code can draw: the
+save list's remap `CMP #$0028 / LDA #$0041` at `00:CDE1`, and sprite tables
+one entry longer. Not taken, so a donor's `$28` comes over as UE: UEBUNG.
+
+The list and the pointers are read at run time (`cpu_read16` in the AOT
+code), so a translation is a cart span packing the nine names into the 62
+bytes the US names take. `packets --cities` takes the donor's; the translate
+JSON has them as `cities`, ids 0-8, 1-8 characters each.
+
+## The scenario selector's title
+
+"-SELECT SCENARIO-" is sprite-text record `$15`, drawn by `03:DD6D` from base
+(96, 96): nine 16x16 sprites at y = -84 in the menu's own face, a dash (tile
+`$0C0`) at each end. The record table and the code are the same in all
+three cartridges; German draws SCHAUPLAETZE on `$0C4`-`$0CE` with an 8x8
+sprite for the dots, French CHOISIS SCENARIO on `$0E0`-`$0EE` without the
+dashes. Our build showed the US title, because the menu import composes its
+glyphs only on `$02` and `$12`.
+
+It is composed like the option lines now: glyphs from the alphabet into
+`$0E0`-`$0EE` and `$0C4`-`$0CE` -- the tiles the German and French titles
+prove unused elsewhere on the selector -- in an artwork entry scoped to
+`$0A`, with record `$15` rebuilt at the end of the bank-0 filler and
+repointed, centred where the US title is. An odd last word leaves a blank
+half, which the right dash closes over, as German's does. The text is the
+third menu line unless `--selector-title` (JSON `selector_title`) says
+otherwise; in all three cartridges the two read the same. The US wording
+composes nothing. Checked in play: the German and French builds show
+SCHAUPLAETZE (the dots squashed into the A, as in the menu) and CHOISIS
+SCENARIO over the selector.
+
+## The loan letter
+
+The loan screen (savestate 2) is BG1 art -- the bank front, BANK, LOANS, Ja /
+Nein, from `$08:E422` -- with the letter on BG3: the report screens' 2bpp set
+`$09:875C` through a three-page tilemap `$0B:BCAD`. Page 0 is the offer, pages
+1 and 2 the refusal when the city owes too much, with different buttons. The
+US writes the letter in its own arrangement of the small face (A-Z from
+`$290`, a-z from `$2C0`); German (`$0B:CBE6`) and French write ASCII at `$270`
++ code in theirs, accented letters above `$2F0`.
+
+It is imported as a fifth report screen, `reports/bank.png` (256x768, the
+three pages under one another): the same per-cell redraw, reuse or allocate
+into the same set, scoped to `$00` like the others, and the tilemap replaced
+whole. Its tiles now count wherever the four screens' do -- the references a
+cell may redraw in place, the free tiles the reports and event lines take,
+the strip rows -- so no other import can take a letter glyph. German needs 8
+new tiles and redraws 8 in place; the rest are glyphs the US set already has.
+
+Checked offline: the US picture imports to nothing, and the German and French
+pictures import to exactly the donor routes, with all five screens drawing
+every cell as the cartridge does, pixels and attributes. In play the letter
+could not be reopened cleanly from savestate 2: re-entering the bank from
+there garbles the screen, palette included, in the unpatched US game just the
+same (the known trouble with states on report screens). Confirmed from play
+on 2026-09-16 with the bank opened normally: the letter reads German.

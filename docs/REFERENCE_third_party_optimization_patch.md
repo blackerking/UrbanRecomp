@@ -1,7 +1,7 @@
-# Reference: third-party "SimCity Optimized" IPS patch
+# Reference: third-party "Optimized" IPS patch
 
 Status: **reference material, not applied or merged**. The user supplied
-`Sim City Optimized v1_0.ips` (not tracked in this repo -- it's the user's
+The "Optimized v1_0" IPS (not tracked in this repo -- it's the user's
 own local file) from an independent optimization project. This doc records
 what's been learned from it so far, for future investigation -- it is
 **not** a plan to merge or apply this patch; it's inspiration/cross-
@@ -54,7 +54,7 @@ held and our recomp only does so in bursts.
 
 ## What's been directly confirmed by diffing the patch against our ROM
 
-Applied the IPS to a copy of `simcity.sfc` and diffed byte-for-byte
+Applied the IPS to a copy of the US ROM and diffed byte-for-byte
 against stock (script: see chat history / scratchpad, not checked into
 this repo). 923 total byte differences across ~121 patch regions,
 spanning banks 00-05.

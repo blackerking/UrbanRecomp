@@ -1,3 +1,11 @@
+> Update after integrating UrbanRecomp main `28c280b` (2026-09-19): the branch
+> now retains the game's published `blackerking/snesrecomp` pin `bc2838d`.
+> Its PPU fixes and optional AOT ABI are dependencies of current main. The old
+> shared-main migration below is historical, not the current build contract.
+> The host now uses main's master-clock charge hook instead of the draft's
+> deferred DMA shim. Both Sylt and Adaptive Widescreen use main's launcher,
+> including its no-OpenGL fallback, translations, key bindings and SRAM saves.
+
 # Shared dependency audit
 
 This branch starts from SimCitySNESRecomp upstream `master` at `d54bbbd`

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(SimCitySNESRecomp C)
+project(UrbanRecomp VERSION 1.0.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -12,41 +12,55 @@ set(SNESRECOMP_ROOT "${CMAKE_SOURCE_DIR}/snesrecomp" CACHE PATH
 
 include(${SNESRECOMP_ROOT}/runner/runner.cmake)
 
+# The pre-boot launcher (settings, key bindings, the Sylt mod) comes from the
+# shared recomp-ui submodule. Without the checkout the game builds and starts
+# directly, with the settings in sc-settings.ini.
 set(RECOMP_UI_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui" CACHE PATH
-    "Shared Mods launcher checkout")
-set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL "SimCity presentation mods" FORCE)
-include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+    "Shared launcher (recomp-ui) checkout")
+if(EXISTS "${RECOMP_UI_ROOT}/recomp_ui.cmake")
+    set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL "Urban Recomp launcher mods (Sylt)" FORCE)
+    include(${RECOMP_UI_ROOT}/recomp_ui.cmake)
+    set(SC_HAVE_LAUNCHER ON)
+else()
+    message(STATUS "UrbanRecomp: no recomp-ui checkout, building without "
+                   "the launcher (git submodule update --init recomp-ui)")
+    set(SC_HAVE_LAUNCHER OFF)
+endif()
 
-# Phase-1 bring-up (see README.md and src/main.c): SimCity runs entirely on
+# Phase-1 bring-up (see docs/AOT_LLE.md and src/main.c): the game runs entirely on
 # the shared LLE interpreter tier (standalone interp816 over the device
 # models), NOT the AOT/CpuState hybrid runtime. `bash tools/regen.sh` already
 # produces real AOT-eligible banks under src/gen/ -- proving the recompiler
 # pipeline works end to end against the ROM -- but that generated C targets
 # the CpuState ABI (cpu_state.c/common_cpu_infra.c/interp_bridge.c), which
 # this executable does not link yet. Wiring that hybrid tier in is the
-# documented next phase (see README.md); until then src/gen/*.c is
+# documented next phase (see docs/AOT_LLE.md); until then src/gen/*.c is
 # intentionally left out of this target so the build doesn't silently
 # mismatch ABIs.
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/gen)
-    file(GLOB SIMCITY_GEN_PROBE ${CMAKE_SOURCE_DIR}/src/gen/*.c)
-    if(SIMCITY_GEN_PROBE)
+    file(GLOB SC_GEN_PROBE ${CMAKE_SOURCE_DIR}/src/gen/*.c)
+    if(SC_GEN_PROBE)
         message(STATUS
-            "SimCitySNESRecomp: src/gen has ${SIMCITY_GEN_PROBE} generated "
+            "UrbanRecomp: src/gen has ${SC_GEN_PROBE} generated "
             "AOT bank(s) from tools/regen.sh, not yet linked -- Phase 1 is "
-            "interpreter-only. See CMakeLists.txt / README.md.")
+            "interpreter-only. See CMakeLists.txt / docs/AOT_LLE.md.")
     endif()
 endif()
 
-add_executable(SimCitySNESRecomp
+add_executable(UrbanRecomp
     src/main.c
-    src/simcity_mapview.c
-    src/sc_lle_adapter.c
+    src/sc_launcher.c
+    src/sc_sram.c
+    src/sc_icon.c
+    src/sc_mapview.c
+    src/sc_mapgen.c
+        src/sc_decomp.c
     src/sc_video.c
     src/sc_mods.c
     src/sc_renderer.c
 )
 
-target_include_directories(SimCitySNESRecomp PRIVATE
+target_include_directories(UrbanRecomp PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/recomp
     ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
@@ -58,7 +72,7 @@ target_include_directories(SimCitySNESRecomp PRIVATE
 # see src/main.c's header comment for why. Compile those sources directly
 # rather than the full SNESRECOMP_RUNNER_SOURCES list until the AOT hybrid
 # tier is wired.
-set(SIMCITY_DEVICE_SOURCES
+set(SC_DEVICE_SOURCES
     ${SNESRECOMP_ROOT}/runner/src/audio_trace.c
     ${SNESRECOMP_ROOT}/runner/src/crc32.c
     ${SNESRECOMP_ROOT}/runner/src/sha256.c
@@ -75,7 +89,6 @@ set(SIMCITY_DEVICE_SOURCES
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu.c
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu_legacy.c
     ${SNESRECOMP_ROOT}/runner/src/snes/sa1.c
-    ${SNESRECOMP_ROOT}/runner/src/snes/sdd1.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes_other.c
     ${SNESRECOMP_ROOT}/runner/src/snes/spc.c
@@ -84,12 +97,23 @@ set(SIMCITY_DEVICE_SOURCES
     ${SNESRECOMP_ROOT}/runner/src/snes/interp816.c
     ${SNESRECOMP_ROOT}/runner/src/snes/color_lut.c
 )
-target_sources(SimCitySNESRecomp PRIVATE ${SIMCITY_DEVICE_SOURCES})
+target_sources(UrbanRecomp PRIVATE ${SC_DEVICE_SOURCES})
+
+# A trace build (-DSNESRECOMP_ENABLE_TRACE=ON) turns on the observability
+# rings in cpu_trace.h, and those call into the debug server. This target
+# hand-picks its sources instead of taking SNESRECOMP_RUNNER_SOURCES whole,
+# so runner.cmake's own trace block never reaches it and the link fails on a
+# dozen debug_server_* symbols. Add them here, for trace builds only.
+if(SNESRECOMP_ENABLE_TRACE)
+    target_sources(UrbanRecomp PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src/debug_server.c
+        ${SNESRECOMP_ROOT}/runner/src/desktop/post_mortem.c)
+endif()
 
 
 if(NOT MSVC)
-    target_compile_options(SimCitySNESRecomp PRIVATE
-        -w -Wno-implicit-function-declaration)
+    target_compile_options(UrbanRecomp PRIVATE
+        -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
 endif()
 
 # Desktop SDL comes from the runner helper rather than a per-game
@@ -110,8 +134,91 @@ endif()
 # write_renderer_ppm() and SC_MENU_PREVIEW do not capture. The framebuffer
 # dump (SC_DUMP_AT / write_ppm) is unaffected and is the reliable check --
 # it is byte-identical between the two backends.
-snesrecomp_target_sdl(SimCitySNESRecomp)
-recomp_target_launcher_ui(SimCitySNESRecomp CONSOLE snes)
+snesrecomp_target_sdl(UrbanRecomp)
+if(SC_HAVE_LAUNCHER)
+    # Box art and window icon are derived from assets/urbanrecomp_logo.png by
+    # tools/make_brand_assets.py; src/sc_launcher.c names both paths.
+    recomp_target_launcher_ui(UrbanRecomp CONSOLE snes
+        BOXART ${CMAKE_SOURCE_DIR}/assets/boxart.jpg BOXART_NAME boxart.jpg)
+    add_custom_command(TARGET UrbanRecomp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/assets/icon.png
+                $<TARGET_FILE_DIR:UrbanRecomp>/assets/img/icon.png
+        VERBATIM)
+endif()
+target_compile_definitions(UrbanRecomp PRIVATE "SC_VERSION=\"${PROJECT_VERSION}\"")
+# The executable's icon on Windows (Explorer, taskbar, every SDL window).
+if(WIN32)
+    target_sources(UrbanRecomp PRIVATE src/urbanrecomp.rc)
+endif()
+
+# ── Linux desktop ───────────────────────────────────────────────────────────
+#
+# Every build sets its window icon from pixels compiled in (src/sc_icon.c).
+# A desktop, though -- and on Wayland ONLY the desktop -- takes the icon of a
+# running window from its desktop entry, matched by application ID. So on
+# Linux `cmake --install` puts the program where it can find its assets, and
+# registers it:
+#
+#   <prefix>/lib/urbanrecomp/          UrbanRecomp, assets/, sylt_graphics/
+#   <prefix>/bin/urbanrecomp           starter; runs the game from the player's
+#                                      data folder, ~/.local/share/urbanrecomp
+#   <prefix>/share/applications/       io.github.blackerking.UrbanRecomp.desktop
+#   <prefix>/share/icons/hicolor/      16x16 ... 512x512 icons
+#   <prefix>/share/metainfo/           AppStream description (software centres)
+#
+# The window carries the same ID (ScSetAppIdentity), so the running game
+# shows the icon in the dock and the task switcher. The desktop entry names
+# the starter by its full path, so choose the prefix when configuring -- for
+# the current user:
+#
+#   cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local ...
+#   cmake --build build --target UrbanRecomp && cmake --install build
+#
+# A build folder run in place still works as before: the game finds its
+# assets next to the executable and keeps its files in the working directory.
+if(UNIX AND NOT APPLE)
+    include(GNUInstallDirs)
+    set(SC_APP_ID "io.github.blackerking.UrbanRecomp")
+    set(SC_INSTALL_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/urbanrecomp")
+    file(RELATIVE_PATH SC_BIN_TO_GAME "${CMAKE_INSTALL_FULL_BINDIR}" "${SC_INSTALL_DIR}")
+    set(SC_LAUNCH_SCRIPT "${CMAKE_INSTALL_FULL_BINDIR}/urbanrecomp")
+    set(SC_LINUX "${CMAKE_SOURCE_DIR}/assets/linux")
+    configure_file(${SC_LINUX}/urbanrecomp.desktop.in
+                   ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.desktop @ONLY)
+    configure_file(${SC_LINUX}/urbanrecomp.metainfo.xml.in
+                   ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.metainfo.xml @ONLY)
+    configure_file(${SC_LINUX}/urbanrecomp.sh.in
+                   ${CMAKE_BINARY_DIR}/linux/urbanrecomp @ONLY NEWLINE_STYLE UNIX)
+
+    install(TARGETS UrbanRecomp RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp)
+    install(FILES ${CMAKE_SOURCE_DIR}/sylt_graphics/sylt_map.bin
+                  ${CMAKE_SOURCE_DIR}/sylt_graphics/sylt_card.bin
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/sylt_graphics)
+    if(SC_HAVE_LAUNCHER)
+        # The same files recomp_target_launcher_ui() stages next to the build.
+        install(FILES ${_RUI_COMMON_FONT_ASSETS}
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/assets/fonts)
+        install(FILES ${_RUI_COMMON_IMG_ASSETS} ${_RUI_CONSOLE_ASSETS_snes}
+                      ${CMAKE_SOURCE_DIR}/assets/boxart.jpg
+                      ${CMAKE_SOURCE_DIR}/assets/icon.png
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/urbanrecomp/assets/img)
+    endif()
+    install(PROGRAMS ${CMAKE_BINARY_DIR}/linux/urbanrecomp
+            DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.desktop
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES ${CMAKE_BINARY_DIR}/linux/${SC_APP_ID}.metainfo.xml
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+    foreach(size 16 24 32 48 64 128 256 512)
+        install(FILES ${SC_LINUX}/icons/${size}.png
+                DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps
+                RENAME ${SC_APP_ID}.png)
+    endforeach()
+    install(FILES ${CMAKE_SOURCE_DIR}/LICENSE ${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md
+                  ${CMAKE_SOURCE_DIR}/README.md
+            DESTINATION ${CMAKE_INSTALL_DOCDIR})
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -141,18 +248,86 @@ endif()
 # AOT/CpuState runtime and reports the dispatch table -- see src/aot_probe.c
 # for why this exists before touching src/main.c.
 #
-#   cmake --build build --target SimCityAOTProbe
+#   cmake --build build --target UrbanRecompAOTProbe
 #
 # It is excluded from ALL so a broken or stale src/gen can never break the
 # normal build, and it is skipped entirely when src/gen has not been generated.
-file(GLOB SIMCITY_GEN_SOURCES ${CMAKE_SOURCE_DIR}/src/gen/*.c)
-if(SIMCITY_GEN_SOURCES)
-    add_executable(SimCityAOTProbe EXCLUDE_FROM_ALL
+file(GLOB SC_GEN_SOURCES ${CMAKE_SOURCE_DIR}/src/gen/*.c)
+
+# SC_AOT=OFF builds without the generated banks even when src/gen exists.
+# Release packages use it: src/gen is compiled from the ROM, so a binary that
+# links it carries ROM-derived code, and the interpreter -- the default at run
+# time anyway -- needs none of it.
+option(SC_AOT "Link the AOT tier from src/gen when it is present" ON)
+if(NOT SC_AOT)
+    set(SC_GEN_SOURCES "")
+endif()
+
+# ── AOT is the standard build ───────────────────────────────────────────────
+#
+# When the generated banks are present, UrbanRecomp IS the AOT build: the
+# compiled bodies and the HLEs are linked in, and SC_FIBER=1 runs the guest
+# through them. That is what makes the map generator HLE at 01:f1ed run,
+# which is the point of having an AOT tier at all -- it turns ~800 frames of
+# the SNES CPU grinding through 03:d840 into less than one.
+#
+# Without SC_FIBER the interpreter runs every opcode -- the default, and the
+# correctness baseline every --qualify number rests on.
+#
+# Without src/gen -- a fresh clone before tools/regen.sh -- this whole block is
+# skipped and the target builds interpreter-only exactly as it did before.
+if(SC_GEN_SOURCES)
+    target_sources(UrbanRecomp PRIVATE
+        ${SC_GEN_SOURCES}
+        src/sc_hle.c
+        src/sc_fiber.c
+        src/sc_fiberdrive.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
+        ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
+        ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
+        ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
+        ${SNESRECOMP_ROOT}/runner/src/host_report.c
+        ${SNESRECOMP_ROOT}/runner/src/framedump.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
+        ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
+    )
+    target_include_directories(UrbanRecomp PRIVATE
+        ${SNESRECOMP_ROOT}/runner/src/desktop)
+    target_compile_definitions(UrbanRecomp PRIVATE SC_AOT_TIER)
+    if(MSVC)
+        # cpu_state.c's weak-marked fallback guard table is a strong definition
+        # under MSVC, and common_rtl.c redefines a handful of APU helpers that
+        # main.c also carries. See the note on UrbanRecompAOTProbe.
+        target_link_options(UrbanRecomp PRIVATE /FORCE:MULTIPLE)
+    else()
+        target_compile_options(UrbanRecomp PRIVATE
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
+    endif()
+endif()
+
+if(SC_GEN_SOURCES)
+    add_executable(UrbanRecompAOTProbe EXCLUDE_FROM_ALL
         src/aot_probe.c
-        ${SIMCITY_GEN_SOURCES}
-        src/simcity_hle.c
-        src/simcity_fiber.c
-        src/simcity_fiberdrive.c
+        ${SC_GEN_SOURCES}
+        src/sc_hle.c
+        src/sc_mapgen.c
+        src/sc_decomp.c
+        src/sc_fiber.c
+        # src/sc_fiberdrive.c -- NOT linked here.
+        #
+        # Nothing in these targets uses the ScFiberDrive_* API; only
+        # src/main.c does, and that is not compiled into them. Linking it
+        # anyway dragged in sc_advance_until_input_ready(), which lives in
+        # main.c, so both targets failed with LNK2019.
+        #
+        # Stubbing that symbol would be wrong: it drains autoJoyTimer before
+        # the guest is handed a frame, and skipping it is exactly how the
+        # first fiber attempt deadlocked -- the game spins on $4212 at
+        # 00:9280 and nothing advances the beam while the guest holds the
+        # CPU. A stub would link and then hang.
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -164,7 +339,7 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
         ${SNESRECOMP_ROOT}/runner/src/host_report.c
         ${SNESRECOMP_ROOT}/runner/src/framedump.c
-        ${SIMCITY_DEVICE_SOURCES}
+        ${SC_DEVICE_SOURCES}
     )
     if(MSVC)
         # WORKAROUND, not a solution. cpu_state.c ships an empty fallback
@@ -174,9 +349,9 @@ if(SIMCITY_GEN_SOURCES)
         # __declspec(selectany) on MSVC; until then the probe tolerates the
         # duplicate. Do NOT carry this into the shipping target: it would also
         # hide genuine duplicate-symbol bugs.
-        target_link_options(SimCityAOTProbe PRIVATE /FORCE:MULTIPLE)
+        target_link_options(UrbanRecompAOTProbe PRIVATE /FORCE:MULTIPLE)
     endif()
-    target_include_directories(SimCityAOTProbe PRIVATE
+    target_include_directories(UrbanRecompAOTProbe PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/recomp
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
@@ -185,12 +360,12 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
     if(NOT MSVC)
-        target_compile_options(SimCityAOTProbe PRIVATE
-            -w -Wno-implicit-function-declaration)
+        target_compile_options(UrbanRecompAOTProbe PRIVATE
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
     # config.h -> sdl_compat.h -> SDL.h, so the probe needs SDL's headers even
     # though it opens no window.
-    snesrecomp_target_sdl(SimCityAOTProbe)
+    snesrecomp_target_sdl(UrbanRecompAOTProbe)
 endif()
 
 # -- AOT-tier build of the real host (migration step 2) ----------------------
@@ -201,17 +376,27 @@ endif()
 # COEXIST in one binary: shared g_ram, no duplicate symbols, no ABI clash.
 # Routing execution through the compiled bodies is step 3.
 #
-#   cmake --build build --target SimCitySNESRecompAOT
-if(SIMCITY_GEN_SOURCES)
-    add_executable(SimCitySNESRecompAOT EXCLUDE_FROM_ALL
+#   cmake --build build --target UrbanRecompAOT
+# NOTE: this now builds the same content as the default target, which links the
+# AOT tier itself. Kept because docs/AOT_LLE.md and tools/gen_align_check.py
+# name it, and because having a target that is unambiguously the AOT build is
+# useful when the default one is configured without src/gen.
+if(SC_GEN_SOURCES)
+    add_executable(UrbanRecompAOT EXCLUDE_FROM_ALL
         src/main.c
-        src/simcity_mapview.c
-        src/sc_video.c
-        src/sc_renderer.c
-        ${SIMCITY_GEN_SOURCES}
-        src/simcity_hle.c
-        src/simcity_fiber.c
-        src/simcity_fiberdrive.c
+        src/sc_launcher.c
+        src/sc_sram.c
+        src/sc_icon.c
+        src/sc_mapview.c
+        ${SC_GEN_SOURCES}
+        src/sc_hle.c
+        src/sc_mapgen.c
+        src/sc_decomp.c
+        src/sc_fiber.c
+        src/sc_fiberdrive.c
+    src/sc_video.c
+    src/sc_mods.c
+    src/sc_renderer.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -223,36 +408,52 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
         ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
         ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
-        ${SIMCITY_DEVICE_SOURCES}
+        ${SC_DEVICE_SOURCES}
     )
-    target_include_directories(SimCitySNESRecompAOT PRIVATE
+    target_include_directories(UrbanRecompAOT PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/recomp
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
-    target_compile_definitions(SimCitySNESRecompAOT PRIVATE
-        SIMCITY_AOT_TIER)
+    target_compile_definitions(UrbanRecompAOT PRIVATE
+        SC_AOT_TIER "SC_VERSION=\"${PROJECT_VERSION}\"")
     if(MSVC)
-        # See the note on SimCityAOTProbe: cpu_state.c's weak-marked fallback
+        # See the note on UrbanRecompAOTProbe: cpu_state.c's weak-marked fallback
         # guard table is a strong definition under MSVC.
-        target_link_options(SimCitySNESRecompAOT PRIVATE /FORCE:MULTIPLE)
+        target_link_options(UrbanRecompAOT PRIVATE /FORCE:MULTIPLE)
     else()
-        target_compile_options(SimCitySNESRecompAOT PRIVATE
-            -w -Wno-implicit-function-declaration)
+        target_compile_options(UrbanRecompAOT PRIVATE
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
-    snesrecomp_target_sdl(SimCitySNESRecompAOT)
+    snesrecomp_target_sdl(UrbanRecompAOT)
+    if(WIN32)
+        target_sources(UrbanRecompAOT PRIVATE src/urbanrecomp.rc)
+    endif()
 endif()
 
 # -- AOT differential harness (migration step 3a) ----------------------------
-#   cmake --build build --target SimCityAOTDiff
-if(SIMCITY_GEN_SOURCES)
-    add_executable(SimCityAOTDiff EXCLUDE_FROM_ALL
+#   cmake --build build --target UrbanRecompAOTDiff
+if(SC_GEN_SOURCES)
+    add_executable(UrbanRecompAOTDiff EXCLUDE_FROM_ALL
         src/aot_diff.c
-        ${SIMCITY_GEN_SOURCES}
-        src/simcity_hle.c
-        src/simcity_fiber.c
-        src/simcity_fiberdrive.c
+        ${SC_GEN_SOURCES}
+        src/sc_hle.c
+        src/sc_mapgen.c
+        src/sc_decomp.c
+        src/sc_fiber.c
+        # src/sc_fiberdrive.c -- NOT linked here.
+        #
+        # Nothing in these targets uses the ScFiberDrive_* API; only
+        # src/main.c does, and that is not compiled into them. Linking it
+        # anyway dragged in sc_advance_until_input_ready(), which lives in
+        # main.c, so both targets failed with LNK2019.
+        #
+        # Stubbing that symbol would be wrong: it drains autoJoyTimer before
+        # the guest is handed a frame, and skipping it is exactly how the
+        # first fiber attempt deadlocked -- the game spins on $4212 at
+        # 00:9280 and nothing advances the beam while the guest holds the
+        # CPU. A stub would link and then hang.
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
@@ -264,29 +465,29 @@ if(SIMCITY_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/snes/interp_bridge.c
         ${SNESRECOMP_ROOT}/runner/src/snes/tier2_capture.c
         ${SNESRECOMP_ROOT}/runner/src/snes/msu1.c
-        ${SIMCITY_DEVICE_SOURCES}
+        ${SC_DEVICE_SOURCES}
     )
-    target_include_directories(SimCityAOTDiff PRIVATE
+    target_include_directories(UrbanRecompAOTDiff PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/recomp
         ${SNESRECOMP_RUNNER_INCLUDE_DIRS}
         ${SNESRECOMP_ROOT}/runner/src/desktop
     )
     if(MSVC)
-        target_link_options(SimCityAOTDiff PRIVATE /FORCE:MULTIPLE)
+        target_link_options(UrbanRecompAOTDiff PRIVATE /FORCE:MULTIPLE)
     else()
-        target_compile_options(SimCityAOTDiff PRIVATE
-            -w -Wno-implicit-function-declaration)
+        target_compile_options(UrbanRecompAOTDiff PRIVATE
+            -w $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     endif()
-    snesrecomp_target_sdl(SimCityAOTDiff)
+    snesrecomp_target_sdl(UrbanRecompAOTDiff)
 endif()
 
 # -- Fiber layer self-test ---------------------------------------------------
 # Standalone: no ROM, no runtime, no generated code. Coroutine bugs are far
 # easier to find here than underneath a running 65816 interpreter.
-#   cmake --build build --target SimCityFiberTest && ./build/Release/SimCityFiberTest
-add_executable(SimCityFiberTest EXCLUDE_FROM_ALL
+#   cmake --build build --target UrbanRecompFiberTest && ./build/Release/UrbanRecompFiberTest
+add_executable(UrbanRecompFiberTest EXCLUDE_FROM_ALL
     tests/fiber_test.c
-    src/simcity_fiber.c
+    src/sc_fiber.c
 )
-target_include_directories(SimCityFiberTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(UrbanRecompFiberTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
