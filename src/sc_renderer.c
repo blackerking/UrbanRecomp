@@ -132,6 +132,41 @@ static void track_scroll(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
     } else r->scroll_adjust_x=r->scroll_adjust_y=r->scroll_still=0;
     r->scroll_valid=true; r->scroll_x=x; r->scroll_y=y; r->scroll_h=h; r->scroll_v=v;
 }
+static void track_objects(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
+    bool city=city_live(r,p,ram);
+    for (int slot=0;slot<128;++slot) {
+        int raw=sprite_x(p,slot), y=p->oam[slot*2]>>8;
+        unsigned attr=p->oam[slot*2+1]&0xfe00;
+        int dx=(raw-r->object_raw[slot])&511; if (dx>256) dx-=512;
+        int dy=scroll_delta(y,r->object_y[slot]);
+        bool step=r->objects_valid && city && attr==r->object_attr[slot] && abs(dx)<=16 && abs(dy)<=16;
+        if (!step) {
+            r->object_grace[slot]=0;
+            r->object_x[slot]=raw<256 ? raw : raw-512;
+        } else {
+            r->object_x[slot]+=dx;
+            if (dx || dy) r->object_grace[slot]=16;
+            else if (r->object_grace[slot]) --r->object_grace[slot];
+        }
+        r->object_raw[slot]=raw; r->object_y[slot]=y; r->object_attr[slot]=attr;
+    }
+    r->objects_valid=city;
+}
+static void object_row(const ScRenderer *r,const Ppu *p,int y,uint8_t *pixels) {
+    memset(pixels,0,(size_t)r->view.width);
+    for (int slot=127;slot>=0;--slot) {
+        if (!r->object_grace[slot]) continue; /* parked HUD/cursor copies */
+        int row=(y+1-r->object_y[slot])&255;
+        if (row>=64) continue;
+        int left=r->object_x[slot]+r->view.core_x;
+        for (int dx=0;dx<64;++dx) {
+            int x=left+dx;
+            if (x<0 || x>=r->view.width) continue;
+            unsigned ci=sprite_pixel(p,slot,dx,row);
+            if (ci) pixels[x]=(uint8_t)ci;
+        }
+    }
+}
 uint32_t ScRendererMapPixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     if (!r->rom_is_us || !r->rom || x<0 || y<0 || x>=960 || y>=800)
         return color(p,0);
@@ -286,6 +321,8 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
      * boundary WRAM can lag a frame; preserve measured PPU motion then. */
     int sx=r->scroll_x+r->scroll_adjust_x+scroll_delta(p->hScroll[1],r->scroll_h);
     int sy=r->scroll_y+r->scroll_adjust_y+scroll_delta(p->vScroll[1],r->scroll_v);
+    uint8_t objects[SC_MAX_CANVAS];
+    if (city) object_row(r,p,y,objects);
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
         if (y>=0 && y<224 && local>=0 && local<256) continue; /* copied from native */
@@ -302,6 +339,10 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
             } else if (sub && (p->screenEnabled[1]&4)) {
                 int yy=y<0 ? 0 : y>223 ? 223 : y;
                 samples[sub]=bg_pixel(p,2,edge,yy+1); layers[sub]=samples[sub] ? 2 : 5;
+            }
+            if (objects[x] && (p->screenEnabled[sub]&16) &&
+                (!(p->screenWindowed[sub]&16) || !window_contains(p,4,edge))) {
+                samples[sub]=objects[x]; layers[sub]=objects[x]<192 ? 6 : 4;
             }
         }
         out[x]=composite_color(p,samples[0],layers[0],samples[1],layers[1],edge);
@@ -337,6 +378,7 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         find_wood(r,p,ram);
         find_lights(r,p);
         track_scroll(r,p,ram);
+        track_objects(r,p,ram);
     }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);
