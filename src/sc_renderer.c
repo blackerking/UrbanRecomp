@@ -207,6 +207,7 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     bool city=r->rom_is_us && ram[0x14]==0 && u16(ram,0x3e)!=0 &&
               PPU_mode(p)==1 && ((p->screenEnabled[0]|p->screenEnabled[1])&2) &&
               r->wood_layer<0 && !(!(p->screenEnabled[0]&2) && (p->screenEnabled[0]&1));
+    r->city_frame|=city;
     int sx=(int16_t)u16(ram,0x1bd)*8, sy=(int16_t)u16(ram,0x1bf)*8;
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
@@ -229,9 +230,31 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
         out[x]=composite_color(p,samples[0],layers[0],samples[1],layers[1],edge);
     }
 }
+/* A screen-wide vote prevents a tax-panel edge or cursor from becoming a
+ * stripe across the margin. Sample finished pixels so fades and math agree. */
+static void fill_flat_margins(ScRenderer *r) {
+    if (r->city_frame || r->wood_layer>=0 || r->title_live) return;
+    int flat=0, votes[224]={0}, best=0;
+    uint32_t colors[224];
+    for (int y=0;y<224;++y) {
+        const uint32_t *row=r->pixels+(size_t)(r->view.core_y+y)*r->view.width+r->view.core_x;
+        bool same=true;
+        for (int x=1;x<8;++x) same&=row[x]==row[0] && row[255-x]==row[255];
+        flat+=same; colors[y]=row[255];
+        for (int previous=0;previous<=y;++previous) if (colors[previous]==colors[y]) {
+            votes[previous]++; if (votes[previous]>votes[best]) best=previous;
+        }
+    }
+    if (flat<168) return;
+    for (int y=0;y<r->view.height;++y) for (int x=0;x<r->view.width;++x)
+        if (x<r->view.core_x || x>=r->view.core_x+256 ||
+            y<r->view.core_y || y>=r->view.core_y+224)
+            r->pixels[(size_t)y*r->view.width+x]=colors[best];
+}
 void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const uint32_t *native) {
     if (!r->pixels || !p || !ram || !native || line<0 || line>=224) return;
     if (line==0) {
+        r->city_frame=false;
         if (ram[0x14]==1) r->title_live=true;
         else if (ram[0x14]!=2 || PPU_forcedBlank(p) || !PPU_brightness(p)) r->title_live=false;
         find_wood(r,p,ram);
@@ -240,6 +263,8 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
     render_row(r,p,ram,line);
     memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x,
            native,256*sizeof(*native));
-    if (line==223)
+    if (line==223) {
         for (int y=224;y<r->view.height-r->view.core_y;++y) render_row(r,p,ram,y);
+        fill_flat_margins(r);
+    }
 }

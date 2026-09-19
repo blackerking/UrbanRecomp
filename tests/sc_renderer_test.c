@@ -85,6 +85,15 @@ int main(void) {
     assert(r.pixels[256]==0xff770000);
     p->inidisp=0x8f; ScRendererLine(&r,p,ram,0,native);
     assert(r.pixels[256]==0xff000000 && !r.title_live);
+    /* Statistics/tax pages: isolated panel/cursor rows cannot smear their
+     * colour across the canvas. The majority already includes the fade. */
+    ram[0x14]=0; p->bgmode=0; p->screenEnabled[0]=0; p->inidisp=7;
+    for (int y=0;y<224;++y) {
+        for (int x=0;x<256;++x) native[x]=(y>=41 && y<=53) ? 0xffbb8844 : 0xff224466;
+        ScRendererLine(&r,p,ram,y,native);
+    }
+    assert(r.pixels[45*512+300]==0xff224466);
+    assert(r.pixels[45*512+255]==0xffbb8844);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;

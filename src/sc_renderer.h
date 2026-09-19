@@ -13,6 +13,7 @@ typedef struct ScRenderer {
     int wood_layer, wood_period;
     uint16_t wood_rows[32];
     bool title_live;
+    bool city_frame;
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);
