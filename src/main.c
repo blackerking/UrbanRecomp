@@ -7941,7 +7941,7 @@ int main(int argc, char **argv) {
   if (!ScVideoLoad(&s_custom_video, s_video_config)) {
     fprintf(stderr, "Invalid widescreen settings: %s\n", s_video_config); return 2;
   }
-  bool explicit_size = false, native_only = false;
+  bool explicit_size = false, native_only = false, fullscreen_given = false;
   /* SC_MAPGEN_SELFTEST=<index>: run the decompiled generator for one map index
    * and write the 12000-cell result to SC_MAPGEN_OUT, then exit. No ROM, no
    * emulation -- this is the native generator alone, so a match against a map
@@ -8228,14 +8228,14 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--video-config") && i + 1 < argc) { ++i;
     } else if (!strcmp(argv[i], "--help")) {
-      puts("SimCitySNESRecomp [ROM] [--mods] [--widescreen | --no-widescreen]\n"
+      puts("UrbanRecomp [ROM] [--mods] [--widescreen | --no-widescreen]\n"
            "  --aspect Fit|Height|Width|4:3|8:7|16:10|16:9|21:9|32:9\n"
            "  --view-position Center|TopLeft  --window-size WIDTHxHEIGHT\n"
            "  --video-config FILE  --fullscreen  --scale N\n"
            "  --qualify FRAMES  --load-state FILE  --input FRAME:DURATION:HEX_MASK\n"
            "F11: fullscreen. F10: game settings. No arguments: Mods launcher.");
       return 0;
-    } else if (!strcmp(argv[i], "--fullscreen")) { s_fullscreen=true;
+    } else if (!strcmp(argv[i], "--fullscreen")) { s_fullscreen=1; fullscreen_given=true;
     } else if (!strcmp(argv[i], "--mods")) { force_launcher = true;
     } else if (!strcmp(argv[i], "--widescreen")) { s_custom_video.enabled = true;
     } else if (!strcmp(argv[i], "--no-widescreen")) { s_custom_video.enabled = false; native_only = true;
@@ -8304,7 +8304,7 @@ int main(int argc, char **argv) {
       if (probe) { fclose(probe); rom_path = s_launch_settings.rom; }
     }
     if (!scale_given) scale = s_launch_settings.window_scale;
-    s_fullscreen = s_launch_settings.fullscreen;
+    if (!fullscreen_given) s_fullscreen = s_launch_settings.fullscreen;
     s_linear_filter = s_launch_settings.linear_filter != 0;
     s_enable_audio = s_launch_settings.enable_audio != 0;
     ScSettingsApply(&s_launch_settings);
