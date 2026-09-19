@@ -97,7 +97,8 @@ static void find_lights(ScRenderer *r,const Ppu *p) {
 static unsigned cell_pixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,
                            int x,int y,bool overlay) {
     if (!r->rom || x<0 || y<0 || x>=960 || y>=800) return 0;
-    unsigned cell=u16(ram,MAP+((y/8)*120+x/8)*2)&1023;
+    unsigned offset_cell=((y/8)*120+x/8)*2;
+    unsigned cell=(r->map_hold ? u16(r->held_map,offset_cell) : u16(ram,MAP+offset_cell))&1023;
     if (cell>=CELL_TYPES) return 0;
     size_t offset=(overlay ? OVERLAYS : TILES)+cell*2;
     if (offset+1 >= r->rom_size) return 0;
@@ -151,6 +152,37 @@ static void track_objects(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
         r->object_raw[slot]=raw; r->object_y[slot]=y; r->object_attr[slot]=attr;
     }
     r->objects_valid=city;
+}
+static void track_map_swap(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
+    if (!city_live(r,p,ram)) { r->map_valid=r->map_hold=false; return; }
+    const uint8_t *map=ram+MAP;
+    bool black=PPU_forcedBlank(p) || !PPU_brightness(p);
+    if (r->map_valid) {
+        int step=0,total=0;
+        for (int i=0;i<24000;i+=2) {
+            step+=((u16(map,i)^u16(r->previous_map,i))&1023)!=0;
+            total+=((u16(map,i)^u16(r->held_map,i))&1023)!=0;
+        }
+        if (!r->map_hold && step>300) {
+            r->map_hold=true; r->map_confirmed=r->map_dark=false;
+            r->map_quiet=r->map_age=0;
+        }
+        if (r->map_hold) {
+            if (total>4000) r->map_confirmed=true;
+            if (black) r->map_dark=true;
+            if (step>300) r->map_quiet=0; else ++r->map_quiet;
+            if ((!black && r->map_dark) || ++r->map_age>900 ||
+                (!r->map_confirmed && r->map_quiet>=10)) r->map_hold=false;
+        }
+    }
+    memcpy(r->previous_map,map,sizeof r->previous_map);
+    if (!r->map_hold) {
+        memcpy(r->held_map,map,sizeof r->held_map);
+        memcpy(r->held_ppu,p,sizeof *p);
+        r->held_x=r->scroll_x+r->scroll_adjust_x;
+        r->held_y=r->scroll_y+r->scroll_adjust_y;
+    }
+    r->map_valid=true;
 }
 static void object_row(const ScRenderer *r,const Ppu *p,int y,uint8_t *pixels) {
     memset(pixels,0,(size_t)r->view.width);
@@ -302,6 +334,7 @@ void ScRendererInit(ScRenderer *r,const uint8_t *rom,size_t size,bool is_us) {
 bool ScRendererResize(ScRenderer *r,ScViewport v) {
     if (v.width<256 || v.height<224 || v.width>SC_MAX_CANVAS || v.height>SC_MAX_CANVAS ||
         v.core_x<0 || v.core_y<0 || v.core_x+256>v.width || v.core_y+224>v.height) return false;
+    if (!r->held_ppu) { r->held_ppu=malloc(sizeof(Ppu)); if (!r->held_ppu) return false; }
     size_t count=(size_t)v.width*v.height;
     if (count>r->capacity) {
         uint32_t *pixels=realloc(r->pixels,count*sizeof(*pixels));
@@ -312,7 +345,10 @@ bool ScRendererResize(ScRenderer *r,ScViewport v) {
     memset(r->pixels,0,count*sizeof(*r->pixels));
     return true;
 }
-void ScRendererDestroy(ScRenderer *r) { free(r->pixels); memset(r,0,sizeof(*r)); }
+void ScRendererDestroy(ScRenderer *r) { free(r->pixels); free(r->held_ppu); memset(r,0,sizeof(*r)); }
+void ScRendererResetHistory(ScRenderer *r) {
+    r->scroll_valid=r->objects_valid=r->map_valid=r->map_hold=r->title_live=false;
+}
 static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     uint32_t *out=r->pixels+(size_t)(y+r->view.core_y)*r->view.width;
     bool city=city_live(r,p,ram);
@@ -321,6 +357,21 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
      * boundary WRAM can lag a frame; preserve measured PPU motion then. */
     int sx=r->scroll_x+r->scroll_adjust_x+scroll_delta(p->hScroll[1],r->scroll_h);
     int sy=r->scroll_y+r->scroll_adjust_y+scroll_delta(p->vScroll[1],r->scroll_v);
+    if (city && r->map_hold) {
+        sx=r->held_x; sy=r->held_y;
+        /* Freeze city graphics, palette and camera, but use the live fade and
+         * color-math/window controls. No guest PPU state is changed. */
+        r->held_ppu->inidisp=p->inidisp;
+        memcpy(r->held_ppu->brightnessMult,p->brightnessMult,sizeof p->brightnessMult);
+        r->held_ppu->cgadsub=p->cgadsub; r->held_ppu->cgwsel=p->cgwsel;
+        r->held_ppu->fixedColor=p->fixedColor;
+        memcpy(r->held_ppu->screenEnabled,p->screenEnabled,sizeof p->screenEnabled);
+        memcpy(r->held_ppu->screenWindowed,p->screenWindowed,sizeof p->screenWindowed);
+        r->held_ppu->windowsel=p->windowsel; r->held_ppu->wbgobjlog=p->wbgobjlog;
+        r->held_ppu->window1left=p->window1left; r->held_ppu->window1right=p->window1right;
+        r->held_ppu->window2left=p->window2left; r->held_ppu->window2right=p->window2right;
+        p=r->held_ppu;
+    }
     uint8_t objects[SC_MAX_CANVAS];
     if (city) object_row(r,p,y,objects);
     for (int x=0;x<r->view.width;++x) {
@@ -379,6 +430,7 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         find_lights(r,p);
         track_scroll(r,p,ram);
         track_objects(r,p,ram);
+        track_map_swap(r,p,ram);
     }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);

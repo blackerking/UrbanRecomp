@@ -5998,6 +5998,7 @@ static bool load_state(const char *path) {
     fs.base.func(&fs.base, s_hdma, sizeof(s_hdma));
   }
   g_ppu->lastBrightnessMult = 0xff;   /* rebuild the brightness tables */
+  ScRendererResetHistory(&s_custom_renderer);
   ScSram_Release();
   bool ok = fs.ok;
   fclose(f);

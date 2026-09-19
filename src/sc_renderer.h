@@ -21,10 +21,15 @@ typedef struct ScRenderer {
     int16_t object_raw[128], object_x[128];
     uint16_t object_attr[128];
     uint8_t object_y[128], object_grace[128];
+    Ppu *held_ppu;
+    uint8_t held_map[24000], previous_map[24000];
+    bool map_valid, map_hold, map_confirmed, map_dark;
+    int map_quiet, map_age, held_x, held_y;
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);
 void ScRendererDestroy(ScRenderer *r);
+void ScRendererResetHistory(ScRenderer *r);
 /* Called AFTER the stock PPU has drawn a line, BEFORE the guest advances.
  * Reads only: no guest writes, PPU replay, state forcing, or hidden frames. */
 void ScRendererLine(ScRenderer *r, const Ppu *ppu, const uint8_t *ram,

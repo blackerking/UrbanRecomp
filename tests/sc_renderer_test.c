@@ -118,6 +118,13 @@ int main(void) {
     p->screenEnabled[0]=2; p->hScroll[1]=86; p->vScroll[1]=80;
     ScRendererLine(&r,p,ram,0,native);
     assert(r.scroll_x+r.scroll_adjust_x==86);
+    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==88);
+    ram[0x1bd]=11; p->hScroll[1]=90; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==90 && r.scroll_adjust_x==0);
+    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
+    p->hScroll[1]=86; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==86);
     /* A moving vehicle keeps its positive X across 255 and the classic
      * 352-pixel limit. A teleported parked HUD slot must remain hidden. */
     p->screenEnabled[0]=18; p->oam[0]=(100<<8)|252; p->oam[1]=0x0800;
@@ -132,13 +139,18 @@ int main(void) {
     p->oam[0]=(100<<8)|128; p->highOam[0]=1;
     ScRendererLine(&r,p,ram,0,native);
     assert(!r.object_grace[0]);
-    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
-    assert(r.scroll_x+r.scroll_adjust_x==88);
-    ram[0x1bd]=11; p->hScroll[1]=90; ScRendererLine(&r,p,ram,0,native);
-    assert(r.scroll_x+r.scroll_adjust_x==90 && r.scroll_adjust_x==0);
-    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
-    p->hScroll[1]=86; ScRendererLine(&r,p,ram,0,native);
-    assert(r.scroll_x+r.scroll_adjust_x==86);
+    /* In-game load writes a new map before the old city's fade ends. Keep
+     * the prior map and palette until dark -> lit, then release together. */
+    ScRendererLine(&r,p,ram,0,native);
+    unsigned old_palette=r.held_ppu->cgram[1];
+    for (int i=0;i<5000;++i) word(ram,0x10200+i*2,7);
+    p->cgram[1]=123; ram[0x1bd]=20;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.map_hold && r.map_confirmed && r.held_ppu->cgram[1]==old_palette);
+    p->inidisp=0x8f; ScRendererLine(&r,p,ram,0,native);
+    assert(r.map_hold && r.map_dark && r.pixels[256]==0xff000000);
+    p->inidisp=15; ScRendererLine(&r,p,ram,0,native);
+    assert(!r.map_hold && r.held_ppu->cgram[1]==123);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;
