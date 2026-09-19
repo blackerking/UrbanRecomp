@@ -72,6 +72,19 @@ int main(void) {
     memcpy(before,p,sizeof(*p));
     for (int y=1;y<224;++y) ScRendererLine(&r,p,ram,y,native);
     assert(!memcmp(before,p,sizeof(*p)));
+    /* $14 advances before the title finishes fading. Keep its scenery until
+     * the hardware goes dark; use the current scanline's brightness. */
+    memset(p,0,sizeof(*p)); p->inidisp=15; p->bgmode=1;
+    p->screenEnabled[0]=1; p->bgXsc[0]=0x40;
+    p->brightnessMult[31]=255; p->cgram[1]=31;
+    for (int y=0;y<8;++y) p->vram[y]=0xff;
+    ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
+    assert(r.pixels[256]==0xffff0000);
+    ram[0x14]=2; p->inidisp=7; p->brightnessMult[31]=119;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.pixels[256]==0xff770000);
+    p->inidisp=0x8f; ScRendererLine(&r,p,ram,0,native);
+    assert(r.pixels[256]==0xff000000 && !r.title_live);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;

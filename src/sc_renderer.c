@@ -151,7 +151,7 @@ static void find_wood(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
 static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     unsigned screen=ram[0x14], ci=0;
     int owner=5;
-    if (screen==1 && PPU_mode(p)==1) {
+    if (r->title_live && PPU_mode(p)==1) {
         /* Title's sky and skyline are repeating scenery; title text/sprites
          * remain in the native view. Per-line palette preserves its gradient. */
         for (int layer=2; layer>=0; --layer) {
@@ -231,7 +231,11 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
 }
 void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const uint32_t *native) {
     if (!r->pixels || !p || !ram || !native || line<0 || line>=224) return;
-    if (line==0) find_wood(r,p,ram);
+    if (line==0) {
+        if (ram[0x14]==1) r->title_live=true;
+        else if (ram[0x14]!=2 || PPU_forcedBlank(p) || !PPU_brightness(p)) r->title_live=false;
+        find_wood(r,p,ram);
+    }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);
     memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x,
