@@ -102,6 +102,16 @@ int main(void) {
     ram[0x14]=11; ScRendererLine(&r,p,ram,0,native);
     assert(r.pixels[256]==0xffff0000);
     assert(r.pixels[480]==0xff000000); /* no repeat of cards beyond strip */
+    /* Repeating title lights are OAM, not background tiles. Ignore the
+     * parked copy at raw X=257 when finding the visible row's pitch. */
+    memset(p,0,sizeof(*p)); p->inidisp=15; p->bgmode=1;
+    p->screenEnabled[0]=16; p->brightnessMult[31]=255; p->cgram[129]=31;
+    for (int i=0;i<4;++i) p->oam[i*2]=(180<<8)|(1+i*64);
+    for (int y=0;y<8;++y) p->vram[y]=0xff;
+    p->oam[8]=(180<<8)|1; p->highOam[1]=1;
+    ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
+    ScRendererLine(&r,p,ram,179,native);
+    assert(r.light_pitch==64 && r.pixels[179*512+257]==0xffff0000);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;

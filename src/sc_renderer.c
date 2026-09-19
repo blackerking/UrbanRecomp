@@ -60,6 +60,40 @@ static unsigned tile_pixel(const Ppu *p, unsigned word, unsigned base,
     }
     return ci ? ci + ((word >> 10)&7)*(1<<depth) + palette_offset : 0;
 }
+static int sprite_x(const Ppu *p,int slot) {
+    int index=slot*2;
+    return (p->oam[index]&255)|(((p->highOam[index/8]>>(index%8))&1)<<8);
+}
+static unsigned sprite_pixel(const Ppu *p,int slot,int x,int y) {
+    static const int sizes[8][2]={{8,16},{8,32},{8,64},{16,32},{16,64},{32,64},{16,32},{16,32}};
+    int index=slot*2, size=sizes[PPU_objSize(p)][(p->highOam[index/8]>>(index%8+1))&1];
+    if (x<0 || y<0 || x>=size || y>=size) return 0;
+    unsigned attr=p->oam[index+1];
+    if (attr&0x4000) x=size-1-x;
+    if (attr&0x8000) y=size-1-y;
+    unsigned tile=(((attr&0xf0)+(y/8)*16)&255)|(((attr&15)+x/8)&15);
+    unsigned base=attr&0x100 ? PPU_objTileAdr2(p) : PPU_objTileAdr1(p);
+    return tile_pixel(p,tile|(((attr>>9)&7)<<10),base,x,y,4,128);
+}
+static void find_lights(ScRenderer *r,const Ppu *p) {
+    r->light_slot=-1; r->light_pitch=0;
+    if (!r->title_live) return;
+    int best=2;
+    for (int i=0;i<104;++i) {
+        int y=p->oam[i*2]>>8, lo=256, pitch=512, count=0;
+        if (y<150 || y>215) continue;
+        for (int j=0;j<104;++j) {
+            int x=sprite_x(p,j);
+            if (x>=256 || p->oam[j*2+1]!=p->oam[i*2+1] || (p->oam[j*2]>>8)!=y) continue;
+            ++count;
+            if (x<lo) { if (lo-x<pitch) pitch=lo-x; lo=x; }
+            else if (x>lo && x-lo<pitch) pitch=x-lo;
+        }
+        if (count>best && pitch>0 && pitch<=128) {
+            best=count; r->light_slot=i; r->light_x=lo; r->light_pitch=pitch;
+        }
+    }
+}
 static unsigned cell_pixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,
                            int x,int y,bool overlay) {
     if (!r->rom || x<0 || y<0 || x>=960 || y>=800) return 0;
@@ -192,6 +226,12 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
             ci=bg_pixel(p,layer,x,((y+1)&15)-p->vScroll[layer]); owner=layer; break;
         }
     }
+    if (r->title_live && r->light_slot>=0 && (p->screenEnabled[0]&16)) {
+        int dx=(x-r->light_x)%r->light_pitch;
+        if (dx<0) dx+=r->light_pitch;
+        unsigned light=sprite_pixel(p,r->light_slot,dx,y+1-(p->oam[r->light_slot*2]>>8));
+        if (light) { ci=light; owner=4; }
+    }
     return composite_color(p,ci,owner,0,5,x);
 }
 void ScRendererInit(ScRenderer *r,const uint8_t *rom,size_t size,bool is_us) {
@@ -267,6 +307,7 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         if (ram[0x14]==1) r->title_live=true;
         else if (ram[0x14]!=2 || PPU_forcedBlank(p) || !PPU_brightness(p)) r->title_live=false;
         find_wood(r,p,ram);
+        find_lights(r,p);
     }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);

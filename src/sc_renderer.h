@@ -14,6 +14,7 @@ typedef struct ScRenderer {
     uint16_t wood_rows[32];
     bool title_live;
     bool city_frame;
+    int light_slot, light_x, light_pitch;
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);
