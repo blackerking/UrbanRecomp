@@ -7,7 +7,7 @@
 int main(int argc,char **argv) {
     assert(argc==2);
     ScVideoSettings s; ScVideoDefaults(&s);
-    assert(!s.enabled && s.aspect==SC_FIT);
+    assert(!s.enabled && s.aspect==SC_FIT && !s.centered);
     ScViewport v=ScVideoViewport(&s,3840,1080);
     assert(v.width==256 && v.height==224);
     s.enabled=true;

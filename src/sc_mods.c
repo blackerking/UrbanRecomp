@@ -39,10 +39,10 @@ static int option_get(void *ctx,const char *p,const char *f,int i,RecompLauncher
         COPY(out->value,ScAspectName(video->aspect)); COPY(out->default_value,"Fit");
         out->choice_count=SC_ASPECT_COUNT;
     } else {
-        COPY(out->id,"position"); COPY(out->label,"Original view position");
-        COPY(out->description,"Place the original view and its controls in the center or at the top left.");
+        COPY(out->id,"position"); COPY(out->label,"Controls position");
+        COPY(out->description,"Top left keeps the toolbar and status display at the window edge as the city expands. Dialogs follow the same position.");
         COPY(out->value,video->centered ? "Center" : "TopLeft");
-        COPY(out->default_value,"Center"); out->choice_count=2;
+        COPY(out->default_value,"TopLeft"); out->choice_count=2;
     }
     return 1;
 }

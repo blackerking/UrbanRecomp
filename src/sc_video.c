@@ -22,7 +22,7 @@ bool ScParseAspect(const char *value, ScAspect *out) {
     return false;
 }
 void ScVideoDefaults(ScVideoSettings *s) {
-    *s = (ScVideoSettings){false, SC_FIT, true};
+    *s = (ScVideoSettings){false, SC_FIT, false};
 }
 bool ScVideoLoad(ScVideoSettings *s, const char *path) {
     ScVideoDefaults(s);

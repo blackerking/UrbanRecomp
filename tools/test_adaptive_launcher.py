@@ -29,7 +29,7 @@ def main():
     config=configparser.ConfigParser(); config.read(root/'sc-video.ini')
     assert config['Widescreen']['Enabled']=='1'
     assert config['Widescreen']['Aspect']=='32:9'
-    assert config['Widescreen']['Centered']=='1'
+    assert config['Widescreen']['Centered']=='0'
     game_config=configparser.ConfigParser(); game_config.read(root/'sc-settings.ini')
     assert game_config['Launcher']['rom']==str(args.rom.resolve())
     canvas=Image.open(root/'canvas-684x224.ppm'); assert canvas.size==(684,224)

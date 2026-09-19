@@ -35,7 +35,7 @@ def main():
         child=env|{'SC_DUMP_DIR':str(path),'SC_DUMP_INTERVAL':'100',
                    'SC_DUMP_START':str(capture_start),'SC_STATE_TRACE':str(path/'state.txt')}
         if save: child|={'SC_SAVE_AT':'2300','SC_SAVE_PATH':str(path/'city.state')}
-        cmd=[str(exe),str(rom),'--qualify',str(frames)]+opts+inputs
+        cmd=[str(exe),str(rom),'--qualify',str(frames),'--view-position','Center']+opts+inputs
         if state: cmd+=['--load-state',str(state)]
         with (path/'run.log').open('wb') as log:
             p=subprocess.run(cmd,cwd=path,env=child,stdout=log,stderr=log,timeout=180)
