@@ -52,6 +52,26 @@ int main(void) {
     for (int y=0;y<224;++y) ScRendererLine(&r,p,ram,y,native);
     assert(!memcmp(before,p,sizeof(*p)));
     assert(!ScRendererResize(&r,(ScViewport){8192,224,0,0,1}));
+    /* A fax desk on BG3 uses a 16-column sheet, not the menu's guessed
+     * eight-column repeat. Furniture in lower rows borrows the wood period. */
+    memset(p,0,sizeof(*p)); memset(ram,0,0x20000);
+    for (int i=0;i<32;++i) p->brightnessMult[i]=(i<<3)|(i>>2);
+    p->inidisp=15; p->screenEnabled[0]=4; p->bgXsc[2]=0x50;
+    p->cgram[65]=31; p->cgram[66]=31<<5;
+    for (int y=0;y<32;++y) for (int x=0;x<32;++x)
+        p->vram[0x5000+y*32+x]=0x20+(y%16)*16+x%16;
+    for (int row=0;row<8;++row) {
+        p->vram[0x20*8+row]=0x00ff;
+        p->vram[0x28*8+row]=0xff00;
+    }
+    ram[0x14]=15;
+    assert(ScRendererResize(&r,(ScViewport){512,224,0,0,1}));
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.wood_layer==2 && r.wood_period==16);
+    assert(r.pixels[256]==0xffff0000 && r.pixels[320]==0xff00ff00);
+    memcpy(before,p,sizeof(*p));
+    for (int y=1;y<224;++y) ScRendererLine(&r,p,ram,y,native);
+    assert(!memcmp(before,p,sizeof(*p)));
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;

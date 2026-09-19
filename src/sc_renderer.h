@@ -10,6 +10,8 @@ typedef struct ScRenderer {
     const uint8_t *rom;
     size_t rom_size;
     bool rom_is_us;
+    int wood_layer, wood_period;
+    uint16_t wood_rows[32];
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);

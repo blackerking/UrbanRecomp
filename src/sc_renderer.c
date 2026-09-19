@@ -99,7 +99,56 @@ static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
     }
     return tile_pixel(p,word,PPU_bgTileAdr(p,layer),x,y,depth,mode==0 ? layer*32 : 0);
 }
-static uint32_t scenery(const Ppu *p,const uint8_t *ram,int x,int y) {
+static bool wood_tile(unsigned word) {
+    unsigned tile=word&1023;
+    return tile>=0x20 && tile<=0x11f && !(word&0xc000);
+}
+static unsigned wood_grow(unsigned word,int columns) {
+    return (word&~15u)|((word+columns)&15);
+}
+static bool wood_run(const uint16_t *map,int row,int col,int step) {
+    unsigned a=map[row*32+col], b=map[row*32+col+step];
+    return wood_tile(a) && wood_tile(b) && b==wood_grow(a,step);
+}
+/* Discover the desk from its tile pattern, including the fax and View Mode.
+ * Keep this host-side: the guest's tilemaps and staging columns are untouched. */
+static void find_wood(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
+    r->wood_layer=-1;
+    if (ram[0x14]==1 || PPU_mode(p)>1) return;
+    for (int layer=0;layer<(PPU_mode(p)==0 ? 4 : 3);++layer) {
+        if (!((p->screenEnabled[0]|p->screenEnabled[1])&(1<<layer))) continue;
+        unsigned base=PPU_bgTilemapAdr(p,layer);
+        if (base+1024>0x8000) continue;
+        const uint16_t *map=p->vram+base;
+        int rows=0,full=0,cells=0;
+        for (int y=0;y<32;++y) {
+            int count=0;
+            for (int x=0;x<32;++x) count+=wood_tile(map[y*32+x]);
+            cells+=count; full+=count==32;
+            rows+=wood_run(map,y,0,1) && wood_run(map,y,31,-1);
+        }
+        if (rows<8 || full<4 || cells<300) continue;
+        r->wood_layer=layer; r->wood_period=16;
+        for (int period=1;period<=16;period*=2) {
+            int tested=0,bad=0;
+            for (int y=0;y+period<32;++y) for (int x=0;x<=31;x+=31) {
+                unsigned a=map[y*32+x],b=map[(y+period)*32+x];
+                if (wood_tile(a) && wood_tile(b)) { ++tested; bad+=a!=b; }
+            }
+            if (tested>=16 && bad*10<=tested) { r->wood_period=period; break; }
+        }
+        for (int y=0;y<32;++y) {
+            r->wood_rows[y]=0;
+            for (int offset=0;offset<32;offset+=r->wood_period) {
+                int row=(y+offset)&31;
+                if (wood_run(map,row,0,1)) { r->wood_rows[y]=map[row*32]; break; }
+                if (wood_run(map,row,31,-1)) { r->wood_rows[y]=wood_grow(map[row*32+31],-31); break; }
+            }
+        }
+        break;
+    }
+}
+static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     unsigned screen=ram[0x14], ci=0;
     int owner=5;
     if (screen==1 && PPU_mode(p)==1) {
@@ -110,14 +159,13 @@ static uint32_t scenery(const Ppu *p,const uint8_t *ram,int x,int y) {
             unsigned sample=bg_pixel(p,layer,x,y+1);
             if (sample) { ci=sample; owner=layer; }
         }
-    } else if (screen==3 && PPU_bgTilemapAdr(p,2)==0x3000) {
-        /* The original project's measured 8x8 wood pattern, sampled directly
-         * from CHR. Unlike widen_menu_bg this never rewrites guest VRAM. */
-        static const unsigned wood[]={0x68,0x78,0x88,0x98,0x60,0x70,0x80,0x90};
-        int tx=(x+p->hScroll[2])&511, ty=(y+1+p->vScroll[2])&255;
-        unsigned word=wood[(ty/8)&7]+((tx/8)&7);
-        ci=tile_pixel(p,word,PPU_bgTileAdr(p,2),tx,ty,2,PPU_mode(p)==0 ? 64 : 0);
-        owner=2;
+    } else if (r->wood_layer>=0 && screen!=11 && screen!=12) {
+        int layer=r->wood_layer;
+        int tx=(x+p->hScroll[layer])&1023, ty=(y+1+p->vScroll[layer])&255;
+        unsigned word=wood_grow(r->wood_rows[ty/8],tx/8);
+        int depth=PPU_mode(p)==0 || layer==2 ? 2 : 4;
+        ci=tile_pixel(p,word,PPU_bgTileAdr(p,layer),tx,ty,depth,PPU_mode(p)==0 ? layer*32 : 0);
+        owner=layer;
     } else if ((screen==11 || screen==12) && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000) {
         /* Scenario cards occupy a partially filled 64-column map. Extend the
          * same measured four-column wood block as selector_extend_tilemap,
@@ -138,7 +186,7 @@ static uint32_t scenery(const Ppu *p,const uint8_t *ram,int x,int y) {
     return composite_color(p,ci,owner,0,5,x);
 }
 void ScRendererInit(ScRenderer *r,const uint8_t *rom,size_t size,bool is_us) {
-    memset(r,0,sizeof(*r)); r->rom=rom; r->rom_size=size; r->rom_is_us=is_us;
+    memset(r,0,sizeof(*r)); r->rom=rom; r->rom_size=size; r->rom_is_us=is_us; r->wood_layer=-1;
 }
 bool ScRendererResize(ScRenderer *r,ScViewport v) {
     if (v.width<256 || v.height<224 || v.width>SC_MAX_CANVAS || v.height>SC_MAX_CANVAS ||
@@ -157,12 +205,13 @@ void ScRendererDestroy(ScRenderer *r) { free(r->pixels); memset(r,0,sizeof(*r));
 static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     uint32_t *out=r->pixels+(size_t)(y+r->view.core_y)*r->view.width;
     bool city=r->rom_is_us && ram[0x14]==0 && u16(ram,0x3e)!=0 &&
-              PPU_mode(p)==1 && ((p->screenEnabled[0]|p->screenEnabled[1])&2);
+              PPU_mode(p)==1 && ((p->screenEnabled[0]|p->screenEnabled[1])&2) &&
+              r->wood_layer<0 && !(!(p->screenEnabled[0]&2) && (p->screenEnabled[0]&1));
     int sx=(int16_t)u16(ram,0x1bd)*8, sy=(int16_t)u16(ram,0x1bf)*8;
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
         if (y>=0 && y<224 && local>=0 && local<256) continue; /* copied from native */
-        if (!city) { out[x]=scenery(p,ram,local,y); continue; }
+        if (!city) { out[x]=scenery(r,p,ram,local,y); continue; }
         unsigned ci=cell_pixel(r,p,ram,sx+local,sy+y+1,false);
         unsigned over=cell_pixel(r,p,ram,sx+local+8,sy+y+9,true);
         if (over) ci=over;
@@ -182,6 +231,7 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
 }
 void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const uint32_t *native) {
     if (!r->pixels || !p || !ram || !native || line<0 || line>=224) return;
+    if (line==0) find_wood(r,p,ram);
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);
     memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x,
