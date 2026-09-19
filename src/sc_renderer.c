@@ -167,13 +167,22 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
         ci=tile_pixel(p,word,PPU_bgTileAdr(p,layer),tx,ty,depth,PPU_mode(p)==0 ? layer*32 : 0);
         owner=layer;
     } else if ((screen==11 || screen==12) && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000) {
-        /* Scenario cards occupy a partially filled 64-column map. Extend the
-         * same measured four-column wood block as selector_extend_tilemap,
-         * without sampling its blank staging columns or altering VRAM. */
-        static const unsigned wood[]={0x29,0x39,0x49,0x59,0x61,0x71,0x81,0x91};
-        int tx=(x+p->hScroll[0])&511, ty=(y+1+p->vScroll[0])&255;
-        unsigned word=wood[(ty/8)&7]+(((tx/8)-41)&3);
-        ci=tile_pixel(p,word,PPU_bgTileAdr(p,0),tx,ty,2,0); owner=0;
+        /* Cards and translated names already exist in the wide guest maps.
+         * Show that single strip, then continue the desk beyond it. Wrapping
+         * the entire layer would repeat cards on ultrawide displays. */
+        int tx=x+p->hScroll[0], ty=(y+1+p->vScroll[0])&255;
+        unsigned anchor=p->vram[0x3400+(ty/8)*32+9]; /* column 41 */
+        if (!wood_tile(anchor) && r->wood_layer==0) anchor=r->wood_rows[ty/8];
+        if (wood_tile(anchor)) {
+            unsigned word=wood_grow(anchor,(tx>>3)-41);
+            ci=tile_pixel(p,word,PPU_bgTileAdr(p,0),tx,ty,2,0); owner=0;
+        }
+        for (int layer=3;layer>=0;--layer) {
+            int lx=x+p->hScroll[layer], ly=y+1+p->vScroll[layer];
+            if (!(p->screenEnabled[0]&(1<<layer)) || lx<0 || lx>=416 || ly<0 || ly>=256) continue;
+            unsigned sample=bg_pixel(p,layer,x,y+1);
+            if (sample) { ci=sample; owner=layer; }
+        }
     } else if (PPU_mode(p)==0 && screen!=0) {
         /* Decorated menus use a background layer. Its clear top strip is
          * repeatable furniture-free scenery, including the fax desk. */

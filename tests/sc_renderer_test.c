@@ -94,6 +94,14 @@ int main(void) {
     }
     assert(r.pixels[45*512+300]==0xff224466);
     assert(r.pixels[45*512+255]==0xffbb8844);
+    /* The selector's offscreen card is real content, not another wood tile. */
+    memset(p,0,sizeof(*p)); p->inidisp=15; p->screenEnabled[0]=1;
+    p->bgXsc[0]=0x31; p->brightnessMult[31]=255; p->cgram[1]=31;
+    p->vram[0x3400]=2;
+    for (int y=0;y<8;++y) p->vram[2*8+y]=0xff;
+    ram[0x14]=11; ScRendererLine(&r,p,ram,0,native);
+    assert(r.pixels[256]==0xffff0000);
+    assert(r.pixels[480]==0xff000000); /* no repeat of cards beyond strip */
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;
