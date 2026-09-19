@@ -5,7 +5,7 @@ provider, like Super Metroid's custom renderer. Start the executable without
 arguments (or with `--mods`), select **Mods**, enable **Adaptive Widescreen**,
 choose a view size, and press **Play**. Settings persist in `sc-video.ini`.
 The mod starts disabled in a fresh directory. New configurations use **Top left**
-for Controls position; existing saved Center preferences are respected.
+for City controls position; existing saved Center preferences are respected.
 
 See the [screenshot gallery](screenshots/adaptive-renderer/README.md) for the
 Mods controls, adaptive landscape/portrait views, and fixed 21:9 gameplay.
@@ -13,14 +13,19 @@ Mods controls, adaptive landscape/portrait views, and fixed 21:9 gameplay.
 The entire original 256x224 view stays visible in every mode. Terrain and
 buildings extend into the extra space; the original controls, text, cursor,
 and simulation retain their native coordinates. The original view can be
-centered or placed at the top left. Top left keeps the toolbar and status
-display anchored while added city space grows rightward or downward. The window is resizable; **F11** toggles
+centered or placed at the top left during gameplay. Top left keeps the toolbar
+and status display anchored while added city space grows rightward or downward.
+The title, standalone menus and advisor pop-ups stay centered in both modes.
+The window is resizable; **F11** toggles
 fullscreen. **F10** still opens the game's existing settings menu.
 
-Draft follow-up: advisor/tutorial/budget dialogs currently follow the original
-view's anchor too. In top-left mode, those panels should eventually remain
-centered independently of the gameplay/HUD placement. This branch retains the
-current behavior while that layout work is deferred.
+Advisor/tutorial pages move independently of their dimmed city background.
+Their native page and portrait pixels are captured from BG3 and the stock
+PPU's resolved sprite scanline, then placed at the canvas center. BG1's HUD
+and BG2's city remain at the gameplay anchor. The old page's subscreen
+occlusion is removed so it leaves no black rectangle behind; transparent
+black lettering backed by that occlusion remains part of the opaque page.
+Separate budget/statistics, fax, loan and menu screens use a centered view.
 
 | View size | Behavior |
 | --- | --- |
@@ -111,7 +116,9 @@ been qualified for custom rendering.
 
 The renderer never writes WRAM, VRAM, OAM or CGRAM. Native pixels are
 copied byte-for-byte except for the city's bare eight-pixel staging columns
-described above. HUD and sprite pixels remain intact. It uses its own dynamic
+and the background revealed when relocating an advisor page. The relocated
+page retains its finished native pixels. HUD and sprite pixels remain intact.
+It uses its own dynamic
 surface, independently of the shared PPU's horizontal widening limit. While
 the mod is enabled it supersedes legacy `SC_WIDESCREEN` / `SC_HOST_MAP` paths.
 Existing game fixes still run identically with the mod enabled and disabled.
@@ -123,6 +130,8 @@ coordinates, all Mods choices, toggle/persistence, tile flips, transparent
 overlap, map bounds, PPU immutability, desk periods, title fades/lights,
 scenario cards, flat-menu fills, fine/coarse scroll handoff, sprite crossings
 and priority, city-load holding, and staging-edge repairs that preserve HUD.
+Layout checks also cover independent panel placement, black lettering and
+sprite pixels, the old panel's subscreen window, fades and returning to play.
 
 With Python and Pillow, the integration test runs normal inputs through boot,
 main menu, scenario selector, populated San Francisco, fax, advisor and a practice city. It checks every frame's CPU,
@@ -143,6 +152,22 @@ test; it owns and closes only its child process/window:
 ```sh
 python tools/test_adaptive_window.py --exe build-custom/UrbanRecomp.exe --rom simcity.sfc --state ARTIFACTS/stock-route/city.state --artifacts build-custom/integration
 ```
+
+The independent layout regression checks both wide and portrait windows:
+
+```sh
+python tools/test_adaptive_layout.py --exe build-custom/UrbanRecomp.exe --rom simcity.sfc --artifacts build-custom/integration
+```
+
+It verifies centered title/menu/fax pages, left gameplay controls, and centered
+advisor pages without moving their city/HUD background. A stock-PPU reference
+pass hides the foreground and removes the obsolete subscreen occlusion using
+`SC_LAYER_MASK=3 SC_SUB_WINDOW_MASK=0`. The latter diagnostic override is
+restored immediately after drawing, before guest execution resumes. The
+revealed background must match that reference; relocated page pixels must
+match the original stock picture. All four runs retain identical guest state.
+Audit captures include the relocated page mask. Review the resulting images
+as well as the numerical checks.
 
 The resize test covers 16:9, 21:9, 32:9, portrait, square and 4:3 window shapes.
 `--screenshots` additionally brings its child forward for desktop screenshots;
@@ -201,10 +226,10 @@ qualified by these tests. The moving-object regression exercises native OAM
 crossings; it does not claim arbitrary offscreen simulation objects exist.
 
 Top-left is the default HUD layout because its controls stay together and the
-extra map gets a stable origin. Center remains available under Controls position.
-Independently centering advisor panels still requires separating them from their
-city background; moving the already-composited rectangle would also move the
-map and toolbar. That remains the separately tracked follow-up.
+extra map gets a stable origin. Center remains available under City controls
+position. Title/menu centering is independent of that setting. Advisor pages
+are separated from the composed picture as described above, so opening a page
+does not move the city or toolbar.
 
 
 The final renderer run (`a9cddae`) completed 13,920 paired CPU/WRAM/clock frame
@@ -213,3 +238,9 @@ checks and 142 native-region captures across 16 cases, plus the separate
 overscan bands; all other native pixels must match. The final six-window
 resize run and screenshots include the left-aligned default. See the
 [updated gallery](screenshots/adaptive-renderer/README.md).
+
+The independent-centering follow-up also passes 7,200 paired guest-state
+checks and 48 layout captures, including eight advisor captures checked
+against the stock page and unoccluded-background references. Both city and
+advisor states pass the six actual window-resize shapes. The gallery includes
+the centered title, main menu and wide/portrait advisor pages.

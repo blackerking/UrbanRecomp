@@ -1,5 +1,25 @@
 # Adaptive Widescreen screenshots
 
+## Centered screens and advisor pages
+
+City controls stay at the top left. The title and separate menus center on
+the canvas independently:
+
+![Centered title with extended skyline and lights](centered-title.png)
+
+![Centered main menu](centered-menu.png)
+
+Advisor/tutorial pages also center, while the dimmed city keeps its gameplay
+position. Removing the old panel's clipping window exposes the city beneath
+it, and the page's original black lettering and portrait stay intact:
+
+![Centered advisor over the stationary city](centered-advisor-wide.png)
+
+<img src="centered-advisor-portrait.png" alt="Centered advisor in a portrait window" width="300">
+
+These captures come from `tools/test_adaptive_layout.py`, using normal inputs
+through boot, fax, tutorial and gameplay. They are unscaled logical pixels.
+
 ## Regression follow-up and left-aligned controls
 
 Captured from the SDL3 build at `a9cddae`, after integrating main `28c280b`.
@@ -44,6 +64,6 @@ selected and the original view centered.
 
 ![Adaptive Widescreen settings in the shared Mods launcher](mods.png)
 
-The images in this historical section show the original draft. Dialog centering independent of a
-top-left gameplay/HUD anchor remains a follow-up; see
+The images in this historical section show the original draft. The current
+independent menu/advisor centering is shown above; see
 [renderer scope and validation](../../ADAPTIVE_RENDERER.md).

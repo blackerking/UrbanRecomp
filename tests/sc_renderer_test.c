@@ -68,7 +68,8 @@ int main(void) {
     assert(ScRendererResize(&r,(ScViewport){512,224,0,0,1}));
     ScRendererLine(&r,p,ram,0,native);
     assert(r.wood_layer==2 && r.wood_period==16);
-    assert(r.pixels[256]==0xffff0000 && r.pixels[320]==0xff00ff00);
+    assert(r.view.core_x==128);
+    assert(r.pixels[384]==0xffff0000 && r.pixels[448]==0xff00ff00);
     memcpy(before,p,sizeof(*p));
     for (int y=1;y<224;++y) ScRendererLine(&r,p,ram,y,native);
     assert(!memcmp(before,p,sizeof(*p)));
@@ -79,12 +80,12 @@ int main(void) {
     p->brightnessMult[31]=255; p->cgram[1]=31;
     for (int y=0;y<8;++y) p->vram[y]=0xff;
     ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
-    assert(r.pixels[256]==0xffff0000);
+    assert(r.view.core_x==128 && r.pixels[384]==0xffff0000);
     ram[0x14]=2; p->inidisp=7; p->brightnessMult[31]=119;
     ScRendererLine(&r,p,ram,0,native);
-    assert(r.pixels[256]==0xff770000);
+    assert(r.pixels[384]==0xff770000);
     p->inidisp=0x8f; ScRendererLine(&r,p,ram,0,native);
-    assert(r.pixels[256]==0xff000000 && !r.title_live);
+    assert(r.pixels[384]==0xff000000 && !r.title_live);
     /* Statistics/tax pages: isolated panel/cursor rows cannot smear their
      * colour across the canvas. The majority already includes the fade. */
     ram[0x14]=0; p->bgmode=0; p->screenEnabled[0]=0; p->inidisp=7;
@@ -92,32 +93,34 @@ int main(void) {
         for (int x=0;x<256;++x) native[x]=(y>=41 && y<=53) ? 0xffbb8844 : 0xff224466;
         ScRendererLine(&r,p,ram,y,native);
     }
-    assert(r.pixels[45*512+300]==0xff224466);
-    assert(r.pixels[45*512+255]==0xffbb8844);
+    assert(r.pixels[45*512+450]==0xff224466);
+    assert(r.pixels[45*512+383]==0xffbb8844);
     /* The selector's offscreen card is real content, not another wood tile. */
     memset(p,0,sizeof(*p)); p->inidisp=15; p->screenEnabled[0]=1;
     p->bgXsc[0]=0x31; p->brightnessMult[31]=255; p->cgram[1]=31;
     p->vram[0x3400]=2;
     for (int y=0;y<8;++y) p->vram[2*8+y]=0xff;
+    assert(ScRendererResize(&r,(ScViewport){800,224,0,0,1}));
     ram[0x14]=11; ScRendererLine(&r,p,ram,0,native);
-    assert(r.pixels[256]==0xffff0000);
-    assert(r.pixels[480]==0xff000000); /* no repeat of cards beyond strip */
+    assert(r.pixels[272+256]==0xffff0000);
+    assert(r.pixels[272+480]==0xff000000); /* no repeat of cards beyond strip */
     /* Repeating title lights are OAM, not background tiles. Ignore the
      * parked copy at raw X=257 when finding the visible row's pitch. */
     memset(p,0,sizeof(*p)); p->inidisp=15; p->bgmode=1;
+    assert(ScRendererResize(&r,(ScViewport){512,224,0,0,1}));
     p->screenEnabled[0]=16; p->brightnessMult[31]=255; p->cgram[129]=31;
     for (int i=0;i<4;++i) p->oam[i*2]=(180<<8)|(1+i*64);
     for (int y=0;y<8;++y) p->vram[y]=0xff;
     p->oam[8]=(180<<8)|1; p->highOam[1]=1;
     ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
     ScRendererLine(&r,p,ram,179,native);
-    assert(r.light_pitch==64 && r.pixels[179*512+257]==0xffff0000);
+    assert(r.light_pitch==64 && r.pixels[179*512+385]==0xffff0000);
     /* Fine scroll wraps before WRAM advances its coarse cell. The margin
      * must advance by two pixels, not jump backwards by six. */
     ram[0x14]=0; ram[0x3e]=1; ram[0x1bd]=10; ram[0x1bf]=10;
     p->screenEnabled[0]=2; p->hScroll[1]=86; p->vScroll[1]=80;
     ScRendererLine(&r,p,ram,0,native);
-    assert(r.scroll_x+r.scroll_adjust_x==86);
+    assert(r.view.core_x==0 && r.scroll_x+r.scroll_adjust_x==86);
     p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
     assert(r.scroll_x+r.scroll_adjust_x==88);
     ram[0x1bd]=11; p->hScroll[1]=90; ScRendererLine(&r,p,ram,0,native);
@@ -176,6 +179,55 @@ int main(void) {
     for (int y=0;y<8;++y) p->vram[0x1008+y]=0xff;
     ScRendererLine(&r,p,ram,0,native);
     assert(r.repaired_edges[0]==2 && r.pixels[0]==0xffff0000);
+    /* Center only the advisor's opaque BG3/OBJ pixels. The dimmed BG1 HUD
+     * stays left, transparent page pixels reveal the stationary city, and
+     * even black OBJ pixels remain opaque. Exercise both axes at once. */
+    memset(p,0,sizeof(*p)); memset(ram,0,0x20000);
+    p->inidisp=15; p->bgmode=1; p->screenEnabled[0]=20; p->screenEnabled[1]=3;
+    p->cgwsel=2; p->cgadsub=0x60; p->bgTileAdr=0x321;
+    /* Both city layers were hidden under the original page. Moving that
+     * page must reveal the background, without moving/mutating the window. */
+    p->screenWindowed[1]=3; p->windowsel=0x22;
+    p->window1left=24; p->window1right=247;
+    p->bgXsc[0]=0x40; p->bgXsc[1]=0x48; p->bgXsc[2]=0x50;
+    p->cgram[1]=31<<5; p->cgram[2]=31; p->cgram[3]=31<<10;
+    for (int i=0;i<32;++i) p->brightnessMult[i]=(i<<3)|(i>>2);
+    for (int y=0;y<8;++y) {
+        p->vram[0x2000+y]=0xff;
+        p->vram[0x1010+y]=0xff00;
+        p->vram[0x3008+y]=0xdfdf; /* transparent black glyph at x=42 */
+    }
+    for (int y=0;y<32;++y) {
+        p->vram[0x4000+y*32+2]=1;
+        p->vram[0x5000+y*32+5]=1;
+    }
+    p->objBuffer.data[kPpuExtraLeftRight+64]=0x2080;
+    ram[0x3e]=1; ram[0x1bd]=10; ram[0x1bf]=10;
+    for (int x=0;x<256;++x) native[x]=x==42 ? 0 : (x>=40 && x<48) ? 0x000000ff :
+        x==64 ? 0 : (x>=16 && x<24) ? 0x007b0000 : 0x00007b00;
+    ScRendererResetHistory(&r);
+    assert(ScRendererResize(&r,(ScViewport){684,448,0,0,1}));
+    memcpy(before,p,sizeof(*p));
+    for (int y=0;y<224;++y) ScRendererLine(&r,p,ram,y,native);
+    assert(r.advisor_frame && r.view.core_x==0 && r.view.core_y==0);
+    assert(!memcmp(before,p,sizeof(*p)));
+    assert(r.pixels[20*684+16]==0xff7b0000); /* HUD did not move */
+    assert(r.pixels[20*684+40]==0xff007b00); /* no old page */
+    assert(r.pixels[(112+20)*684+214+40]==0xff0000ff);
+    assert(r.pixels[(112+20)*684+214+42]==0xff000000); /* black page lettering */
+    assert(r.pixels[(112+20)*684+214+64]==0xff000000);
+    assert(!r.advisor_pixels[20*256+50]); /* transparent page background */
+    assert(r.pixels[(112+20)*684+214+50]==0xff007b00);
+    p->inidisp=0x8f;
+    for (int x=0;x<256;++x) native[x]=0;
+    for (int y=0;y<224;++y) ScRendererLine(&r,p,ram,y,native);
+    assert(r.pixels[(112+20)*684+214+40]==0xff000000);
+    p->inidisp=15; p->screenEnabled[0]=23; p->screenEnabled[1]=4;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(!r.advisor_frame && r.view.core_x==0); /* returning to the city */
+    ram[0x14]=1;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.view.core_x==214 && r.view.core_y==112); /* title, both axes */
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;

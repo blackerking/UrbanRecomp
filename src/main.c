@@ -1002,7 +1002,19 @@ static void handle_pos_stuff(void) {
         ppu_runLine(g_ppu, snes->vPos);
         PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
       }
-      ppu_runLine(g_ppu, snes->vPos);
+      /* Diagnostic companion to SC_LAYER_MASK: isolate the advisor's
+       * background without its old panel-shaped subscreen occlusion.
+       * Restore the register before any guest execution or custom rendering. */
+      { static int sub_window_mask = -2;
+        if (sub_window_mask == -2) {
+          const char *e = getenv("SC_SUB_WINDOW_MASK");
+          sub_window_mask = e ? (int)strtol(e,NULL,0) : -1;
+        }
+        const uint8_t saved = g_ppu->screenWindowed[1];
+        if (sub_window_mask >= 0) g_ppu->screenWindowed[1]=(uint8_t)sub_window_mask;
+        ppu_runLine(g_ppu, snes->vPos);
+        g_ppu->screenWindowed[1]=saved;
+      }
       if (s_custom_video.enabled && snes->vPos > 0 && snes->vPos <= 224)
         ScRendererLine(&s_custom_renderer, g_ppu, g_ram, snes->vPos - 1,
           (const uint32_t *)(s_video_pixels + (size_t)(snes->vPos - 1) * s_video_pitch));
@@ -5813,10 +5825,23 @@ static bool write_ppm(const char *path) {
     char audit_path[1100]; snprintf(audit_path,sizeof audit_path,"%s.json",path);
     FILE *audit=fopen(audit_path,"w");
     if (!audit) { fclose(f); return false; }
-    fprintf(audit,"{\"core_x\":%d,\"core_y\":%d,\"edge_repairs\":[",
-            s_custom_renderer.view.core_x,s_custom_renderer.view.core_y);
+    fprintf(audit,"{\"core_x\":%d,\"core_y\":%d,\"city\":%s,\"advisor_centered\":%s,\"edge_repairs\":[",
+            s_custom_renderer.view.core_x,s_custom_renderer.view.core_y,
+            s_custom_renderer.city_frame ? "true" : "false",
+            s_custom_renderer.advisor_frame ? "true" : "false");
     for (int y=0;y<224;++y) fprintf(audit,"%s%u",y ? "," : "",s_custom_renderer.repaired_edges[y]);
-    fputs("]}\n",audit); fclose(audit);
+    fprintf(audit,"],\"ppu\":{\"main\":%u,\"sub\":%u,\"window_sub\":%u,\"windows\":%u,\"math\":%u,\"math_control\":%u}}\n",
+            g_ppu->screenEnabled[0],g_ppu->screenEnabled[1],g_ppu->screenWindowed[1],
+            g_ppu->windowsel,g_ppu->cgadsub,g_ppu->cgwsel);
+    fclose(audit);
+    if (s_custom_renderer.advisor_frame) {
+      snprintf(audit_path,sizeof audit_path,"%s.panel.pgm",path);
+      FILE *mask=fopen(audit_path,"wb");
+      if (!mask) { fclose(f); return false; }
+      fputs("P5\n256 224\n255\n",mask);
+      for (int i=0;i<256*224;++i) fputc(s_custom_renderer.advisor_pixels[i] ? 255 : 0,mask);
+      if (fclose(mask)) { fclose(f); return false; }
+    }
   }
   return fclose(f) == 0;
 }

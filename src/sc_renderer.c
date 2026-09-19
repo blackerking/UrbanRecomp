@@ -210,7 +210,7 @@ uint32_t ScRendererMapPixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,
     unsigned over=cell_pixel(r,p,ram,x+8,y+8,true);
     return color(p,over ? over : ci);
 }
-static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
+static unsigned bg_sample(const Ppu *p,int layer,int x,int y,bool *priority) {
     int mode=PPU_mode(p);
     if (mode>1) return 0;
     int depth=mode==0 || layer==2 ? 2 : 4;
@@ -221,6 +221,7 @@ static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
     if ((y&(32<<bits)) && PPU_bgTilemapHigher(p,layer))
         addr+=PPU_bgTilemapWider(p,layer) ? 0x800 : 0x400;
     unsigned word=p->vram[addr&0x7fff];
+    if (priority) *priority=(word&0x2000)!=0;
     if (bits==4) {
         unsigned n=word&1023;
         if (((x&8)!=0) != ((word&0x4000)!=0)) n++;
@@ -228,6 +229,9 @@ static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
         word=(word&~1023u)|(n&1023);
     }
     return tile_pixel(p,word,PPU_bgTileAdr(p,layer),x,y,depth,mode==0 ? layer*32 : 0);
+}
+static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
+    return bg_sample(p,layer,x,y,NULL);
 }
 static bool wood_tile(unsigned word) {
     unsigned tile=word&1023;
@@ -351,17 +355,23 @@ bool ScRendererResize(ScRenderer *r,ScViewport v) {
     if (v.width<256 || v.height<224 || v.width>SC_MAX_CANVAS || v.height>SC_MAX_CANVAS ||
         v.core_x<0 || v.core_y<0 || v.core_x+256>v.width || v.core_y+224>v.height) return false;
     if (!r->held_ppu) { r->held_ppu=malloc(sizeof(Ppu)); if (!r->held_ppu) return false; }
+    if (!r->advisor_pixels) {
+        r->advisor_pixels=calloc(256*224,sizeof(*r->advisor_pixels));
+        if (!r->advisor_pixels) return false;
+    }
     size_t count=(size_t)v.width*v.height;
     if (count>r->capacity) {
         uint32_t *pixels=realloc(r->pixels,count*sizeof(*pixels));
         if (!pixels) return false;
         r->pixels=pixels; r->capacity=count;
     }
-    r->view=v;
+    r->view=r->gameplay_view=v;
     memset(r->pixels,0,count*sizeof(*r->pixels));
     return true;
 }
-void ScRendererDestroy(ScRenderer *r) { free(r->pixels); free(r->held_ppu); memset(r,0,sizeof(*r)); }
+void ScRendererDestroy(ScRenderer *r) {
+    free(r->pixels); free(r->held_ppu); free(r->advisor_pixels); memset(r,0,sizeof(*r));
+}
 void ScRendererResetHistory(ScRenderer *r) {
     r->scroll_valid=r->objects_valid=r->map_valid=r->map_hold=r->title_live=false;
 }
@@ -392,7 +402,7 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     if (city) object_row(r,p,y,objects);
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
-        if (y>=0 && y<224 && local>=0 && local<256 &&
+        if (!r->advisor_frame && y>=0 && y<224 && local>=0 && local<256 &&
             !((local<8 && (r->repaired_edges[y]&1)) ||
               (local>=248 && (r->repaired_edges[y]&2)))) continue;
         if (!city) { out[x]=scenery(r,p,ram,local,y); continue; }
@@ -400,6 +410,33 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
         unsigned over=cell_pixel(r,p,ram,sx+local+8,sy+y+9,true);
         if (over) ci=over;
         int edge=local<0 ? 0 : local>255 ? 255 : local;
+        if (r->advisor_frame) {
+            /* Advice uses an opaque BG3/OBJ page on MAIN and the dimmed
+             * BG1 HUD / BG2 city on SUB. Rebuild only that background here;
+             * the original page pixels are placed independently after scanout.
+             * Native city tiles retain their exact staging/timing in the core. */
+            unsigned sub=ci; int sublayer=ci ? 1 : 5;
+            bool city_priority=over!=0;
+            bool in_core=local>=0 && local<256 && y>=0 && y<224;
+            if (in_core && local>=8 && local<248) {
+                sub=bg_sample(p,1,local,y+1,&city_priority);
+                sublayer=sub ? 1 : 5;
+            }
+            /* The ROM windows the subscreen out beneath the old opaque
+             * page. That occlusion belongs to the page's old location and
+             * must not leave a black hole after moving it. The relocated
+             * opaque pixels cover the new location at the end of the frame. */
+            if (!(p->screenEnabled[1]&2)) {
+                sub=0; sublayer=5;
+            }
+            if (in_core && (p->screenEnabled[1]&1)) {
+                bool hud_priority=false;
+                unsigned hud=bg_sample(p,0,local,y+1,&hud_priority);
+                if (hud && (!sub || hud_priority || !city_priority)) { sub=hud; sublayer=0; }
+            }
+            out[x]=composite_color(p,0,5,sub,sublayer,edge);
+            continue;
+        }
         unsigned samples[2]={0,0}; int layers[2]={5,5};
         for (int sub=0;sub<2;++sub) {
             if ((p->screenEnabled[sub]&2) &&
@@ -439,6 +476,35 @@ static void fill_flat_margins(ScRenderer *r) {
             y<r->view.core_y || y>=r->view.core_y+224)
             r->pixels[(size_t)y*r->view.width+x]=colors[best];
 }
+static void capture_advisor_row(ScRenderer *r,const Ppu *p,int y,const uint32_t *native) {
+    bool page_pixels[256]; int first=256,last=-1;
+    for (int x=0;x<256;++x) {
+        page_pixels[x]=(p->screenEnabled[0]&4) &&
+            (!(p->screenWindowed[0]&4) || !window_contains(p,2,x)) && bg_pixel(p,2,x,y+1);
+        if (page_pixels[x]) { if (x<first) first=x; last=x; }
+    }
+    for (int x=0;x<256;++x) {
+        /* Black lettering can be transparent BG3 over the window-cleared
+         * backdrop. It belongs to the opaque page too. Bound this fill by
+         * the actual page span, so the city's clipped outer staging columns
+         * do not become an extra black strip next to the centered panel. */
+        bool page=page_pixels[x] || (x>=first && x<=last &&
+            (p->screenWindowed[1]&3)==3 && window_contains(p,0,x) && window_contains(p,1,x));
+        /* The stock PPU already resolved OAM order, sprite limits and flips
+         * for this scanline. Read its result, without replaying or changing it. */
+        bool obj=(p->screenEnabled[0]&16) &&
+            (!(p->screenWindowed[0]&16) || !window_contains(p,4,x)) &&
+            (p->objBuffer.data[x+kPpuExtraLeftRight]&255);
+        r->advisor_pixels[y*256+x]=(page || obj) ? native[x]|0xff000000 : 0;
+    }
+}
+static void place_advisor(ScRenderer *r) {
+    int dx=(r->view.width-256)/2,dy=(r->view.height-224)/2;
+    for (int y=0;y<224;++y) for (int x=0;x<256;++x) {
+        uint32_t pixel=r->advisor_pixels[y*256+x];
+        if (pixel) r->pixels[(size_t)(y+dy)*r->view.width+x+dx]=pixel;
+    }
+}
 void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const uint32_t *native) {
     if (!r->pixels || !p || !ram || !native || line<0 || line>=224) return;
     if (line==0) {
@@ -446,6 +512,21 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         if (ram[0x14]==1) r->title_live=true;
         else if (ram[0x14]!=2 || PPU_forcedBlank(p) || !PPU_brightness(p)) r->title_live=false;
         find_wood(r,p,ram);
+        /* Choose once per frame, after the live desk/layer classification.
+         * $14 alone also labels tax, statistics and View Mode as city screens.
+         * Keep gameplay's configured anchor, but center standalone screens. */
+        r->view=r->gameplay_view;
+        if (!city_live(r,p,ram)) {
+            r->view.core_x=(r->view.width-256)/2;
+            r->view.core_y=(r->view.height-224)/2;
+        }
+        /* The ROM's advisor/tutorial pages enable color math for the
+         * backdrop only; their visible page/portrait pixels are opaque.
+         * Keep the city/HUD anchor and move those pixels, never the composed
+         * native rectangle (which would drag the city along with the page). */
+        r->advisor_frame=city_live(r,p,ram) && (p->screenEnabled[0]&31)==20 &&
+            (p->screenEnabled[1]&31)==3 && !(PPU_mathEnabled(p)&20) &&
+            (r->view.core_x!=(r->view.width-256)/2 || r->view.core_y!=(r->view.height-224)/2);
         find_lights(r,p);
         track_scroll(r,p,ram);
         track_objects(r,p,ram);
@@ -462,10 +543,12 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
     render_row(r,p,ram,line);
     int first=(r->repaired_edges[line]&1) ? 8 : 0;
     int end=(r->repaired_edges[line]&2) ? 248 : 256;
-    memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x+first,
-           native+first,(size_t)(end-first)*sizeof(*native));
+    if (r->advisor_frame) capture_advisor_row(r,p,line,native);
+    else memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x+first,
+                native+first,(size_t)(end-first)*sizeof(*native));
     if (line==223) {
         for (int y=224;y<r->view.height-r->view.core_y;++y) render_row(r,p,ram,y);
         fill_flat_margins(r);
+        if (r->advisor_frame) place_advisor(r);
     }
 }

@@ -5,7 +5,10 @@
 typedef struct Ppu Ppu;
 typedef struct ScRenderer {
     ScViewport view;
+    ScViewport gameplay_view; /* configured HUD anchor; menus are centered */
     uint32_t *pixels;
+    uint32_t *advisor_pixels;
+    bool advisor_frame;
     size_t capacity;
     const uint8_t *rom;
     size_t rom_size;
