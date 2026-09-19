@@ -30,7 +30,8 @@ def main():
     assert config['Widescreen']['Enabled']=='1'
     assert config['Widescreen']['Aspect']=='32:9'
     assert config['Widescreen']['Centered']=='1'
-    assert (root/'rom.cfg').read_text().strip()==str(args.rom.resolve())
+    game_config=configparser.ConfigParser(); game_config.read(root/'sc-settings.ini')
+    assert game_config['Launcher']['rom']==str(args.rom.resolve())
     canvas=Image.open(root/'canvas-684x224.ppm'); assert canvas.size==(684,224)
     canvas.save(root/'game.png')
     assert 'custom renderer: 32:9' in (root/'launcher.log').read_text()

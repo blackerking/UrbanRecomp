@@ -304,7 +304,9 @@ static bool gl3_available(void) {
         version = (const char *)get_string(0x1F02);    /* GL_VERSION */
         renderer = (const char *)get_string(0x1F01);   /* GL_RENDERER */
       }
-      ok = version && atoi(version) >= 3;
+      int major=0, minor=0;
+      ok = version && sscanf(version, "%d.%d", &major, &minor)==2 &&
+           (major>3 || (major==3 && minor>=3));
       fprintf(stderr, "launcher: OpenGL %s (%s)\n", version ? version : "?",
               renderer ? renderer : "?");
       SDL_GL_MakeCurrent(w, NULL);
