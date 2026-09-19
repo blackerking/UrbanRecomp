@@ -26,9 +26,16 @@ int main(void) {
     word(ram,0x10200,1023);
     assert(ScRendererMapPixel(&r,p,ram,0,0)==0xff000000);
     word(ram,0x10200,0);
-    /* Transparent overlay pixel from adjacent cell lands at -1,-1. */
-    word(rom,0x14f2d,0);
-    assert(ScRendererMapPixel(&r,p,ram,7,7)==0xffff0000);
+    /* Only the southeast cell has a roof. Its upper-left pixel belongs
+     * at (0,0), not (7,7), and uses city CHR even if BG1 has another base. */
+    word(rom,0x156a9,0); word(rom,0x156a9+2,0);
+    word(rom,0x14f2d+2,1);
+    word(ram,0x10200+(120+1)*2,1);
+    p->bgTileAdr=4;
+    p->vram[16]=0x8000; /* green at roof tile (0,0) */
+    assert(ScRendererMapPixel(&r,p,ram,0,0)==0xff00ff00);
+    assert(ScRendererMapPixel(&r,p,ram,7,7)==0xff00ff00); /* base green */
+    assert(ScRendererMapPixel(&r,p,ram,1,0)==0xff000000); /* transparent roof */
     ram[0x3e]=1;
     ScVideoSettings settings={true,SC_FIT,true};
     ScViewport v=ScVideoViewport(&settings,720,1280);

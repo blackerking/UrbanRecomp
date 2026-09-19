@@ -69,15 +69,15 @@ static unsigned cell_pixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,
     if (offset+1 >= r->rom_size) return 0;
     unsigned word=u16(r->rom,offset);
     if (overlay && (word&1023)==0x300) return 0;
-    return tile_pixel(p,word,PPU_bgTileAdr(p,overlay ? 0 : 1),x,y,4,0);
+    return tile_pixel(p,word,PPU_bgTileAdr(p,1),x,y,4,0);
 }
 uint32_t ScRendererMapPixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     if (!r->rom_is_us || !r->rom || x<0 || y<0 || x>=960 || y>=800)
         return color(p,0);
     unsigned ci=cell_pixel(r,p,ram,x,y,false);
-    /* Overlay cells occupy [cell*8-1,cell*8+6], so fetch the neighbor at
-     * x+1/y+1. This also includes the last partial tile at every canvas edge. */
-    unsigned over=cell_pixel(r,p,ram,x+1,y+1,true);
+    /* Both tables reference the city CHR (BG2). Roofs extend one whole
+     * cell up-left: the covering tile belongs to the southeast neighbor. */
+    unsigned over=cell_pixel(r,p,ram,x+8,y+8,true);
     return color(p,over ? over : ci);
 }
 static unsigned bg_pixel(const Ppu *p,int layer,int x,int y) {
@@ -164,7 +164,7 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
         if (y>=0 && y<224 && local>=0 && local<256) continue; /* copied from native */
         if (!city) { out[x]=scenery(p,ram,local,y); continue; }
         unsigned ci=cell_pixel(r,p,ram,sx+local,sy+y+1,false);
-        unsigned over=cell_pixel(r,p,ram,sx+local+1,sy+y+2,true);
+        unsigned over=cell_pixel(r,p,ram,sx+local+8,sy+y+9,true);
         if (over) ci=over;
         int edge=local<0 ? 0 : local>255 ? 255 : local;
         unsigned samples[2]={0,0}; int layers[2]={5,5};
