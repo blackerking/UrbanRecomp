@@ -105,6 +105,33 @@ static unsigned cell_pixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,
     if (overlay && (word&1023)==0x300) return 0;
     return tile_pixel(p,word,PPU_bgTileAdr(p,1),x,y,4,0);
 }
+static int scroll_delta(int a,int b) { int d=(a-b)&255; return d>128 ? d-256 : d; }
+static bool city_live(const ScRenderer *r,const Ppu *p,const uint8_t *ram) {
+    return r->rom_is_us && ram[0x14]==0 && u16(ram,0x3e)!=0 &&
+           PPU_mode(p)==1 && ((p->screenEnabled[0]|p->screenEnabled[1])&2) &&
+           r->wood_layer<0 && !(!(p->screenEnabled[0]&2) && (p->screenEnabled[0]&1));
+}
+static void track_scroll(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
+    if (!city_live(r,p,ram)) { r->scroll_valid=false; return; }
+    int h=p->hScroll[1]&255,v=p->vScroll[1]&255;
+    int x=(int8_t)ram[0x1bd]*8+(h&7),y=(int8_t)ram[0x1bf]*8+(v&7);
+    if (r->scroll_valid) {
+        int dx=scroll_delta(h,r->scroll_h),dy=scroll_delta(v,r->scroll_v);
+        if (abs(dx)<32 && abs(dy)<32) {
+            int ax=dx-(x-r->scroll_x),ay=dy-(y-r->scroll_y);
+            if (ax%8==0) r->scroll_adjust_x+=ax;
+            if (ay%8==0) r->scroll_adjust_y+=ay;
+            if (!dx && !dy && x==r->scroll_x && y==r->scroll_y) ++r->scroll_still;
+            else r->scroll_still=0;
+            if (r->scroll_still>=8) r->scroll_adjust_x=r->scroll_adjust_y=0;
+            if (r->scroll_adjust_x>8) r->scroll_adjust_x=8;
+            if (r->scroll_adjust_x< -8) r->scroll_adjust_x=-8;
+            if (r->scroll_adjust_y>8) r->scroll_adjust_y=8;
+            if (r->scroll_adjust_y< -8) r->scroll_adjust_y=-8;
+        } else r->scroll_adjust_x=r->scroll_adjust_y=0;
+    } else r->scroll_adjust_x=r->scroll_adjust_y=r->scroll_still=0;
+    r->scroll_valid=true; r->scroll_x=x; r->scroll_y=y; r->scroll_h=h; r->scroll_v=v;
+}
 uint32_t ScRendererMapPixel(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     if (!r->rom_is_us || !r->rom || x<0 || y<0 || x>=960 || y>=800)
         return color(p,0);
@@ -253,11 +280,12 @@ bool ScRendererResize(ScRenderer *r,ScViewport v) {
 void ScRendererDestroy(ScRenderer *r) { free(r->pixels); memset(r,0,sizeof(*r)); }
 static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     uint32_t *out=r->pixels+(size_t)(y+r->view.core_y)*r->view.width;
-    bool city=r->rom_is_us && ram[0x14]==0 && u16(ram,0x3e)!=0 &&
-              PPU_mode(p)==1 && ((p->screenEnabled[0]|p->screenEnabled[1])&2) &&
-              r->wood_layer<0 && !(!(p->screenEnabled[0]&2) && (p->screenEnabled[0]&1));
+    bool city=city_live(r,p,ram);
     r->city_frame|=city;
-    int sx=(int16_t)u16(ram,0x1bd)*8, sy=(int16_t)u16(ram,0x1bf)*8;
+    /* WRAM supplies cells, the PPU supplies the 2-pixel steps. At a tile
+     * boundary WRAM can lag a frame; preserve measured PPU motion then. */
+    int sx=r->scroll_x+r->scroll_adjust_x+scroll_delta(p->hScroll[1],r->scroll_h);
+    int sy=r->scroll_y+r->scroll_adjust_y+scroll_delta(p->vScroll[1],r->scroll_v);
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
         if (y>=0 && y<224 && local>=0 && local<256) continue; /* copied from native */
@@ -308,6 +336,7 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         else if (ram[0x14]!=2 || PPU_forcedBlank(p) || !PPU_brightness(p)) r->title_live=false;
         find_wood(r,p,ram);
         find_lights(r,p);
+        track_scroll(r,p,ram);
     }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);

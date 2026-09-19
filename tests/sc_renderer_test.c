@@ -112,6 +112,19 @@ int main(void) {
     ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
     ScRendererLine(&r,p,ram,179,native);
     assert(r.light_pitch==64 && r.pixels[179*512+257]==0xffff0000);
+    /* Fine scroll wraps before WRAM advances its coarse cell. The margin
+     * must advance by two pixels, not jump backwards by six. */
+    ram[0x14]=0; ram[0x3e]=1; ram[0x1bd]=10; ram[0x1bf]=10;
+    p->screenEnabled[0]=2; p->hScroll[1]=86; p->vScroll[1]=80;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==86);
+    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==88);
+    ram[0x1bd]=11; p->hScroll[1]=90; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==90 && r.scroll_adjust_x==0);
+    p->hScroll[1]=88; ScRendererLine(&r,p,ram,0,native);
+    p->hScroll[1]=86; ScRendererLine(&r,p,ram,0,native);
+    assert(r.scroll_x+r.scroll_adjust_x==86);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;
