@@ -184,9 +184,11 @@ static void track_map_swap(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
     }
     r->map_valid=true;
 }
-static void object_row(const ScRenderer *r,const Ppu *p,int y,uint8_t *pixels) {
-    memset(pixels,0,(size_t)r->view.width);
-    for (int slot=127;slot>=0;--slot) {
+static void object_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) {
+    memset(pixels,0,(size_t)r->view.width*sizeof(*pixels));
+    int first=PPU_objPriority(p) ? (p->oamaddl&0xfe)/2 : 0;
+    for (int rank=127;rank>=0;--rank) {
+        int slot=(first+rank)&127;
         if (!r->object_grace[slot]) continue; /* parked HUD/cursor copies */
         int row=(y+1-r->object_y[slot])&255;
         if (row>=64) continue;
@@ -195,7 +197,7 @@ static void object_row(const ScRenderer *r,const Ppu *p,int y,uint8_t *pixels) {
             int x=left+dx;
             if (x<0 || x>=r->view.width) continue;
             unsigned ci=sprite_pixel(p,slot,dx,row);
-            if (ci) pixels[x]=(uint8_t)ci;
+            if (ci) pixels[x]=(uint16_t)(ci|(((p->oam[slot*2+1]>>12)&3)<<8));
         }
     }
 }
@@ -372,7 +374,7 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
         r->held_ppu->window2left=p->window2left; r->held_ppu->window2right=p->window2right;
         p=r->held_ppu;
     }
-    uint8_t objects[SC_MAX_CANVAS];
+    uint16_t objects[SC_MAX_CANVAS];
     if (city) object_row(r,p,y,objects);
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
@@ -391,9 +393,10 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
                 int yy=y<0 ? 0 : y>223 ? 223 : y;
                 samples[sub]=bg_pixel(p,2,edge,yy+1); layers[sub]=samples[sub] ? 2 : 5;
             }
-            if (objects[x] && (p->screenEnabled[sub]&16) &&
+            unsigned obj=objects[x]&255, priority=objects[x]>>8;
+            if (obj && (!samples[sub] || priority>=(over ? 3u : 2u)) && (p->screenEnabled[sub]&16) &&
                 (!(p->screenWindowed[sub]&16) || !window_contains(p,4,edge))) {
-                samples[sub]=objects[x]; layers[sub]=objects[x]<192 ? 6 : 4;
+                samples[sub]=obj; layers[sub]=obj<192 ? 6 : 4;
             }
         }
         out[x]=composite_color(p,samples[0],layers[0],samples[1],layers[1],edge);

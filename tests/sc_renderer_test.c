@@ -127,7 +127,7 @@ int main(void) {
     assert(r.scroll_x+r.scroll_adjust_x==86);
     /* A moving vehicle keeps its positive X across 255 and the classic
      * 352-pixel limit. A teleported parked HUD slot must remain hidden. */
-    p->screenEnabled[0]=18; p->oam[0]=(100<<8)|252; p->oam[1]=0x0800;
+    p->screenEnabled[0]=18; p->oam[0]=(100<<8)|252; p->oam[1]=0x3800;
     p->cgram[193]=31; p->highOam[0]=0;
     ScRendererLine(&r,p,ram,0,native);
     for (int x=256;x<=360;x+=4) {
@@ -136,6 +136,14 @@ int main(void) {
         ScRendererLine(&r,p,ram,99,native);
         assert(r.pixels[99*512+x]==0xffff0000);
     }
+    p->cgram[1]=31<<5; /* opaque terrain */
+    for (int y=0;y<8;++y) p->vram[16+y]=0xff;
+    p->oam[1]=0x0801; /* low-priority red object behind terrain */
+    ScRendererLine(&r,p,ram,99,native);
+    assert(r.pixels[99*512+360]==0xff00ff00);
+    p->oam[1]=0x3801;
+    ScRendererLine(&r,p,ram,99,native);
+    assert(r.pixels[99*512+360]==0xffff0000);
     p->oam[0]=(100<<8)|128; p->highOam[0]=1;
     ScRendererLine(&r,p,ram,0,native);
     assert(!r.object_grace[0]);
