@@ -33,7 +33,8 @@ def main():
     def run(name,opts,frames,inputs,state=None,save=False,capture_start=0):
         path=root/name; path.mkdir()
         child=env|{'SC_DUMP_DIR':str(path),'SC_DUMP_INTERVAL':'100',
-                   'SC_DUMP_START':str(capture_start),'SC_STATE_TRACE':str(path/'state.txt')}
+                   'SC_DUMP_START':str(capture_start),'SC_STATE_TRACE':str(path/'state.txt'),
+                   'SC_RENDER_AUDIT':'1'}
         if save: child|={'SC_SAVE_AT':'2300','SC_SAVE_PATH':str(path/'city.state')}
         cmd=[str(exe),str(rom),'--qualify',str(frames),'--view-position','Center']+opts+inputs
         if state: cmd+=['--load-state',str(state)]
@@ -52,7 +53,12 @@ def main():
             assert b.size==expected,(wide,b.size,expected)
             x=(b.width-256)//2 if position=='Center' else 0
             y=(b.height-224)//2 if position=='Center' else 0
-            assert a.tobytes()==b.crop((x,y,x+256,y+224)).tobytes(),f'native pixels changed: {wide/f.name}'
+            audit=json.loads((wide/(f.name+'.json')).read_text())
+            assert (audit['core_x'],audit['core_y'])==(x,y)
+            for row,mask in enumerate(audit['edge_repairs']):
+                assert mask in range(4)
+                left=8 if mask&1 else 0; right=248 if mask&2 else 256
+                assert a.crop((left,row,right,row+1)).tobytes()==b.crop((x+left,y+row,x+right,y+row+1)).tobytes(),f'native pixels changed: {wide/f.name} row {row}'
         Image.open(wide/shots[-1].name).save(wide/'preview.png')
         results.append({'case':wide.name,'size':expected,'frames':len((wide/'state.txt').read_text().splitlines()),
                         'native_captures':len(shots),'state_equal':True})

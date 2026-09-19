@@ -25,6 +25,7 @@ typedef struct ScRenderer {
     uint8_t held_map[24000], previous_map[24000];
     bool map_valid, map_hold, map_confirmed, map_dark;
     int map_quiet, map_age, held_x, held_y;
+    uint8_t repaired_edges[224]; /* per row: bit 0 left 8 px, bit 1 right */
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);

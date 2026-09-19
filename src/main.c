@@ -5809,6 +5809,15 @@ static bool write_ppm(const char *path) {
       if (fwrite(rgb, 1, 3, f) != 3) { fclose(f); return false; }
     }
   }
+  if (s_custom_video.enabled && getenv("SC_RENDER_AUDIT")) {
+    char audit_path[1100]; snprintf(audit_path,sizeof audit_path,"%s.json",path);
+    FILE *audit=fopen(audit_path,"w");
+    if (!audit) { fclose(f); return false; }
+    fprintf(audit,"{\"core_x\":%d,\"core_y\":%d,\"edge_repairs\":[",
+            s_custom_renderer.view.core_x,s_custom_renderer.view.core_y);
+    for (int y=0;y<224;++y) fprintf(audit,"%s%u",y ? "," : "",s_custom_renderer.repaired_edges[y]);
+    fputs("]}\n",audit); fclose(audit);
+  }
   return fclose(f) == 0;
 }
 

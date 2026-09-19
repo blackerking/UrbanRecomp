@@ -330,6 +330,20 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
     }
     return composite_color(p,ci,owner,0,5,x);
 }
+static bool edge_has_overlay(const Ppu *p,int y,int left) {
+    for (int x=left;x<left+8;++x) {
+        for (int layer=0;layer<=2;layer+=2)
+            if ((p->screenEnabled[0]&(1<<layer)) &&
+                (!(p->screenWindowed[0]&(1<<layer)) || !window_contains(p,layer,x)) &&
+                bg_pixel(p,layer,x,y+1)) return true;
+        if (!(p->screenEnabled[0]&16)) continue;
+        for (int slot=0;slot<128;++slot) {
+            int sx=sprite_x(p,slot); if (sx>=256) sx-=512;
+            if (sprite_pixel(p,slot,x-sx,(y+1-(p->oam[slot*2]>>8))&255)) return true;
+        }
+    }
+    return false;
+}
 void ScRendererInit(ScRenderer *r,const uint8_t *rom,size_t size,bool is_us) {
     memset(r,0,sizeof(*r)); r->rom=rom; r->rom_size=size; r->rom_is_us=is_us; r->wood_layer=-1;
 }
@@ -378,7 +392,9 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     if (city) object_row(r,p,y,objects);
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
-        if (y>=0 && y<224 && local>=0 && local<256) continue; /* copied from native */
+        if (y>=0 && y<224 && local>=0 && local<256 &&
+            !((local<8 && (r->repaired_edges[y]&1)) ||
+              (local>=248 && (r->repaired_edges[y]&2)))) continue;
         if (!city) { out[x]=scenery(r,p,ram,local,y); continue; }
         unsigned ci=cell_pixel(r,p,ram,sx+local,sy+y+1,false);
         unsigned over=cell_pixel(r,p,ram,sx+local+8,sy+y+9,true);
@@ -435,10 +451,19 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
         track_objects(r,p,ram);
         track_map_swap(r,p,ram);
     }
+    /* The 32-column guest tilemap stages incoming tiles in CRT overscan.
+     * Reconstruct only those edge bands, and never cover UI or native OBJ. */
+    r->repaired_edges[line]=0;
+    if (r->view.width>256 && city_live(r,p,ram) && (p->screenEnabled[0]&2)) {
+        if (!edge_has_overlay(p,line,0)) r->repaired_edges[line]|=1;
+        if (!edge_has_overlay(p,line,248)) r->repaired_edges[line]|=2;
+    }
     if (line==0) for (int y=-r->view.core_y;y<0;++y) render_row(r,p,ram,y);
     render_row(r,p,ram,line);
-    memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x,
-           native,256*sizeof(*native));
+    int first=(r->repaired_edges[line]&1) ? 8 : 0;
+    int end=(r->repaired_edges[line]&2) ? 248 : 256;
+    memcpy(r->pixels+(size_t)(line+r->view.core_y)*r->view.width+r->view.core_x+first,
+           native+first,(size_t)(end-first)*sizeof(*native));
     if (line==223) {
         for (int y=224;y<r->view.height-r->view.core_y;++y) render_row(r,p,ram,y);
         fill_flat_margins(r);

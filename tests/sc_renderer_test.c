@@ -159,6 +159,23 @@ int main(void) {
     assert(r.map_hold && r.map_dark && r.pixels[256]==0xff000000);
     p->inidisp=15; ScRendererLine(&r,p,ram,0,native);
     assert(!r.map_hold && r.held_ppu->cgram[1]==123);
+    /* Wrapped guest edge tiles are replaced by world terrain; an opaque HUD
+     * tile protects the whole edge band on its row. The interior stays exact. */
+    memset(p,0,sizeof(*p)); memset(ram,0,0x20000);
+    p->inidisp=15; p->bgmode=1; p->screenEnabled[0]=2;
+    p->brightnessMult[31]=255; p->cgram[1]=31<<5;
+    ram[0x3e]=1; ram[0x1bd]=10; ram[0x1bf]=10;
+    for (int y=0;y<8;++y) p->vram[y]=0xff;
+    for (int x=0;x<256;++x) native[x]=0xffff0000;
+    ScRendererResetHistory(&r); ScRendererLine(&r,p,ram,0,native);
+    assert(r.repaired_edges[0]==3);
+    assert(r.pixels[0]==0xff00ff00 && r.pixels[255]==0xff00ff00);
+    assert(r.pixels[8]==0xffff0000 && r.pixels[247]==0xffff0000);
+    p->screenEnabled[0]=6; p->bgTileAdr=0x100; p->bgXsc[2]=0x60;
+    p->vram[0x6000]=1;
+    for (int y=0;y<8;++y) p->vram[0x1008+y]=0xff;
+    ScRendererLine(&r,p,ram,0,native);
+    assert(r.repaired_edges[0]==2 && r.pixels[0]==0xffff0000);
     ScRendererDestroy(&r); free(p); free(before); free(ram); free(rom);
     puts("PASS: tile flips, overlays, map bounds, native pixels, tall/wide surfaces and PPU immutability");
     return 0;
