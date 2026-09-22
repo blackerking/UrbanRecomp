@@ -176,6 +176,19 @@ void ScVehicles_Reset(void) {
   memset(s_shown, 0, sizeof s_shown);
 }
 
+int ScVehicles_Shown(ScVehicleSprite *out, int max) {
+  int n = 0;
+  for (int s = 127; s >= kFirstSlot && n < max; s--) {
+    if (!s_shown[s].on) continue;
+    out[n].slot = s;
+    out[n].x = s_shown[s].x;
+    out[n].y = s_shown[s].y;
+    out[n].large = s_shown[s].large != 0;
+    n++;
+  }
+  return n;
+}
+
 int ScVehicles_Draw(uint8_t *pixels, size_t pitch, int x0, int x1, int height,
                     ScVehicleShade shade, void *ctx) {
   static const uint8_t kSizes[8][2] = {

@@ -22,6 +22,14 @@ void ScVehicles_OnPc(unsigned bank, unsigned pc, uint16_t x, uint16_t y,
 /* Forget every margin sprite (a state load, a new game). */
 void ScVehicles_Reset(void);
 
+/* The kept sprites the current frame shows, for a renderer that draws them
+ * itself: the OAM slot (its tile, attributes and palette are live there),
+ * the screen position (x from 240 up), and the size c019 gives it. Highest
+ * slot first, so drawing in order lets the lower slot win, as on the PPU.
+ * Returns the count. */
+typedef struct { int slot, x, y; bool large; } ScVehicleSprite;
+int ScVehicles_Shown(ScVehicleSprite *out, int max);
+
 /* Paint the margin sprites the frame shows into `pixels` (0xAARRGGBB rows,
  * screen x = buffer x), columns [x0, x1) only, rows [0, height). `shade`
  * turns a colour into what the margin shows (dimming); NULL leaves it.
