@@ -22,6 +22,10 @@ with the title sign still crossing the margin correctly.
 The missing pins remain open, and are a different problem entirely.
 
 ## 2. Locomotive not drawn in the widescreen margins
+
+**FIXED 2026-09-22** by `src/sc_vehicles.c`: the game drops every object
+sprite at `00:c019` once it lies right of the view, so the host keeps what
+it drops and draws it in the margin. See docs/ROM_MAP.md, "`01:f11a`".
 `savestate_3.bin` -- the state shows it as it appears in the normal view.
 
 **Diagnosed, not fixed. It is not an OAM decode problem at all.**
@@ -227,6 +231,14 @@ than a full clamp.
 
 ## 8. Selector pins and win marks missing on the outer columns -- CLOSED
 
+**FIXED 2026-09-22.** The game does emit the margin cards' pins and marks;
+the pins sit in the ambiguous band, the marks decode negative, and the
+strict decode hid both. They are now claimed by exact position, each sprite
+recomputed from records `$12` (pins) and `$29` (marks) and matched against
+OAM (`selector_hint_margin_sprites()`); the hidden bracket is left alone.
+The earlier mark matcher looked at each record's base, where none of its
+four sprites sits, and never matched.
+
 Reported 2026-09-05: on the scenario selector the pins AND the win marks are
 missing on the left and right columns. Same root cause as the locomotive, and
 now confirmed directly on that screen.
@@ -389,7 +401,11 @@ After the change the border/panel ratio holds at **0.21 for every frame** of the
 fade and both reach 0 together. All eight save states are pixel-identical at
 rest.
 
-## The train shows one tile then vanishes -- diagnosed, not fixed
+## The train shows one tile then vanishes -- FIXED 2026-09-22
+
+**FIXED 2026-09-22** by `src/sc_vehicles.c`: the game drops every object
+sprite at `00:c019` once it lies right of the view, so the host keeps what
+it drops and draws it in the margin. See docs/ROM_MAP.md, "`01:f11a`".
 
 Reported from play: on the normal map the train is fine, then in the margin
 "it is shown just one tile and then it disappears suddenly".
@@ -519,7 +535,24 @@ scattering marks across scenarios never played and setting bit 15, the game's
 own "all six beaten" flag. Bit 8 is free -- the six scenarios own 0-5, Las
 Vegas and free play 6-7.
 
-### Known bug: Sylt shows no win mark
+### Sylt shows no win mark -- FIXED 2026-09-22
+
+Sylt's card now carries a pin (Rio's colour, as Sylt takes Rio's entries)
+and, with bit 8 of `$42` set, record `$29` one column right of Las Vegas's
+mark, both placed by `selector_sylt_sprites()` in parked slots. Checked in
+the widescreen at scroll `$50` and `$A0` and at native width.
+
+The fades, reported from play right after: going to the fax and back, the
+margin pins and marks vanished. The selector is on screen for `$14` = `$0A`
+(fade-in), `$0B` and `$0C` (fade-out to the fax), and everything was gated
+on `$0B`. With that widened, the fade-in still showed the shipped map --
+black on the right, no Sylt card, Sylt's pin and mark over the black --
+because the wood extension and the cards were made at `03:ddb6`, after the
+fade. They are now also made on `$0A` once the selector's one big VRAM DMA
+has landed (`selector_after_upload()`), so the whole selector fades in
+together; this also closes the Sylt card popping in after the fade.
+
+The original note:
 
 Not fixed, by decision. The drawer at `03:ded0` walks exactly eight bits with
 two eight-entry coordinate tables (`$03df20`, `$03df30`), so bit 8 has no

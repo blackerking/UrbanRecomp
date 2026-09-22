@@ -442,33 +442,25 @@ Two lessons from the unsuccessful rounds still hold:
   APU on the fiber path (`SC_FIBER=1`); the interpreter path uses this host's
   corrected constant.
 
-## OPEN -- title: the publisher and title building parts move wrongly
+## RESOLVED (2026-09-22) -- title: the billboard on the building steps -- it is the game's own
 
-Reported from play 2026-08-27, straight after the light-row fix below. Not yet
-investigated at all; this entry is the report and a starting point, nothing
-more.
+Reported from play 2026-08-27 as the title's building pieces moving wrongly, and
+narrowed down on 2026-09-22: the SIMCITY billboard, OBJ laid over the MAXIS
+lettering of the building (BG), does not always slide along with the building
+but catches up again.
 
-The title animates its logo out of building pieces. Those pieces are moving
-wrongly. Which way is wrong -- speed, direction, offset, or only in the
-widescreen margins -- is NOT recorded, so establish that first from a capture
-rather than guessing.
+Measured per frame (`SC_DUMP_INTERVAL=1`, frames 950-1390, a tight window on
+the billboard and one on the building front below it): in the authentic 256-px
+view the billboard moves exactly **one frame after** the building, every time.
+Both move 1 px every 2 frames, so it sits 1 px off on every other frame. The
+classic widescreen shows the same in its margins, because it takes the margin
+sprites from the same OAM.
 
-Where to start:
-
-1. `SC_DUMP_DIR=<dir> SC_DUMP_INTERVAL=1` while the title plays, then measure
-   the pieces frame to frame. Interactive capture works now, so a real session
-   can be recorded and analysed.
-2. `SC_LAYER_MASK` to find out WHAT draws them -- bit0 BG1, bit1 BG2, bit2 BG3,
-   bit3 BG4, bit4 OBJ. The light row is OBJ; if the building pieces are OBJ too,
-   `widen_title_lights()` is the only host code touching title sprites and is
-   the first suspect. If they are a background, the margin/clamp path is.
-3. Compare against `SC_WIDESCREEN=0`. If the motion is correct at authentic
-   width, it is ours; if it is wrong there too, it is the guest or the device
-   model, and none of the widescreen code is implicated.
-
-Note the light-row bug found the same day was a host bug in title sprite
-handling, so step 2 is worth doing before anything else. But do not assume it:
-the two may be unrelated.
+**bsnes shows the same step**, confirmed by the user. So the sprite update
+trailing the scroll by a frame is the game's own timing, and nothing here
+changes it. The adaptive renderer (PR #1) drew its margin copy in step with the
+building instead, which makes the billboard jump once where it crosses into the
+native view; that is issue #2, item 15.
 
 ## Title lights: fixed 2026-08-27
 

@@ -608,8 +608,13 @@ the card spacing. Y is `$27` on the top row.
 Supplied at `03:debb`, after `03:deb2`/`03:deb8` have stored x and y, with the
 same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
 
-The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
-is never marked beaten so nothing reads past them.
+The win-mark tables at `03:df20`/`03:df30` are eight entries as well, and
+`03:ded0` walks only eight bits, so the ROM never marks Sylt. The host adds
+Sylt's pin and mark itself (`selector_sylt_sprites()` in src/main.c): the
+selector's sprites are sprite-text records -- `$12` the eight pins from
+(`$A0`-`$16`, `$60`), `$11` the blinking bracket, `$29` a mark from each
+(`$DF30`,Y-`$16`, `$DF20`,Y) -- and Sylt's are Las Vegas's moved one
+column, 80 px, right.
 
 ### The title's light row cannot be widened by any display setting
 
@@ -3570,6 +3575,48 @@ either step so far.
 
 ### `01:f11a` -- why moving objects die at the right edge
 
+**Fixed 2026-09-22, and the reading below was only half right.** `01:f11a`
+is the scroll shift: while the player pans, it moves every object sprite by
+the pan step `$7C` between the game's four-frame updates, and a carry sets
+the sprite's X high bit through `00:c22c` -- it hides the sprite, it does not
+despawn anything. What really drops an object at the edge is its placement.
+The objects are map objects with cell positions, put on screen in groups
+every fourth frame by `00:bc3f`:
+
+| object | flag | slots | placed by |
+|---|---|---|---|
+| `$00` | `$0A91` | 119-122 | `00:bd9c` -> `00:bf80` |
+| `$04` | `$0A93` | 123 (one sprite, nudged -`$91`/+6 at `00:bd41`) | `00:bd15` -> `00:bf80` |
+| `$08` | `$0A8B` | 109-112 -- slot 109 is the "train" of the report above | `00:bcc4` -> `00:bf80` |
+| `$10` the plane | `$0A8D` | 113-116, tiles by heading `$0A9F` | `00:bdc8` -> `00:bf80` |
+| `$14` the ship | `$0A95` | 124-127 | `00:bec9` -> `00:bf80` |
+| `$18` | -- | 124-127 | `00:c713` -> `00:bf80` |
+| the helicopter | `$0A8F` | 117 body, 118 rotor (8x8) | `00:be1c` |
+
+Each group's update first parks its slots (`00:c0f5`, `00:c154`, which falls
+into `00:c180` for 124-127), then calls `00:c019` once per 16x16 sprite:
+cell (`$91`, `$94`) plus the object's fine offset (`$0A6D,Y`, `$0A6B,Y`),
+relative to the view's top-left cell (`$01BD`, `$01BF`). `c019` returns
+without writing when the cell is 32 or more columns right of the view -- so
+from screen x 256 on, the slot simply stays parked, with its tile and
+attributes still written by the object's code.
+
+`src/sc_vehicles.c` keeps those sprites: at `c019`'s entry it computes the
+position the game would, records the slot when the game is about to drop it
+for being right of the view, follows the park, the scroll shift and the
+`bd41` nudge, snapshots at the full NMI (`00:80c0`) with the OAM DMA, and
+`host_map_compose()` draws the records into the margin from the guest's own
+OAM tile, palette and VRAM. Checked on the ship (savestate 3 of 2026-09-22),
+the plane and the helicopter (savestate 2, panned): whole, and moving by the
+same 4 px a frame as the map on both sides of the edge while panning.
+
+The same test turned up an older fault: the compositor's leading-edge cover
+paints host terrain over the guest's last few columns during a pan, and took
+the guest's sprites there with it, so a vehicle came apart at the edge. The
+margin OBJ pass is now laid back from where that cover starts.
+
+The original notes follow.
+
 Reported from play: the locomotive and the selector pins are missing "only in
 widescreen". That framing is right, and an earlier note here calling it
 "culling" was too vague. The mechanism is an **8-bit overflow**, not a clip:
@@ -3608,6 +3655,12 @@ reveals get none. Recorded already as a known gap for the ninth card; it is the
 same for the outer shipped ones.
 
 ## The train and the plane: what they actually are
+
+**Correction (2026-09-22).** The plane is not a tile: it is object `$10`, a
+four-sprite map object in slots 113-116, and the ship, the helicopter and
+slot 109's object are the same kind -- see the table under "`01:f11a`"
+above. The animated tile band described below is real; these vehicles are
+not part of it.
 
 Asked for as "decomp the train function and the plane function". There is no
 such function, and finding that out took ruling out two plausible systems.
@@ -5051,6 +5104,15 @@ column 6 (`#$004E` when `$01FB = 2`). German draws at `#$0044`, French at
 `#$0046`. The operand is found by the code around it in both cartridges and
 copied; being code, it relies on the `force_lle` above.
 
+**The loan term** is `$02:A66E`: the two digits of `$0B1D` (years left on the
+loan, the "21" in "= 500 x 21" on the bank's page), `ADC #$3C50` into
+`$7E2B2A`/`$7E2B6A` for the ones and `$7E2B28`/`$7E2B68` for the tens, column
+21 and 20. German draws them at columns 23 and 22 (`2E`/`6E`/`2C`/`6C`), off
+its "x" at column 20, which the US columns printed over; French keeps the US
+cells. Copied the same way, and `recomp/bank02.cfg` keeps the function on the
+interpreter with its two exits (`m1x1` when `$0B1D` is 0, `m0x0` otherwise)
+declared.
+
 **The word strips** are entries 0-12 of the word list: the evaluation's
 problems (0-6) and city category (7-12); entries 13-15 are the level names.
 The US draws the strips as artwork at report tiles `$181`..`$1DC` through the
@@ -5257,6 +5319,17 @@ and `write_packets` notes any bytes two entries of one packet write
 differently on a screen they share. The German title set sits at the
 US address, hidden from a packet scan by a false stream in front of it, so a
 donor's copy is looked for there first.
+
+The bank set comes with its map. German signs the bank's loan line
+RUECKZAHLUNG, nine tiles on `$120`-`$128` and `$130`-`$138`, where the US signs
+LOANS in five on `$030`-`$034` and `$040`-`$044`; the report screens' BG1 map
+`$0B:B5F3` (German `$0B:C526`) differs in exactly those 18 cells, rows 75-76,
+and the German set blanks the LOANS tiles. Taking the set without the map
+left an empty box beside "= 500 x 21" (reported from play, 2026-09-22).
+`tilesets` writes the map as `bank_map.txt`, one line of hex words per map
+row, and the import takes the words that differ from the US; French draws
+PRETS on the LOANS tiles and keeps the map. Checked offline: the US folder
+imports to no change, the German folder to exactly the donor route.
 
 The in-city set `$09:C0FB` is the notices' font below tile `$100` (German
 reorders it, and the notices import writes its accents at `$F0`-`$FE`), and

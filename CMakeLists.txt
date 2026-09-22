@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(UrbanRecomp VERSION 1.0.1 LANGUAGES C)
+project(UrbanRecomp VERSION 1.0.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -53,6 +53,8 @@ add_executable(UrbanRecomp
     src/sc_sram.c
     src/sc_icon.c
     src/sc_mapview.c
+    src/sc_vehicles.c
+    src/sc_selector.c
     src/sc_mapgen.c
         src/sc_decomp.c
     src/sc_video.c
@@ -392,6 +394,8 @@ if(SC_GEN_SOURCES)
         src/sc_sram.c
         src/sc_icon.c
         src/sc_mapview.c
+        src/sc_vehicles.c
+        src/sc_selector.c
         ${SC_GEN_SOURCES}
         src/sc_hle.c
         src/sc_mapgen.c
