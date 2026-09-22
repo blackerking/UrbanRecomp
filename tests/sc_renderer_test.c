@@ -113,8 +113,9 @@ int main(void) {
     for (int y=0;y<8;++y) p->vram[y]=0xff;
     p->oam[8]=(180<<8)|1; p->highOam[1]=1;
     ram[0x14]=1; ScRendererLine(&r,p,ram,0,native);
-    ScRendererLine(&r,p,ram,179,native);
-    assert(r.light_pitch==64 && r.pixels[179*512+385]==0xffff0000);
+    /* OAM Y 180: row 0 on line 180, as the PPU draws it. */
+    ScRendererLine(&r,p,ram,180,native);
+    assert(r.light_pitch==64 && r.pixels[180*512+385]==0xffff0000);
     /* Fine scroll wraps before WRAM advances its coarse cell. The margin
      * must advance by two pixels, not jump backwards by six. */
     ram[0x14]=0; ram[0x3e]=1; ram[0x1bd]=10; ram[0x1bf]=10;
@@ -129,24 +130,25 @@ int main(void) {
     p->hScroll[1]=86; ScRendererLine(&r,p,ram,0,native);
     assert(r.scroll_x+r.scroll_adjust_x==86);
     /* A moving vehicle keeps its positive X across 255 and the classic
-     * 352-pixel limit. A teleported parked HUD slot must remain hidden. */
+     * 352-pixel limit. A teleported parked HUD slot must remain hidden.
+     * OAM Y 100: row 0 on line 100, as the PPU draws it. */
     p->screenEnabled[0]=18; p->oam[0]=(100<<8)|252; p->oam[1]=0x3800;
     p->cgram[193]=31; p->highOam[0]=0;
     ScRendererLine(&r,p,ram,0,native);
     for (int x=256;x<=360;x+=4) {
         p->oam[0]=(100<<8)|(x&255); p->highOam[0]=1;
         ScRendererLine(&r,p,ram,0,native);
-        ScRendererLine(&r,p,ram,99,native);
-        assert(r.pixels[99*512+x]==0xffff0000);
+        ScRendererLine(&r,p,ram,100,native);
+        assert(r.pixels[100*512+x]==0xffff0000);
     }
     p->cgram[1]=31<<5; /* opaque terrain */
     for (int y=0;y<8;++y) p->vram[16+y]=0xff;
     p->oam[1]=0x0801; /* low-priority red object behind terrain */
-    ScRendererLine(&r,p,ram,99,native);
-    assert(r.pixels[99*512+360]==0xff00ff00);
+    ScRendererLine(&r,p,ram,100,native);
+    assert(r.pixels[100*512+360]==0xff00ff00);
     p->oam[1]=0x3801;
-    ScRendererLine(&r,p,ram,99,native);
-    assert(r.pixels[99*512+360]==0xffff0000);
+    ScRendererLine(&r,p,ram,100,native);
+    assert(r.pixels[100*512+360]==0xffff0000);
     p->oam[0]=(100<<8)|128; p->highOam[0]=1;
     ScRendererLine(&r,p,ram,0,native);
     assert(!r.object_grace[0]);

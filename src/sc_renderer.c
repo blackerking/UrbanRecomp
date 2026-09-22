@@ -92,15 +92,28 @@ static void find_lights(ScRenderer *r,const Ppu *p) {
     if (!r->title_live) return;
     int best=2;
     for (int i=0;i<104;++i) {
-        int y=p->oam[i*2]>>8, lo=256, pitch=512, count=0;
+        int y=p->oam[i*2]>>8, lo=256, pitch=512, count=0, xs[104];
         if (y<150 || y>215) continue;
+        bool seen=false;   /* one pass per row, not per member */
+        for (int k=0;k<i && !seen;++k)
+            seen=p->oam[k*2+1]==p->oam[i*2+1] && (p->oam[k*2]>>8)==y;
+        if (seen) continue;
         for (int j=0;j<104;++j) {
             int x=sprite_x(p,j);
             if (x>=256 || p->oam[j*2+1]!=p->oam[i*2+1] || (p->oam[j*2]>>8)!=y) continue;
-            ++count;
-            if (x<lo) { if (lo-x<pitch) pitch=lo-x; lo=x; }
-            else if (x>lo && x-lo<pitch) pitch=x-lo;
+            int at=count++;
+            while (at>0 && xs[at-1]>x) { xs[at]=xs[at-1]; --at; }
+            xs[at]=x;
         }
+        /* The pitch is the smallest gap between two neighbours. This used to
+         * start from lo = 256 and count each member's distance to it as a
+         * gap, so the first member visited set it to 256 - x: 20 px for a
+         * light at 236. As the row moved left that changed every frame, and
+         * the copies in the margins stretched, squeezed and seemed to run
+         * backwards -- reported from play as a wrong animation. */
+        if (count) lo=xs[0];
+        for (int k=1;k<count;++k)
+            if (xs[k]-xs[k-1]>0 && xs[k]-xs[k-1]<pitch) pitch=xs[k]-xs[k-1];
         if (count>best && pitch>0 && pitch<=128) {
             best=count; r->light_slot=i; r->light_x=lo; r->light_pitch=pitch;
         }
@@ -221,7 +234,10 @@ static void object_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) 
     for (int rank=127;rank>=0;--rank) {
         int slot=(first+rank)&127;
         if (!r->object_grace[slot]) continue; /* parked HUD/cursor copies */
-        int row=(y+1-r->object_y[slot])&255;
+        /* Row 0 is on line Y, as the PPU draws it (it evaluates a line's
+         * sprites one line early). y+1 put every margin sprite a row above
+         * the core's half of the same object -- the train at the seam. */
+        int row=(y-r->object_y[slot])&255;
         if (row>=64) continue;
         int left=r->object_x[slot]+r->view.core_x;
         for (int dx=0;dx<64;++dx) {
@@ -316,10 +332,13 @@ static void find_wood(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
 static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     unsigned screen=ram[0x14], ci=0;
     int owner=5;
-    /* $0A is the selector's fade-in (from the menu, and back from the fax)
-     * once its map is in VRAM; before that it is the fax fading out. */
-    bool selector=screen==11 || screen==12 ||
-        (screen==10 && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000);
+    /* The selector's screens are $0A-$0C, but each also shows something
+     * else for part of its length: $0A is the fax or menu fading out until
+     * the selector's map arrives, and $0C is the fax already fading in. So
+     * the map on screen decides. Keyed on $0B/$0C alone, the fax's desk was
+     * left out of the margins for its whole fade-in and then popped in. */
+    bool selector=screen>=10 && screen<=12 && PPU_mode(p)==0 &&
+        PPU_bgTilemapAdr(p,0)==0x3000;
     if (r->title_live && PPU_mode(p)==1) {
         /* Title's sky and skyline are repeating scenery; title text/sprites
          * remain in the native view. Per-line palette preserves its gradient. */
@@ -335,7 +354,7 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
         int depth=PPU_mode(p)==0 || layer==2 ? 2 : 4;
         ci=tile_pixel(p,word,PPU_bgTileAdr(p,layer),tx,ty,depth,PPU_mode(p)==0 ? layer*32 : 0);
         owner=layer;
-    } else if (selector && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000) {
+    } else if (selector) {
         /* Cards and translated names already exist in the wide guest maps.
          * Show that single strip, then continue the desk beyond it. Wrapping
          * the entire layer would repeat cards on ultrawide displays. */
@@ -364,7 +383,7 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
     if (r->title_live && r->light_slot>=0 && (p->screenEnabled[0]&16)) {
         int dx=(x-r->light_x)%r->light_pitch;
         if (dx<0) dx+=r->light_pitch;
-        unsigned light=sprite_pixel(p,r->light_slot,dx,y+1-(p->oam[r->light_slot*2]>>8));
+        unsigned light=sprite_pixel(p,r->light_slot,dx,y-(p->oam[r->light_slot*2]>>8));
         if (light) { ci=light; owner=4; }
     }
     if (r->selector_row && (p->screenEnabled[0]&16)) {
