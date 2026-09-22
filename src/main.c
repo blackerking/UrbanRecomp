@@ -832,6 +832,10 @@ static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
 static void widen_title_lights(void);
+static bool selector_on_screen(void);
+static void selector_after_upload(void);
+static void selector_hint_margin_sprites(void);
+static void selector_sylt_sprites(void);
 static void title_ws_update(void);
 static bool title_ws_live(void);
 static void ws_fill_margins(void);
@@ -1205,6 +1209,8 @@ static void handle_pos_stuff(void) {
       if (title_ws_live() && s_ws_widen_title && s_ws_extra > 0)
         s_bg3_widened = true;
       widen_title_lights();
+      selector_after_upload();
+      selector_sylt_sprites();
       /* BG3 is hard-clamped independent of wsLayerClamp:
        *
        *     if (layer != 2) return extra;
@@ -1385,66 +1391,30 @@ static void handle_pos_stuff(void) {
          * parked second selection bracket back in as fragments during a
          * scroll -- the ghost this file already fought once.
          *
-         * So on this screen the fallback is switched off and the marks are
-         * hinted by name instead. Their positions are not a guess: they are
-         * recomputed from the ROM's own two tables and the live scroll, and
-         * matched against OAM. Nothing else in the margins is claimed. */
-        if (s_ws_oam_strict && g_ram[0x14] == 0x0b && g_ppu) {
-          static const unsigned kMarkX[8] =
-              { 0x0e, 0x5e, 0xae, 0x0e, 0x5e, 0xae, 0xfe, 0xfe };
-          static const unsigned kMarkY[8] =
-              { 0x14, 0x14, 0x14, 0x6c, 0x6c, 0x6c, 0x14, 0x6c };
+         * So on this screen the fallback is switched off and the pins and
+         * marks are claimed by position instead -- every sprite of them
+         * recomputed from the ROM's own records and matched against OAM
+         * (selector_hint_margin_sprites). Nothing else in the margins is
+         * claimed, so the hidden bracket stays hidden.
+         *
+         * The first version matched each mark at its record's BASE, where no
+         * sprite of it sits -- the four sit 17..33 px right and 25..41 down --
+         * and never matched at all, and it left the pins out. So the margin
+         * cards showed neither. */
+        if (s_ws_oam_strict && selector_on_screen() && g_ppu) {
           g_ppu->wsOamMotionGraceOn = 0;
-          const unsigned scroll = g_ram[0x16] | ((unsigned)g_ram[0x17] << 8);
-          const unsigned mask   = g_ram[0x42] | ((unsigned)g_ram[0x43] << 8);
-          for (int b = 0; b < 8; b++) {
-            if (!((mask >> b) & 1u)) continue;
-            const unsigned ex = (kMarkX[b] - scroll) & 0x1ffu;
-            const unsigned ey = kMarkY[b] & 0xffu;
-            if (ex < 256u) continue;          /* on screen; needs no hint */
-            for (int s = 0; s < 128; s++) {
-              const unsigned lo = g_ppu->oam[s * 2];
-              const unsigned hb = g_ppu->highOam[s >> 2];
-              const unsigned x9 =
-                  (lo & 0xffu) | (((hb >> ((s & 3) * 2)) & 1u) << 8);
-              if (x9 != ex || ((lo >> 8) & 0xffu) != ey) continue;
-              /* Past the ambiguous band it decodes negative, so it is the
-               * LEFT hint that admits it; inside the band it is the right. */
-              if (x9 >= 256u + (unsigned)g_ppu->extraRightCur)
-                s_oam_left_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
-              else
-                s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
-              if (getenv("SC_MARK_DIAG"))
-                fprintf(stderr, "[mark] bit=%d slot=%d x9=%u y=%u tile=%u"
-                                " attr=%02x scroll=%u\n",
-                        b, s, x9, ey, g_ppu->oam[s * 2 + 1] & 0xff,
-                        (g_ppu->oam[s * 2 + 1] >> 8) & 0xff, scroll);
-            }
-          }
+          selector_hint_margin_sprites();
         } else if (g_ppu) {
           g_ppu->wsOamMotionGraceOn = 1;
         }
-        /* The scenario selector's missing won-marks CANNOT be fixed here.
-         *
-         * Reported from play: widescreen reveals two card columns the
-         * authentic 256 view never shows (San Francisco/Detroit left, the
-         * ninth scenario right), and those cards carry no red X.
-         *
-         * Releasing the left hints here was tried, and it is wrong. Dumped
-         * OAM ($14=0b, SC_OAM_BAND=2) shows exactly two slots decoding
-         * negative -- 2 and 11 -- and they are not marks. Slots 8-21 are one
-         * selection bracket built from tiles 76/78/96 repeated with flip
-         * bits (attr 34 = none, 74 = H, b4 = V, f4 = both), and 2/11 are a
-         * second such bracket parked off-screen-left. Hardware clips it;
-         * releasing it just paints a stray green bracket in the margin.
-         * Measured: the ONLY pixels the release adds are #63ff00/#21bd00 at
-         * x=16..71, entirely outside any card. Not one red pixel.
-         *
-         * So the marks for the revealed columns are not in OAM at all -- the
-         * game only emits them for cards inside its own 256 px view. Drawing
-         * them would mean synthesising them host-side from the win flags at
-         * $700007 (which apply_unlock_all already reads), which is a new
-         * feature and not a decode fix. */
+        /* Releasing ALL the left hints on the selector was tried once, and
+         * it is wrong: slots 8-21 are the selection bracket, which the blink
+         * hides by setting X bit 8 on its off phase, and releasing them paints
+         * that bracket into a margin. The note that stood here went on to
+         * conclude the margin cards' marks were not in OAM at all; they are
+         * (at x9 463/479 for column 0 at scroll $50), the search for them just
+         * looked in the wrong place. Claiming by exact position, above, takes
+         * the pins and marks and leaves the bracket alone. */
         if (s_ws_oam_strict) {
           /* Strict, with only the slots this host placed itself marked. */
           PpuWsSetOamRightHints(g_ppu, s_oam_right_hints);
@@ -4170,6 +4140,190 @@ static void oam_put(int i, int x, int y, int tile, int attr, int size) {
   *hb = (uint8_t)(*hb & ~(3u << bit));
   if (x9 & 0x100u) *hb = (uint8_t)(*hb | (1u << bit));
   if (size)        *hb = (uint8_t)(*hb | (2u << bit));
+}
+
+/* ── The scenario selector's pins and win marks ───────────────────────────
+ *
+ * The selector draws its sprites afresh every frame in 03:de64, all through
+ * the sprite-text emitter (COP 2), which writes each sprite of a record at
+ * base + (dx, dy) into the next OAM slot:
+ *
+ *   record $12 at ($A0 - $16, $60)            the eight pins, from slot 0
+ *   record $11 at ($DF10,X - $16, $DF00,X)    the selection bracket, only on
+ *                                             the blink's on phase; on the off
+ *                                             phase its slots keep their last
+ *                                             positions with X bit 8 set, and
+ *                                             that is how it hides
+ *   record $29 at ($DF30,Y - $16, $DF20,Y)    one win mark per bit of $42,
+ *                                             from slot 33
+ *
+ * A record is two flag bytes, two bits per sprite (bit 0: dx is negative,
+ * bit 1: large), then (dx, dy, tile, attr) per sprite; an entry with dx = 0
+ * and bit 0 set ends it early (tools/text_tool.py reads them the same way).
+ *
+ * Widescreen shows the cards the authentic view leaves out -- column 0 in the
+ * left margin once the selector scrolls to $50, the Las Vegas column in the
+ * right at $00 -- and the game draws their pins and marks there as well. Raw X
+ * cannot tell them from the hidden bracket: the pins sit in the ambiguous
+ * band, the marks decode negative, and the strict decode hid them all. So the
+ * slots are identified by position instead: every sprite the emitter would
+ * have written for a pin or a mark is recomputed from the records in the ROM,
+ * and an OAM slot matching one exactly is claimed for its margin. The scroll
+ * comes from the pin record's first sprite, the Las Vegas pin in slot 0, so it
+ * is the value the displayed OAM was built with, even mid-scroll.
+ *
+ * Sylt's card, the ninth, is the host's: no record knows it, so it gets
+ * neither pin nor mark from the game. Both are added here in spare slots --
+ * the pin with Rio's colour, since Sylt takes Rio's entries elsewhere too
+ * (03:ce8b's seed), at the Las Vegas pin's place one column (80 px) on, and
+ * record $29 at Las Vegas's mark base one column on when bit 8 of $42 is set,
+ * where the Sylt win is kept. */
+#define SC_SEL_RECORD_TABLE 0x00a164u   /* $00:A164, as text_tool's MENU_TABLE */
+#define SC_SEL_COLUMN_STEP  80          /* card pitch; Sylt is column 4 */
+
+/* The selector is on screen for three screen indices, not one: $0A fades it
+ * in (from the menu, and back from the fax with X), $0B runs it, $0C fades it
+ * out into the fax. Gating on $0B alone dropped every margin pin and mark,
+ * and Sylt's, for the length of both fades -- reported from play. Whether the
+ * OAM really is the selector's is sel_scroll_from_oam's check, not this. */
+static bool selector_on_screen(void) {
+  return g_ram[0x14] >= 0x0a && g_ram[0x14] <= 0x0c;
+}
+
+typedef struct { int dx, dy, tile, attr, large; } ScSpriteRec;
+
+static int sel_record(unsigned idx, ScSpriteRec out[8]) {
+  const uint32_t t = SC_SEL_RECORD_TABLE + idx * 2u;
+  const uint32_t p = snes_read(g_snes, t) | (snes_read(g_snes, t + 1) << 8);
+  const unsigned flags = snes_read(g_snes, p) | (snes_read(g_snes, p + 1) << 8);
+  int n = 0;
+  for (int i = 0; i < 8; i++) {
+    const uint32_t e = p + 2u + (uint32_t)i * 4u;
+    const unsigned dx = snes_read(g_snes, e);
+    const bool neg = (flags >> (i * 2)) & 1u;
+    if (dx == 0 && neg) break;
+    out[n].dx = neg ? (int)dx - 256 : (int)dx;
+    out[n].dy = (int8_t)snes_read(g_snes, e + 1);
+    out[n].tile = snes_read(g_snes, e + 2);
+    out[n].attr = snes_read(g_snes, e + 3);
+    out[n].large = (flags >> (i * 2 + 1)) & 1u;
+    n++;
+  }
+  return n;
+}
+
+static int sel_word(uint32_t adr) {
+  return snes_read(g_snes, adr) | (snes_read(g_snes, adr + 1) << 8);
+}
+
+/* The scroll the displayed OAM was built with, or -1 when slot 0 is not the
+ * pin record's first sprite (the selector not drawn yet, or mid-transition). */
+static int sel_scroll_from_oam(const ScSpriteRec *pins, int npins) {
+  if (npins < 1 || !g_ppu) return -1;
+  const unsigned lo = g_ppu->oam[0], hi = g_ppu->oam[1];
+  const unsigned x9 = (lo & 0xffu) | ((g_ppu->highOam[0] & 1u) << 8);
+  const unsigned tile = (hi & 0xffu) | ((hi >> 8) & 1u) << 8;
+  if (((lo >> 8) & 0xffu) != ((0x60u + (unsigned)pins[0].dy) & 0xffu) ||
+      tile != ((unsigned)pins[0].tile | ((unsigned)pins[0].attr & 1u) << 8))
+    return -1;
+  return (int)((0xa0u + (unsigned)pins[0].dx - x9) & 0x1ffu);
+}
+
+/* Claim each of the game's pin and mark sprites that lies in a margin. */
+static void selector_hint_margin_sprites(void) {
+  ScSpriteRec pins[8], mark[8];
+  const int np = sel_record(0x12, pins), nm = sel_record(0x29, mark);
+  const int scroll = sel_scroll_from_oam(pins, np);
+  if (scroll < 0) return;
+  struct { unsigned x9, y, tile; } want[8 + 8 * 8];
+  int nw = 0;
+  for (int i = 0; i < np; i++) {
+    want[nw].x9 = (unsigned)(0xa0 - scroll + pins[i].dx) & 0x1ffu;
+    want[nw].y = (unsigned)(0x60 + pins[i].dy) & 0xffu;
+    want[nw++].tile = (unsigned)pins[i].tile | ((unsigned)pins[i].attr & 1u) << 8;
+  }
+  const unsigned won = g_ram[0x42] | ((unsigned)g_ram[0x43] << 8);
+  for (int b = 0; b < 8; b++) {
+    if (!((won >> b) & 1u)) continue;
+    const int bx = sel_word(0x03df30u + (uint32_t)b * 2u) - scroll;
+    const int by = sel_word(0x03df20u + (uint32_t)b * 2u);
+    for (int i = 0; i < nm && nw < (int)(sizeof want / sizeof want[0]); i++) {
+      want[nw].x9 = (unsigned)(bx + mark[i].dx) & 0x1ffu;
+      want[nw].y = (unsigned)(by + mark[i].dy) & 0xffu;
+      want[nw++].tile = (unsigned)mark[i].tile | ((unsigned)mark[i].attr & 1u) << 8;
+    }
+  }
+  static int diag = -1;
+  if (diag < 0) diag = getenv("SC_MARK_DIAG") != NULL;
+  for (int s = 0; s < 128; s++) {
+    const unsigned lo = g_ppu->oam[s * 2], hi = g_ppu->oam[s * 2 + 1];
+    const unsigned x9 = (lo & 0xffu) | (((g_ppu->highOam[s >> 2] >> ((s & 3) * 2)) & 1u) << 8);
+    if (x9 < 256u) continue;                       /* on screen already */
+    const unsigned y = (lo >> 8) & 0xffu;
+    const unsigned tile = (hi & 0xffu) | ((hi >> 8) & 1u) << 8;
+    for (int w = 0; w < nw; w++) {
+      if (want[w].x9 != x9 || want[w].y != y || want[w].tile != tile) continue;
+      /* Past the ambiguous band it decodes negative: the LEFT hint admits
+       * it. Inside the band it is the right margin's. */
+      if (x9 >= 256u + (unsigned)g_ppu->extraRightCur)
+        s_oam_left_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+      else
+        s_oam_right_hints[s >> 3] |= (uint8_t)(1u << (s & 7));
+      if (diag)
+        fprintf(stderr, "[mark] slot %d x9=%u y=%u tile=$%03x scroll=%d\n",
+                s, x9, y, tile, scroll);
+      break;
+    }
+  }
+}
+
+/* Sylt's pin, and its mark once won, in slots the selector leaves parked. */
+static void selector_sylt_sprites(void) {
+  if (!s_ninth_scenario || !g_ppu || !selector_on_screen()) return;
+  ScSpriteRec pins[8], mark[8];
+  const int np = sel_record(0x12, pins), nm = sel_record(0x29, mark);
+  const int scroll = sel_scroll_from_oam(pins, np);
+  if (scroll < 0 || np < 4) return;
+  ScSpriteRec add[1 + 8];
+  int na = 0, ax[1 + 8], ay[1 + 8];
+  /* Pin: the Las Vegas pin (entry 0) one column on, in Rio's colour (the
+   * entry at +40/+28, which is Rio's card). */
+  const ScSpriteRec *rio = NULL;
+  for (int i = 0; i < np; i++)
+    if (pins[i].dx == 40 && pins[i].dy == 28) rio = &pins[i];
+  if (!rio) return;
+  add[na] = *rio;
+  add[na].large = pins[0].large;
+  ax[na] = 0xa0 - scroll + pins[0].dx + SC_SEL_COLUMN_STEP;
+  ay[na++] = 0x60 + pins[0].dy;
+  const unsigned won = g_ram[0x42] | ((unsigned)g_ram[0x43] << 8);
+  if (won & 0x100u) {
+    const int bx = sel_word(0x03df30u + 6u * 2u) - scroll + SC_SEL_COLUMN_STEP;
+    const int by = sel_word(0x03df20u + 6u * 2u);
+    for (int i = 0; i < nm; i++) {
+      add[na] = mark[i];
+      ax[na] = bx + mark[i].dx;
+      ay[na++] = by + mark[i].dy;
+    }
+  }
+  /* Spare slots: the ones parked at X = 384, from the top down. */
+  int slot = 127;
+  for (int k = 0; k < na; k++) {
+    while (slot >= 64) {
+      const unsigned lo = g_ppu->oam[slot * 2];
+      const unsigned x9 = (lo & 0xffu) |
+          (((g_ppu->highOam[slot >> 2] >> ((slot & 3) * 2)) & 1u) << 8);
+      if (x9 == 384u) break;
+      slot--;
+    }
+    if (slot < 64) return;
+    const int x = ax[k];
+    if (x < 256 + (s_ws_extra > 0 ? g_ppu->extraRightCur : 0)) {
+      oam_put(slot, x, ay[k], add[k].tile, add[k].attr, add[k].large);
+      if (x >= 256) s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    }
+    slot--;
+  }
 }
 
 /* The title's widescreen settings have to outlive screen $01.
@@ -7110,6 +7264,7 @@ static void sc_wram_write_probe(uint32_t off, uint8_t val, const char *via) {
  * buffer behind that tilemap is known. This names it: the DMA source IS that
  * buffer, and SC_WRAM_WATCH pointed there then names the writing routine. */
 static uint32_t s_dv_at = 0xffffffffu;
+static bool s_dv_on;                 /* SC_DMA_VRAM: log them */
 
 static void sc_dma_vram_probe(uint8_t aBank, uint16_t aAdr,
                               uint16_t vmadd, uint16_t size) {
@@ -7179,12 +7334,47 @@ static void sc_vram_write_watch_install(void) {
           s_vw_lo, s_vw_hi, (unsigned long long)s_vw_from, s_vw_cap);
 }
 
+/* The selector's tiles and map arriving, on its fade-in screen $0A.
+ *
+ * $0A covers the fax (or menu) fading out, one DMA of the selector's whole
+ * set -- $7E:8000 to VRAM $0000, 28 KB, map at $3000 included -- and the
+ * selector fading in. Its own additions -- the wood past column 44, the
+ * translated cards, Sylt's card -- were made at 03:ddb6, which runs once the
+ * fade-in is over, so the fade showed the shipped map: black on the right,
+ * no Sylt, and Sylt's pin and mark hanging over the black. Flagged here at the
+ * DMA and made at the next frame's start (selector_after_upload), when the
+ * transfer is done. */
+static bool s_sel_upload_seen;
+
+static void sc_dma_vram_notify(uint8_t aBank, uint16_t aAdr, uint16_t vmadd,
+                               uint16_t size) {
+  if (s_dv_on) sc_dma_vram_probe(aBank, aAdr, vmadd, size);
+  const uint32_t words = size ? (uint32_t)size / 2u : 0x8000u;
+  if (g_ram[0x14] == 0x0a && vmadd <= 0x3000u && vmadd + words >= 0x3800u)
+    s_sel_upload_seen = true;
+}
+
+/* Every frame of $0A after that DMA, while BG1 is the selector's map ($3000,
+ * 64 columns wide): the same three 03:ddb6 makes, so they are there from the
+ * fade-in's first light. Repeating them is harmless -- 03:ddb6 does them
+ * again anyway -- and covers a map row the upload finishes late. */
+static void selector_after_upload(void) {
+  if (g_ram[0x14] != 0x0a) { s_sel_upload_seen = false; return; }
+  if (!s_sel_upload_seen || !g_ppu || !s_ninth_scenario || !s_rom_is_us) return;
+  if (PPU_bgTilemapAdr(g_ppu, 0) != 0x3000 || !PPU_bgTilemapWider(g_ppu, 0))
+    return;
+  selector_extend_tilemap();
+  place_translated_cards();   /* cards first: see 03:ddb6 */
+  sylt_place_card();
+}
+
 static void sc_dma_vram_install(void) {
+  dma_set_vram_notify_hook(sc_dma_vram_notify);
   const char *e = getenv("SC_DMA_VRAM");
   if (!e || !*e || *e == '0') return;
+  s_dv_on = true;
   { const char *at = getenv("SC_DMA_VRAM_AT");
     if (at && *at) s_dv_at = (uint32_t)strtoul(at, NULL, 16); }
-  dma_set_vram_notify_hook(sc_dma_vram_probe);
   if (s_dv_at != 0xffffffffu)
     fprintf(stderr, "dma vram probe: only transfers covering vram $%04X\n",
             s_dv_at);

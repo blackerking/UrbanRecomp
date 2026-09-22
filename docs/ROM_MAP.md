@@ -608,8 +608,13 @@ the card spacing. Y is `$27` on the top row.
 Supplied at `03:debb`, after `03:deb2`/`03:deb8` have stored x and y, with the
 same `SBC $16` scroll subtraction the ROM applies at `03:deb0`.
 
-The win-mark tables at `03:df20`/`03:df30` are eight entries as well, but Sylt
-is never marked beaten so nothing reads past them.
+The win-mark tables at `03:df20`/`03:df30` are eight entries as well, and
+`03:ded0` walks only eight bits, so the ROM never marks Sylt. The host adds
+Sylt's pin and mark itself (`selector_sylt_sprites()` in src/main.c): the
+selector's sprites are sprite-text records -- `$12` the eight pins from
+(`$A0`-`$16`, `$60`), `$11` the blinking bracket, `$29` a mark from each
+(`$DF30`,Y-`$16`, `$DF20`,Y) -- and Sylt's are Las Vegas's moved one
+column, 80 px, right.
 
 ### The title's light row cannot be widened by any display setting
 
