@@ -6372,8 +6372,12 @@ static void menu_action_clear_milestones(void) {
  *
  * Bits 0-6 are set, i.e. the six ordinary scenarios plus Las Vegas -- every
  * scenario, which is what makes reaching the hidden one a normal menu
- * selection. Indices 7 and 8 (Freeland and the tutorial) are deliberately
- * left alone: they are not scenarios and have nothing to win.
+ * selection -- and with the ninth scenario on, bit 8 for Sylt, where its win
+ * is kept (03:e30a's hook) and its card's mark is read from. Index 7, free
+ * play, and index 8 without Sylt, the tutorial, have nothing to win.
+ *
+ * In the F10 menu as "ALL SCENARIO WON", with the cheats: it writes the
+ * save, and switching it off does not take the wins back.
  *
  * SRAM lives in the cart model (`cart->ram`), not in g_ram, so it has to go
  * through the bus rather than a direct array write. The windowed game keeps
@@ -6408,6 +6412,7 @@ static void apply_unlock_all(void) {
   uint16_t flags = (uint16_t)(snes_read(g_snes, 0x700007) |
                               ((uint16_t)snes_read(g_snes, 0x700008) << 8));
   uint16_t want = (uint16_t)(flags | kWinMarkBits);
+  if (s_ninth_scenario) want |= 0x0100u;          /* Sylt */
   if ((want & 0x003f) == 0x003f) want |= 0x8000;  /* 03:e31c */
   /* Idempotent: after the first application this is two bus reads a frame and
    * nothing else, so it never fights the game's own writes to the header. */
@@ -6901,10 +6906,10 @@ static SettingDesc s_settings[] = {
   { "FAST CURSOR",           kSettingBool, &s_fast_cursor_enabled, 0,    NULL, NULL, 0 },
   { "CURSOR SPEED",          kSettingCycle, &s_fast_cursor_step,   0,    NULL,
     kFastCursorSteps, (int)(sizeof(kFastCursorSteps) / sizeof(kFastCursorSteps[0])) },
-  { "UNLOCK SCENARIOS",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "REPLAY MENU",           kSettingBool, &s_replay_menu,         0,    NULL, NULL, 0 },
   { "FIX POWER ON LOAD",     kSettingBool, &s_power_fix,           0,    NULL, NULL, 0 },
   { "CHEATS",                kSettingHeader, NULL, 0, NULL, NULL, 0 },
+  { "ALL SCENARIO WON",      kSettingBool, &s_unlock_all,          0,    NULL, NULL, 0 },
   { "CHEAT NO DISASTER",     kSettingBit,  &g_ram[0x0425],         0x01, NULL, NULL, 0 },
   { "CHEAT MONEY",           kSettingBit,  &g_ram[0x0425],         0x02, NULL, NULL, 0 },
   { "CHEAT VALVE MAX",       kSettingBit,  &g_ram[0x0425],         0x04, NULL, NULL, 0 },
