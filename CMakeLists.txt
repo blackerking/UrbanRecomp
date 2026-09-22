@@ -53,6 +53,7 @@ add_executable(UrbanRecomp
     src/sc_sram.c
     src/sc_icon.c
     src/sc_mapview.c
+    src/sc_vehicles.c
     src/sc_mapgen.c
         src/sc_decomp.c
 )
@@ -364,6 +365,7 @@ if(SC_GEN_SOURCES)
         src/sc_sram.c
         src/sc_icon.c
         src/sc_mapview.c
+        src/sc_vehicles.c
         ${SC_GEN_SOURCES}
         src/sc_hle.c
         src/sc_mapgen.c

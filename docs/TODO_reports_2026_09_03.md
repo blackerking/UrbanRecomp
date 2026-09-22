@@ -22,6 +22,10 @@ with the title sign still crossing the margin correctly.
 The missing pins remain open, and are a different problem entirely.
 
 ## 2. Locomotive not drawn in the widescreen margins
+
+**FIXED 2026-09-22** by `src/sc_vehicles.c`: the game drops every object
+sprite at `00:c019` once it lies right of the view, so the host keeps what
+it drops and draws it in the margin. See docs/ROM_MAP.md, "`01:f11a`".
 `savestate_3.bin` -- the state shows it as it appears in the normal view.
 
 **Diagnosed, not fixed. It is not an OAM decode problem at all.**
@@ -389,7 +393,11 @@ After the change the border/panel ratio holds at **0.21 for every frame** of the
 fade and both reach 0 together. All eight save states are pixel-identical at
 rest.
 
-## The train shows one tile then vanishes -- diagnosed, not fixed
+## The train shows one tile then vanishes -- FIXED 2026-09-22
+
+**FIXED 2026-09-22** by `src/sc_vehicles.c`: the game drops every object
+sprite at `00:c019` once it lies right of the view, so the host keeps what
+it drops and draws it in the margin. See docs/ROM_MAP.md, "`01:f11a`".
 
 Reported from play: on the normal map the train is fine, then in the margin
 "it is shown just one tile and then it disappears suddenly".

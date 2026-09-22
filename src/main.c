@@ -89,6 +89,7 @@ uint8_t    g_ram[0x20000];
 #include "sc_launcher.h"
 #include "sc_sram.h"
 #include "sc_icon.h"
+#include "sc_vehicles.h"
 #include "sc_mapgen.h"
 #include "sc_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
@@ -682,6 +683,9 @@ static uint8_t *s_ws_scratch_bg;
 /* OBJ-only re-render, so the host-map margins can carry sprites. */
 static uint8_t *s_ws_obj_layer;
 static int s_margin_obj_on = 1;   /* SC_WS_MARGIN_OBJ */
+/* Vehicles the game drops at the view's right edge, kept and drawn in the
+ * margin (src/sc_vehicles.c). SC_WS_VEHICLES=0 turns it off. */
+static bool s_ws_vehicles = true;
 /* Render flags handed to PpuBeginDrawing. 0 selects ppu_draw_whole_line_legacy;
  * kPpuRenderFlags_NewRenderer (1) selects PpuDrawWholeLine.
  *
@@ -3428,6 +3432,8 @@ static bool run_one_frame(void) {
     if (cpu->k == 0x03 && cpu->pc == 0xd862) s_gen_trigger_hits++;
     if (cpu->k == 0x02 && (cpu->pc == 0x8b36 || cpu->pc == 0x89b4))
       sc_classifier_hook(cpu);
+    if (cpu->k <= 0x01 && s_ws_vehicles && ScVehicles_WantsPc(cpu->k, cpu->pc))
+      ScVehicles_OnPc(cpu->k, cpu->pc, cpu->x, cpu->y, cpu->dp, cpu->db);
     if (cpu->k == 0x00 && (cpu->pc == 0x90dd || cpu->pc == 0x90ee ||
                            cpu->pc == 0x9108))
       sc_decomp_hook(cpu);
@@ -4987,6 +4993,13 @@ static inline uint32_t sc_ext_sub(uint32_t c, int sr, int sg, int sb) {
   int b = (int)(c & 0xff) - sb;         if (b < 0) b = 0;
   return (c & 0xff000000u) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
+/* The margin's dimming, for sprites drawn into it after the terrain. */
+typedef struct { bool halve; int r, g, b; } ScVehicleDim;
+static uint32_t sc_vehicle_shade(uint32_t c, void *ctx) {
+  const ScVehicleDim *d = (const ScVehicleDim *)ctx;
+  if (d->halve) return (c & 0xFF000000u) | ((c >> 1) & 0x007F7F7Fu);
+  return sc_ext_sub(c, d->r, d->g, d->b);
+}
 static int s_seam_lead_cover;      /* right edge  */
 static int s_seam_lead_left;       /* left edge   */
 static int s_seam_lead_top;        /* top edge    */
@@ -5731,18 +5744,32 @@ static void host_map_compose(void) {
      * rendered by the PPU at x + s_ws_extra, and only s_ws_extra px of the
      * wider strip has PPU coverage. Transparency is RGB-only: the render
      * buffer leaves alpha clear, so comparing the whole word makes every
-     * backdrop pixel look opaque and paints the margin solid black. */
+     * backdrop pixel look opaque and paints the margin solid black.
+     *
+     * From x_start, not from the edge: the leading-edge cover above paints
+     * host terrain over the guest's last columns while it pans, and the
+     * guest's sprites there went with it -- the ship came apart at the edge
+     * for the length of a pan, in pieces the authentic picture never shows. */
     if (s_ws_obj_layer && s_margin_obj_on && !blanked) {
       const uint32_t *ol =
           (const uint32_t *)(s_ws_obj_layer + (size_t)y * s_video_pitch);
       int hi = kVideoWidth + s_ws_extra;
       if (hi > s_video_w) hi = s_video_w;
-      for (int x = kVideoWidth; x < hi; x++) {
+      for (int x = x_start < kVideoWidth ? x_start : kVideoWidth; x < hi; x++) {
         const uint32_t c = ol[x + s_ws_extra];
         if ((c & 0x00ffffffu) != (s_margin_backdrop & 0x00ffffffu))
           dst[x] = 0xff000000u | (c & 0x00ffffffu);
       }
     }
+  }
+  /* The vehicles the game dropped at its right edge, over everything in the
+   * margin, dimmed like the terrain they stand on -- and in the last sprite
+   * width before the edge, where a pan carries them back in before the game
+   * places them again (src/sc_vehicles.c). */
+  if (s_ws_vehicles && !blanked) {
+    ScVehicleDim dim = { halve, dim_r, dim_g, dim_b };
+    ScVehicles_Draw(s_video_pixels, (size_t)s_video_pitch, kVideoWidth - 16,
+                    s_video_w, kVideoHeight, sc_vehicle_shade, &dim);
   }
 }
 
@@ -5980,6 +6007,7 @@ static bool load_state(const char *path) {
   }
   g_ppu->lastBrightnessMult = 0xff;   /* rebuild the brightness tables */
   ScSram_Release();
+  ScVehicles_Reset();   /* host-side, not in the state; back within 4 frames */
   bool ok = fs.ok;
   fclose(f);
   /* Hand the restored registers to the fiber, HERE rather than at the call
@@ -8830,6 +8858,8 @@ int main(int argc, char **argv) {
     if (e && *e) s_ws_obj_clip = (*e != '0'); }
   { const char *e = getenv("SC_WS_MARGIN_OBJ");
     if (e && *e) s_margin_obj_on = (*e != '0'); }
+  { const char *e = getenv("SC_WS_VEHICLES");
+    if (e && *e) s_ws_vehicles = (*e != '0'); }
   { const char *e = getenv("SC_WS_OAM");
     if (e && *e) s_ws_oam_strict = (*e != '0'); }
   { const char *e = getenv("SC_NEW_RENDERER");

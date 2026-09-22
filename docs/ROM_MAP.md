@@ -3570,6 +3570,48 @@ either step so far.
 
 ### `01:f11a` -- why moving objects die at the right edge
 
+**Fixed 2026-09-22, and the reading below was only half right.** `01:f11a`
+is the scroll shift: while the player pans, it moves every object sprite by
+the pan step `$7C` between the game's four-frame updates, and a carry sets
+the sprite's X high bit through `00:c22c` -- it hides the sprite, it does not
+despawn anything. What really drops an object at the edge is its placement.
+The objects are map objects with cell positions, put on screen in groups
+every fourth frame by `00:bc3f`:
+
+| object | flag | slots | placed by |
+|---|---|---|---|
+| `$00` | `$0A91` | 119-122 | `00:bd9c` -> `00:bf80` |
+| `$04` | `$0A93` | 123 (one sprite, nudged -`$91`/+6 at `00:bd41`) | `00:bd15` -> `00:bf80` |
+| `$08` | `$0A8B` | 109-112 -- slot 109 is the "train" of the report above | `00:bcc4` -> `00:bf80` |
+| `$10` the plane | `$0A8D` | 113-116, tiles by heading `$0A9F` | `00:bdc8` -> `00:bf80` |
+| `$14` the ship | `$0A95` | 124-127 | `00:bec9` -> `00:bf80` |
+| `$18` | -- | 124-127 | `00:c713` -> `00:bf80` |
+| the helicopter | `$0A8F` | 117 body, 118 rotor (8x8) | `00:be1c` |
+
+Each group's update first parks its slots (`00:c0f5`, `00:c154`, which falls
+into `00:c180` for 124-127), then calls `00:c019` once per 16x16 sprite:
+cell (`$91`, `$94`) plus the object's fine offset (`$0A6D,Y`, `$0A6B,Y`),
+relative to the view's top-left cell (`$01BD`, `$01BF`). `c019` returns
+without writing when the cell is 32 or more columns right of the view -- so
+from screen x 256 on, the slot simply stays parked, with its tile and
+attributes still written by the object's code.
+
+`src/sc_vehicles.c` keeps those sprites: at `c019`'s entry it computes the
+position the game would, records the slot when the game is about to drop it
+for being right of the view, follows the park, the scroll shift and the
+`bd41` nudge, snapshots at the full NMI (`00:80c0`) with the OAM DMA, and
+`host_map_compose()` draws the records into the margin from the guest's own
+OAM tile, palette and VRAM. Checked on the ship (savestate 3 of 2026-09-22),
+the plane and the helicopter (savestate 2, panned): whole, and moving by the
+same 4 px a frame as the map on both sides of the edge while panning.
+
+The same test turned up an older fault: the compositor's leading-edge cover
+paints host terrain over the guest's last few columns during a pan, and took
+the guest's sprites there with it, so a vehicle came apart at the edge. The
+margin OBJ pass is now laid back from where that cover starts.
+
+The original notes follow.
+
 Reported from play: the locomotive and the selector pins are missing "only in
 widescreen". That framing is right, and an earlier note here calling it
 "culling" was too vague. The mechanism is an **8-bit overflow**, not a clip:
@@ -3608,6 +3650,12 @@ reveals get none. Recorded already as a known gap for the ninth card; it is the
 same for the outer shipped ones.
 
 ## The train and the plane: what they actually are
+
+**Correction (2026-09-22).** The plane is not a tile: it is object `$10`, a
+four-sprite map object in slots 113-116, and the ship, the helicopter and
+slot 109's object are the same kind -- see the table under "`01:f11a`"
+above. The animated tile band described below is real; these vehicles are
+not part of it.
 
 Asked for as "decomp the train function and the plane function". There is no
 such function, and finding that out took ruling out two plausible systems.
