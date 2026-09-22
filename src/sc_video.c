@@ -21,8 +21,12 @@ bool ScParseAspect(const char *value, ScAspect *out) {
         if (!strcmp(value, names[i])) { *out = (ScAspect)i; return true; }
     return false;
 }
+/* The adaptive renderer is the default since 2026-09-22, at 21:9 -- a
+ * 448x224 canvas, as wide as the classic widescreen was, so a fresh install
+ * keeps its margins whatever the window's shape. Enabled=0 in sc-video.ini
+ * (Mods: Adaptive Widescreen off) goes back to the classic renderer. */
 void ScVideoDefaults(ScVideoSettings *s) {
-    *s = (ScVideoSettings){false, SC_FIT, false};
+    *s = (ScVideoSettings){true, SC_21_9, false};
 }
 bool ScVideoLoad(ScVideoSettings *s, const char *path) {
     ScVideoDefaults(s);

@@ -7,8 +7,11 @@
 int main(int argc,char **argv) {
     assert(argc==2);
     ScVideoSettings s; ScVideoDefaults(&s);
-    assert(!s.enabled && s.aspect==SC_FIT && !s.centered);
+    /* The adaptive renderer is the default, at 21:9. */
+    assert(s.enabled && s.aspect==SC_21_9 && !s.centered);
     ScViewport v=ScVideoViewport(&s,3840,1080);
+    assert(v.width==448 && v.height==224);
+    s.enabled=false; v=ScVideoViewport(&s,3840,1080);
     assert(v.width==256 && v.height==224);
     s.enabled=true;
     const int sizes[][2]={{1,1},{320,240},{1280,720},{2520,1080},{3840,1080},
@@ -61,7 +64,7 @@ int main(int argc,char **argv) {
     assert(ScVideoLoad(&loaded,argv[1]) && !loaded.enabled);
     FILE *f=fopen(argv[1],"w"); assert(f);
     fputs("Enabled=1\nAspect=invalid\n",f); fclose(f);
-    assert(!ScVideoLoad(&loaded,argv[1]) && !loaded.enabled);
+    assert(!ScVideoLoad(&loaded,argv[1]));   /* the caller refuses to start */
     remove(argv[1]); puts("PASS: fit containment, input mapping, Mods choices and atomic persistence");
     return 0;
 }

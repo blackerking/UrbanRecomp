@@ -18,9 +18,10 @@ is simply "the game".
 > works -- the launcher lets you pick the file, and the tools recognise it
 > by its contents.
 
-**Adaptive Widescreen branch:** the shared Mods launcher now offers Fit to
-window, Fit height, Fit width, and 4:3 through 32:9 presets while keeping the
-full original view visible. See [build/run instructions and renderer scope](docs/ADAPTIVE_RENDERER.md)
+**Adaptive Widescreen, the default renderer:** the shared Mods launcher offers
+Fit to window, Fit height, Fit width, and 4:3 through 32:9 presets (21:9 out of
+the box) while keeping the full original view visible; switching it off there
+returns to the classic widescreen. See [build/run instructions and renderer scope](docs/ADAPTIVE_RENDERER.md)
 and [the dependency audit](docs/DEPENDENCY_AUDIT.md). The branch retains current
 main's engine pin and host fixes; controls default to the top left.
 

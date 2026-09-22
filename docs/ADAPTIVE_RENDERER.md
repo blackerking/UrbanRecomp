@@ -4,8 +4,11 @@ The built-in **Adaptive Widescreen** mod uses the shared `recomp-ui` Mods
 provider, like Super Metroid's custom renderer. Start the executable without
 arguments (or with `--mods`), select **Mods**, enable **Adaptive Widescreen**,
 choose a view size, and press **Play**. Settings persist in `sc-video.ini`.
-The mod starts disabled in a fresh directory. New configurations use **Top left**
-for City controls position; existing saved Center preferences are respected.
+Since 2026-09-22 this is Urban Recomp's default renderer: a fresh directory
+starts with it enabled at 21:9 (448x224, as wide as the classic widescreen).
+Switching it off in Mods (or `Enabled=0` in `sc-video.ini`) returns to the
+classic widescreen. New configurations use **Top left** for City controls
+position; existing saved Center preferences are respected.
 
 See the [screenshot gallery](screenshots/adaptive-renderer/README.md) for the
 Mods controls, adaptive landscape/portrait views, and fixed 21:9 gameplay.
