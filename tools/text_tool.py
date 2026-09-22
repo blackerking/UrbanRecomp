@@ -2236,15 +2236,19 @@ def report_spans(us, eg, painted, attrs=None):
 # to the word list. The donor moves some of them to suit its own labels --
 # JA/NEIN and the problem percentages one column left, the overview's right
 # column two right -- so the words that differ are copied. The title year's
-# column is an operand in code, LDX #$004C in $02:B51F, found by the code
-# around it in both cartridges; it only takes effect because recomp/bank02.cfg
-# keeps that function on the interpreter, as the recompiled game carries
-# operands as C constants. (The German cartridge also moves the budget's tax
-# rate digits, STA $7E2B28.. in $02:A66E, two columns right. Not taken: nothing
-# collides there, and it would put one more function on the interpreter.)
+# column is an operand in code, LDX #$004C in $02:B51F, and so are the cells
+# of the two-digit field $02:A66E prints (the bank's loan term, the "21" in
+# "= 500 x 21"): STA $7E2B2A/$7E2B6A for the ones, $7E2B28/$7E2B68 for the
+# tens, which the German cartridge moves two columns right, off its "x". Both
+# are found by the code around them in both cartridges; they only take effect
+# because recomp/bank02.cfg keeps those functions on the interpreter, as the
+# recompiled game carries operands as C constants.
 REPORT_LAYOUT_OPERAND = rb"\x0a\xaa\xbd(..)\xa8\xa9\xff"     # $02:B275 LDA $B77C,X
 REPORT_CODE = (
     ("title year column", rb"\xa0\x50\x0c\xa2(.)\x00\xad\xfb\x01\xc9\x02\x00"),
+    ("two-digit field cells",
+     rb"\x69\x50\x3c\x8f(.)\x2b\x7e\x69\x10\x00\x8f(.)\x2b\x7e\xe0\x00\x00\xf0\x10"
+     rb"\x8a\x18\x69\x50\x3c\x8f(.)\x2b\x7e\x69\x10\x00\x8f(.)\x2b\x7e"),
 )
 
 
@@ -3989,6 +3993,54 @@ TILESETS = (
     ("icons.png", ((0x038000, 0x03A680),), 32, None, ()),
 )
 
+# One set comes with a change to the map that draws it. The German bank
+# screen signs the loan line RUECKZAHLUNG, nine tiles wide on $120-$128 and
+# $130-$138, where the US signs LOANS in five on $030-$034 and $040-$044: the
+# report screens' BG1 map $0B:B5F3, rows 75 and 76, is the only difference,
+# 18 cells. The German set blanks the LOANS tiles, so the set taken without
+# the map left an empty box beside "= 500 x 21". French draws PRETS on the
+# LOANS tiles and keeps the map.
+#
+# A map goes into the tile set folder as text, one line per map row of hex
+# words (tile number in the low ten bits, palette << 10, priority $2000,
+# flips $4000/$8000); an import takes the words that differ from the US.
+TILEMAPS = (
+    # (text file, US packet, words a row)
+    ("bank_map.txt", 0x05B5F3, 32),
+)
+
+
+def _write_tilemap(path, data, width, off):
+    words = [data[k] | (data[k + 1] << 8) for k in range(0, len(data), 2)]
+    with open(path, "w", newline="\n") as f:
+        f.write("# %s: the map at $%02X:%04X in the US cartridge, %d rows of %d cells.\n"
+                "# A cell is a hex word: tile | palette << 10 | $2000 priority"
+                " | $4000 x flip | $8000 y flip.\n"
+                "# Lines starting with # and empty lines are ignored.\n"
+                % (os.path.basename(path), off // 0x8000, 0x8000 + off % 0x8000,
+                   len(words) // width, width))
+        for r in range(len(words) // width):
+            if r and r % 32 == 0:
+                f.write("\n")
+            f.write(" ".join("%04x" % w for w in words[r * width:(r + 1) * width]) + "\n")
+
+
+def _read_tilemap(path, cells, width):
+    words = []
+    for n, line in enumerate(open(path), 1):
+        line = line.split("#", 1)[0].split()
+        if not line:
+            continue
+        if len(line) != width:
+            sys.exit("%s:%d: %d cells, a row has %d" % (path, n, len(line), width))
+        try:
+            words += [int(w, 16) for w in line]
+        except ValueError:
+            sys.exit("%s:%d: not a row of hex words" % (path, n))
+    if len(words) != cells or any(w > 0xffff for w in words):
+        sys.exit("%s: %d cells, the map has %d" % (path, len(words), cells))
+    return b"".join(bytes([w & 0xff, w >> 8]) for w in words)
+
 
 def _tileset_bytes(rom, eg, off):
     """a set as a cartridge holds it: an LZ5 packet, or raw frames"""
@@ -4033,6 +4085,18 @@ def tileset_sheets(path, eg, us):
             sys.exit("no counterpart of %s (%s) in %s"
                      % (_tileset_where(off), name, os.path.basename(path)))
         out[name] = bytes(tw[2])
+    for name, off, width in TILEMAPS:
+        u = _tileset_bytes(us, eg, off)
+        if rom == us:
+            out[name] = u
+            continue
+        tw = find_twin(scan_packets(rom, eg, 512), u)
+        m = bytes(tw[2]) if tw else b""
+        # the same map with a few cells moved, not just any packet that long
+        if not m or sum(m[k:k + 2] != u[k:k + 2] for k in range(0, len(u), 2)) * 8 > len(u) // 2:
+            sys.exit("no counterpart of %s (%s) in %s"
+                     % (_tileset_where(off), name, os.path.basename(path)))
+        out[name] = m
     return out
 
 
@@ -4055,9 +4119,12 @@ def cmd_tilesets(a):
                 px[t % 16 * 8 + j % 8, t // 16 * 8 + j // 8] = LABEL_PAL[v]
         img.save(os.path.join(a.out, name))
         print("  %s  %s, %d tiles" % (name, _tileset_where(off), n))
+    for name, off, width in TILEMAPS:
+        _write_tilemap(os.path.join(a.out, name), sheets[name], width, off)
+        print("  %s  %s, %d cells" % (name, _tileset_where(off), len(sheets[name]) // 2))
     print("tile sets -> %s. Sixteen colours (cityui.png four); keep every word "
           "on the tiles it already uses, since the game places them by tile "
-          "number." % a.out)
+          "number -- or move it in the map beside its set." % a.out)
 
 
 def _tilesets_from_dir(folder, eg, us):
@@ -4083,6 +4150,10 @@ def _tilesets_from_dir(folder, eg, us):
             pk += _cell_pack([_nearest_pal(px[t % 16 * 8 + j % 8, t // 16 * 8 + j // 8], colours)
                               for j in range(64)], bpt, 0)
         out[name] = bytes(pk)
+    for name, off, width in TILEMAPS:
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            out[name] = _read_tilemap(path, len(_tileset_bytes(us, eg, off)) // 2, width)
     if not out:
         sys.exit("no tile set pictures in %s" % folder)
     return out
@@ -4107,6 +4178,21 @@ def tileset_spans(us, eg, sheets):
             cart += [(_tileset_cart(off, o), d) for o, d in spans]
         else:
             entries.append((off, len(u), spans, tuple(screens)))
+    for name, off, width in TILEMAPS:
+        if name not in sheets:
+            continue
+        u, m, spans = _tileset_bytes(us, eg, off), sheets[name], []
+        for k in range(0, len(u), 2):
+            if m[k:k + 2] == u[k:k + 2]:
+                continue
+            if spans and spans[-1][0] + len(spans[-1][1]) == k:
+                spans[-1] = (spans[-1][0], spans[-1][1] + m[k:k + 2])
+            else:
+                spans.append((k, bytes(m[k:k + 2])))
+        print("tile map %s: %d cells changed"
+              % (name, sum(len(d) for _, d in spans) // 2))
+        if spans:
+            entries.append((off, len(u), spans, ()))
     return cart, entries
 
 
@@ -4323,8 +4409,8 @@ GRAPHICS = (
     ("selector.png", "cmd_selector", "selector_from",
      "scenario card names, disaster lines and Sylt's line"),
     ("tilesets", "cmd_tilesets", "tilesets_from",
-     "city tiles, bank window, graph title, gift signs, RCI meters, PUSH START, "
-     "NEXT, police and fire stations"),
+     "city tiles, bank window and its map, graph title, gift signs, RCI meters, "
+     "PUSH START, NEXT, police and fire stations"),
     ("saveload", "cmd_saveload", "saveload_from",
      "the save/load dialog: its sheet and where its prompts are"),
 )

@@ -5051,6 +5051,15 @@ column 6 (`#$004E` when `$01FB = 2`). German draws at `#$0044`, French at
 `#$0046`. The operand is found by the code around it in both cartridges and
 copied; being code, it relies on the `force_lle` above.
 
+**The loan term** is `$02:A66E`: the two digits of `$0B1D` (years left on the
+loan, the "21" in "= 500 x 21" on the bank's page), `ADC #$3C50` into
+`$7E2B2A`/`$7E2B6A` for the ones and `$7E2B28`/`$7E2B68` for the tens, column
+21 and 20. German draws them at columns 23 and 22 (`2E`/`6E`/`2C`/`6C`), off
+its "x" at column 20, which the US columns printed over; French keeps the US
+cells. Copied the same way, and `recomp/bank02.cfg` keeps the function on the
+interpreter with its two exits (`m1x1` when `$0B1D` is 0, `m0x0` otherwise)
+declared.
+
 **The word strips** are entries 0-12 of the word list: the evaluation's
 problems (0-6) and city category (7-12); entries 13-15 are the level names.
 The US draws the strips as artwork at report tiles `$181`..`$1DC` through the
@@ -5257,6 +5266,17 @@ and `write_packets` notes any bytes two entries of one packet write
 differently on a screen they share. The German title set sits at the
 US address, hidden from a packet scan by a false stream in front of it, so a
 donor's copy is looked for there first.
+
+The bank set comes with its map. German signs the bank's loan line
+RUECKZAHLUNG, nine tiles on `$120`-`$128` and `$130`-`$138`, where the US signs
+LOANS in five on `$030`-`$034` and `$040`-`$044`; the report screens' BG1 map
+`$0B:B5F3` (German `$0B:C526`) differs in exactly those 18 cells, rows 75-76,
+and the German set blanks the LOANS tiles. Taking the set without the map
+left an empty box beside "= 500 x 21" (reported from play, 2026-09-22).
+`tilesets` writes the map as `bank_map.txt`, one line of hex words per map
+row, and the import takes the words that differ from the US; French draws
+PRETS on the LOANS tiles and keeps the map. Checked offline: the US folder
+imports to no change, the German folder to exactly the donor route.
 
 The in-city set `$09:C0FB` is the notices' font below tile `$100` (German
 reorders it, and the notices import writes its accents at `$F0`-`$FE`), and
