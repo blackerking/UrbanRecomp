@@ -1024,6 +1024,9 @@ static void handle_pos_stuff(void) {
         ppu_runLine(g_ppu, snes->vPos);
         g_ppu->screenWindowed[1]=saved;
       }
+      if (s_custom_video.enabled && snes->vPos == 1)
+        s_custom_renderer.vehicle_count = s_ws_vehicles
+            ? ScVehicles_Shown(s_custom_renderer.vehicles, 19) : 0;
       if (s_custom_video.enabled && snes->vPos > 0 && snes->vPos <= 224)
         ScRendererLine(&s_custom_renderer, g_ppu, g_ram, snes->vPos - 1,
           (const uint32_t *)(s_video_pixels + (size_t)(snes->vPos - 1) * s_video_pitch));
@@ -9099,6 +9102,7 @@ int main(int argc, char **argv) {
   PpuBeginDrawing(g_ppu, s_video_pixels, (size_t)s_video_pitch, s_render_flags);
   host_map_init();
   ScRendererInit(&s_custom_renderer, g_snes->cart->rom, rom_size, s_rom_is_us);
+  s_custom_renderer.sylt = s_ninth_scenario;   /* its pin and mark */
   if (!ScRendererResize(&s_custom_renderer,
         ScVideoViewport(&s_custom_video, s_window_width, s_window_height))) return 1;
   if (s_custom_video.enabled) fprintf(stderr,"custom renderer: %s, %dx%d, core %d,%d\n",

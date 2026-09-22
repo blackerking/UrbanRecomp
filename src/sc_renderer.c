@@ -64,16 +64,28 @@ static int sprite_x(const Ppu *p,int slot) {
     int index=slot*2;
     return (p->oam[index]&255)|(((p->highOam[index/8]>>(index%8))&1)<<8);
 }
-static unsigned sprite_pixel(const Ppu *p,int slot,int x,int y) {
-    static const int sizes[8][2]={{8,16},{8,32},{8,64},{16,32},{16,64},{32,64},{16,32},{16,32}};
-    int index=slot*2, size=sizes[PPU_objSize(p)][(p->highOam[index/8]>>(index%8+1))&1];
+static const int sprite_sizes[8][2]={{8,16},{8,32},{8,64},{16,32},{16,64},{32,64},{16,32},{16,32}};
+/* One pixel of a sprite given as an OAM word (tile | attributes << 8) and a
+ * size. The size is a parameter for sprites whose slot does not carry it: the
+ * vehicles kept for the margin sit in parked slots, whose size bit is the
+ * park's, and the selector's pins and marks come from the ROM's records. */
+static unsigned sprite_word_pixel(const Ppu *p,unsigned attr,int size,int x,int y) {
     if (x<0 || y<0 || x>=size || y>=size) return 0;
-    unsigned attr=p->oam[index+1];
     if (attr&0x4000) x=size-1-x;
     if (attr&0x8000) y=size-1-y;
     unsigned tile=(((attr&0xf0)+(y/8)*16)&255)|(((attr&15)+x/8)&15);
     unsigned base=attr&0x100 ? PPU_objTileAdr2(p) : PPU_objTileAdr1(p);
     return tile_pixel(p,tile|(((attr>>9)&7)<<10),base,x,y,4,128);
+}
+static unsigned sprite_pixel(const Ppu *p,int slot,int x,int y) {
+    int index=slot*2, size=sprite_sizes[PPU_objSize(p)][(p->highOam[index/8]>>(index%8+1))&1];
+    return sprite_word_pixel(p,p->oam[index+1],size,x,y);
+}
+/* The ROM through the cart image (LoROM), for src/sc_selector.c. */
+static uint8_t rom_read(void *ctx,uint32_t adr) {
+    const ScRenderer *r=(const ScRenderer *)ctx;
+    size_t off=((size_t)((adr>>16)&0x7f)<<15)|(adr&0x7fff);
+    return r->rom && off<r->rom_size ? r->rom[off] : 0;
 }
 static void find_lights(ScRenderer *r,const Ppu *p) {
     r->light_slot=-1; r->light_pitch=0;
@@ -186,6 +198,25 @@ static void track_map_swap(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
 }
 static void object_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) {
     memset(pixels,0,(size_t)r->view.width*sizeof(*pixels));
+    /* The vehicles the game drops once they are right of its 256 columns
+     * (src/sc_vehicles.c): drawn first, so the OAM's own sprites win.
+     * Rows as the PPU has them -- a sprite's row 0 is on line Y -- which the
+     * guest's half of an object crossing the edge also follows. */
+    for (int k=0;k<r->vehicle_count;++k) {
+        const ScVehicleSprite *v=&r->vehicles[k];
+        int size=sprite_sizes[PPU_objSize(p)][v->large ? 1 : 0];
+        int row=y-v->y;
+        if (row<0 || row>=size) continue;
+        unsigned attr=p->oam[v->slot*2+1];
+        for (int dx=0;dx<size;++dx) {
+            int local=v->x+dx;
+            if (local<256) continue;   /* the authentic columns are the core's */
+            int x=local+r->view.core_x;
+            if (x<0 || x>=r->view.width) continue;
+            unsigned ci=sprite_word_pixel(p,attr,size,dx,row);
+            if (ci) pixels[x]=(uint16_t)(ci|(((attr>>12)&3)<<8));
+        }
+    }
     int first=PPU_objPriority(p) ? (p->oamaddl&0xfe)/2 : 0;
     for (int rank=127;rank>=0;--rank) {
         int slot=(first+rank)&127;
@@ -285,6 +316,10 @@ static void find_wood(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
 static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     unsigned screen=ram[0x14], ci=0;
     int owner=5;
+    /* $0A is the selector's fade-in (from the menu, and back from the fax)
+     * once its map is in VRAM; before that it is the fax fading out. */
+    bool selector=screen==11 || screen==12 ||
+        (screen==10 && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000);
     if (r->title_live && PPU_mode(p)==1) {
         /* Title's sky and skyline are repeating scenery; title text/sprites
          * remain in the native view. Per-line palette preserves its gradient. */
@@ -293,14 +328,14 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
             unsigned sample=bg_pixel(p,layer,x,y+1);
             if (sample) { ci=sample; owner=layer; }
         }
-    } else if (r->wood_layer>=0 && screen!=11 && screen!=12) {
+    } else if (r->wood_layer>=0 && !selector) {
         int layer=r->wood_layer;
         int tx=(x+p->hScroll[layer])&1023, ty=(y+1+p->vScroll[layer])&255;
         unsigned word=wood_grow(r->wood_rows[ty/8],tx/8);
         int depth=PPU_mode(p)==0 || layer==2 ? 2 : 4;
         ci=tile_pixel(p,word,PPU_bgTileAdr(p,layer),tx,ty,depth,PPU_mode(p)==0 ? layer*32 : 0);
         owner=layer;
-    } else if ((screen==11 || screen==12) && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000) {
+    } else if (selector && PPU_mode(p)==0 && PPU_bgTilemapAdr(p,0)==0x3000) {
         /* Cards and translated names already exist in the wide guest maps.
          * Show that single strip, then continue the desk beyond it. Wrapping
          * the entire layer would repeat cards on ultrawide displays. */
@@ -332,7 +367,33 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
         unsigned light=sprite_pixel(p,r->light_slot,dx,y+1-(p->oam[r->light_slot*2]>>8));
         if (light) { ci=light; owner=4; }
     }
+    if (r->selector_row && (p->screenEnabled[0]&16)) {
+        unsigned mark=r->selector_row[x+r->view.core_x];
+        if (mark) { ci=mark; owner=4; }
+    }
     return composite_color(p,ci,owner,0,5,x);
+}
+/* The selector's pins and win marks on one row, from src/sc_selector.c: the
+ * game draws those of the cards outside its 256 columns too, but raw OAM X
+ * cannot tell them from the blink-hidden bracket, and Sylt's are not in OAM
+ * at all. Last to first, so the earlier sprite -- the lower slot -- wins. */
+static void selector_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) {
+    memset(pixels,0,(size_t)r->view.width*sizeof(*pixels));
+    for (int k=r->selector_count-1;k>=0;--k) {
+        const ScSelSprite *s=&r->selector[k];
+        int size=sprite_sizes[PPU_objSize(p)][s->large ? 1 : 0];
+        int row=y-s->y;
+        if (row<0 || row>=size) continue;
+        unsigned attr=(unsigned)s->tile|((unsigned)s->attr<<8);
+        for (int dx=0;dx<size;++dx) {
+            int local=s->x+dx;
+            if (local>=0 && local<256) continue;   /* the core shows its own */
+            int x=local+r->view.core_x;
+            if (x<0 || x>=r->view.width) continue;
+            unsigned ci=sprite_word_pixel(p,attr,size,dx,row);
+            if (ci) pixels[x]=(uint16_t)ci;
+        }
+    }
 }
 static bool edge_has_overlay(const Ppu *p,int y,int left) {
     for (int x=left;x<left+8;++x) {
@@ -398,8 +459,10 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
         r->held_ppu->window2left=p->window2left; r->held_ppu->window2right=p->window2right;
         p=r->held_ppu;
     }
-    uint16_t objects[SC_MAX_CANVAS];
+    uint16_t objects[SC_MAX_CANVAS], marks[SC_MAX_CANVAS];
     if (city) object_row(r,p,y,objects);
+    r->selector_row=NULL;
+    if (!city && r->selector_count) { selector_row(r,p,y,marks); r->selector_row=marks; }
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
         if (!r->advisor_frame && y>=0 && y<224 && local>=0 && local<256 &&
@@ -528,6 +591,13 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
             (p->screenEnabled[1]&31)==3 && !(PPU_mathEnabled(p)&20) &&
             (r->view.core_x!=(r->view.width-256)/2 || r->view.core_y!=(r->view.height-224)/2);
         find_lights(r,p);
+        r->selector_count=0;
+        if (ScSelector_OnScreen(ram[0x14])) {
+            int scroll=ScSelector_Scroll(p,rom_read,r);
+            if (scroll>=0)
+                r->selector_count=ScSelector_Sprites(r->selector,scroll,
+                    ram[0x42]|((unsigned)ram[0x43]<<8),r->sylt,rom_read,r);
+        }
         track_scroll(r,p,ram);
         track_objects(r,p,ram);
         track_map_swap(r,p,ram);

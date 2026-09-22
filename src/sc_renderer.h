@@ -1,5 +1,7 @@
 #pragma once
 #include "sc_video.h"
+#include "sc_selector.h"
+#include "sc_vehicles.h"
 #include <stdint.h>
 #include <stddef.h>
 typedef struct Ppu Ppu;
@@ -29,6 +31,14 @@ typedef struct ScRenderer {
     bool map_valid, map_hold, map_confirmed, map_dark;
     int map_quiet, map_age, held_x, held_y;
     uint8_t repaired_edges[224]; /* per row: bit 0 left 8 px, bit 1 right */
+    bool sylt;                   /* the ninth scenario card is on */
+    /* The vehicles kept for the margin (src/sc_vehicles.c), handed in by the
+     * host before each frame's first line. */
+    ScVehicleSprite vehicles[19];
+    int vehicle_count;
+    ScSelSprite selector[SC_SEL_MAX_SPRITES]; /* pins and marks, this frame */
+    int selector_count;
+    const uint16_t *selector_row; /* render_row's current row, for scenery */
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);
 bool ScRendererResize(ScRenderer *r, ScViewport view);
