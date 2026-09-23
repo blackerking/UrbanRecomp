@@ -1,6 +1,7 @@
 #pragma once
 #include "sc_video.h"
 #include "sc_selector.h"
+#include "sc_titlesign.h"
 #include "sc_vehicles.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -38,6 +39,8 @@ typedef struct ScRenderer {
     int vehicle_count;
     ScSelSprite selector[SC_SEL_MAX_SPRITES]; /* pins and marks, this frame */
     int selector_count;
+    ScSelSprite sign[SC_SIGN_MAX_SPRITES];    /* the title's SIMCITY sign */
+    int sign_count;
     const uint16_t *selector_row; /* render_row's current row, for scenery */
 } ScRenderer;
 void ScRendererInit(ScRenderer *r, const uint8_t *rom, size_t size, bool is_us);

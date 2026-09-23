@@ -489,7 +489,30 @@ armed, which is why it is the one quoted.
 pixels different because both dumps came from the same binary. Hash the
 executable between the two builds; do not trust an empty error grep.
 
-## Known bug: the title sign in the left margin
+## The title sign in the left margin -- FIXED 2026-09-23
+
+Its animation is decompiled (docs/ROM_MAP.md, "The title sign is OBJ") and
+`src/sc_titlesign.c` reports the six sprites at the position the game's own
+counter gives them. Both renderers draw those outside the guest's columns
+themselves, so the sign travels the whole margin and leaves at its own pace,
+and the parked copy -- the half of the round the game does not emit -- is
+never drawn. The margin's motion heuristic is off on the title with it.
+Measured against a run with `SC_WS_TITLE_SIGN=0`: the guest's 256 columns are
+pixel-identical throughout, the difference is the sign in the margin alone,
+and it falls to zero once the sign is past the margin's edge.
+
+Reported after that: the board still shivered a pixel, and in the guest's own
+columns. It was not the margin copy. The phase routine emits the sprites
+(`05:9448`) before it steps the scene (`05:9460`: INC `$16` for the skyline,
+DEC `$0277` for the sign), so the uploaded sprites are a frame behind the
+scroll they are drawn against, and with the pan moving a pixel every second
+frame the two never step together -- hardware included. `title_sign_align()`
+puts the six entries on the frame their scroll belongs to, once per frame
+before anything reads OAM, and the billboard and its building now step
+together (measured frame by frame; only the sign's 48x32 changes, and
+`SC_SIGN_ALIGN=0` restores the lag).
+
+The original note:
 
 Not fixed, and deliberately left. The sign travels out through the left margin
 correctly, but it then PARKS at x = -32 for about 1026 frames before the

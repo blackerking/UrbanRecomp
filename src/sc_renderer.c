@@ -392,14 +392,17 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
     }
     return composite_color(p,ci,owner,0,5,x);
 }
-/* The selector's pins and win marks on one row, from src/sc_selector.c: the
- * game draws those of the cards outside its 256 columns too, but raw OAM X
- * cannot tell them from the blink-hidden bracket, and Sylt's are not in OAM
- * at all. Last to first, so the earlier sprite -- the lower slot -- wins. */
-static void selector_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) {
-    memset(pixels,0,(size_t)r->view.width*sizeof(*pixels));
-    for (int k=r->selector_count-1;k>=0;--k) {
-        const ScSelSprite *s=&r->selector[k];
+/* The host's own sprites on one row, outside the core: the selector's pins
+ * and win marks (src/sc_selector.c) -- the game draws those of the cards
+ * outside its 256 columns too, but raw OAM X cannot tell them from the
+ * blink-hidden bracket, and Sylt's are not in OAM at all -- and the title's
+ * SIMCITY sign (src/sc_titlesign.c), which the game emits for the authentic
+ * columns only. Last to first, so the earlier sprite -- the lower slot --
+ * wins, as it does on the PPU. */
+static void host_sprite_row(const ScRenderer *r,const Ppu *p,int y,
+                            const ScSelSprite *list,int count,uint16_t *pixels) {
+    for (int k=count-1;k>=0;--k) {
+        const ScSelSprite *s=&list[k];
         int size=sprite_sizes[PPU_objSize(p)][s->large ? 1 : 0];
         int row=y-s->y;
         if (row<0 || row>=size) continue;
@@ -413,6 +416,11 @@ static void selector_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels
             if (ci) pixels[x]=(uint16_t)ci;
         }
     }
+}
+static void host_sprites_row(const ScRenderer *r,const Ppu *p,int y,uint16_t *pixels) {
+    memset(pixels,0,(size_t)r->view.width*sizeof(*pixels));
+    host_sprite_row(r,p,y,r->selector,r->selector_count,pixels);
+    host_sprite_row(r,p,y,r->sign,r->sign_count,pixels);
 }
 static bool edge_has_overlay(const Ppu *p,int y,int left) {
     for (int x=left;x<left+8;++x) {
@@ -481,7 +489,9 @@ static void render_row(ScRenderer *r,const Ppu *p,const uint8_t *ram,int y) {
     uint16_t objects[SC_MAX_CANVAS], marks[SC_MAX_CANVAS];
     if (city) object_row(r,p,y,objects);
     r->selector_row=NULL;
-    if (!city && r->selector_count) { selector_row(r,p,y,marks); r->selector_row=marks; }
+    if (!city && (r->selector_count || r->sign_count)) {
+        host_sprites_row(r,p,y,marks); r->selector_row=marks;
+    }
     for (int x=0;x<r->view.width;++x) {
         int local=x-r->view.core_x;
         if (!r->advisor_frame && y>=0 && y<224 && local>=0 && local<256 &&
@@ -617,6 +627,7 @@ void ScRendererLine(ScRenderer *r,const Ppu *p,const uint8_t *ram,int line,const
                 r->selector_count=ScSelector_Sprites(r->selector,scroll,
                     ram[0x42]|((unsigned)ram[0x43]<<8),r->sylt,rom_read,r);
         }
+        r->sign_count=ScTitleSign_Sprites(r->sign,SC_SIGN_MAX_SPRITES,rom_read,r);
         track_scroll(r,p,ram);
         track_objects(r,p,ram);
         track_map_swap(r,p,ram);

@@ -2652,6 +2652,64 @@ never attributed) and a one-off tilemap write outside this driver.
 
 ### The title sign is OBJ (finally located)
 
+**Its animation, decompiled 2026-09-23.** The sign is not placed by hand: it
+is animation channel 0 of the player at COP service 9 (`00:8f82`), and the
+title's own phase routine `05:942e` drives it -- the title's fifth phase,
+`$30` = 4, which the sequence settles into around frame 840 from boot.
+Before it the channel holds no sign of its own (record 0 at a stale
+position), so anything reading it has to wait for that phase.
+
+| | |
+|---|---|
+| `$0277` | its x, ten bits. `05:9462` takes one off every *second* frame -- `$2c` bit 0, the same test that steps the skyline's scroll at `05:9460` -- and the phase masks it to `$3FF`, and with bit 9 set it neither steps the channel nor emits anything -- which is a pause in the drawing, not in the travel, since x keeps counting down and 1023 continues smoothly from 0 |
+| `$027F` | its y (183; the record's sprites sit 48 and 64 above it) |
+| `$026F` | the record the script has reached, `$0267` the frames left on that step, `$026B` the offset into the script |
+| `$00:A123` | the script: (frames, record) pairs ending in a 0 that restarts it -- `$32` for `$20`, `$33` and `$34` for `$10` each, `$35` for `$20`, then `$2E` and `$35` alternating every 8. That is the lettering's blink, the seven captured variants |
+| `00:8ea9` | the emitter (COP 2) writes the record's six sprites at (`$0277` + dx, `$027F` + dy) from slot 96, taking x modulo 512 into the 9-bit OAM field |
+
+Ten bits of travel through a nine-bit field is why hardware cannot show the
+whole crossing: while the sign is still approaching from beyond the right
+edge its entries read as far-left ones, and where the game stops emitting
+they stay where they were -- the copy that used to hang in the left margin.
+`src/sc_titlesign.c` reads that state and reports the six sprites at the
+continuous position (x below 512 is itself, above is x - 1024), and runs the
+script on by the player's own rule for exactly the frames the game skips --
+without that the sign crossed the margin with its lettering frozen. Note the
+widths: `$0267` and `$026B` are one byte per channel, `$026F`, `$0277` and
+`$027F` words indexed by channel * 2, and x reads as `$FFFF` for the moment
+between `05:9462`'s DEC and the phase's mask. It is all taken once a frame
+at the full NMI, with the shadow OAM: read at any other point the sign is a
+pixel ahead of the game's own copy on some frames and not on others, which
+shows as a shiver instead of a slide.
+
+**The shiver in the authentic columns, measured 2026-09-23.** The phase
+routine emits before it moves:
+
+```
+05:9448  COP #$09   the channel writes the six sprites into the shadow OAM
+05:9460  INC $16    the skyline's scroll steps  (only when $2c bit 0 is clear)
+05:9462  DEC $0277  and the sign steps with it
+```
+
+Both go to the PPU at the next NMI, but the sprites were written before that
+pair and the scroll after it, so the board is a frame behind the building it
+hangs on. Measured on the title, frame by frame, the two never move together:
+
+```
+its building   -1 +0 -1 +0 -1 +0 -1 +0 ...
+the billboard  +0 -1 +0 -1 +0 -1 +0 -1 ...
+```
+
+-- a pixel of shiver for the whole crossing, hardware included. `$16` and
+`$0277` are stepped in the same breath, so the two belong on one frame:
+`ScTitleSign_Lag()` reports the step the uploaded copy is behind, and
+`title_sign_align()` in `src/main.c` finds those six entries by tile, row and
+that older position and moves them the pixel forward, once per frame before
+anything reads OAM. Only the sign's 48x32 changes (620 px on the stepping
+frames, nothing at all on the others), both renderers get it since both
+scan the same OAM, and the margins draw from the same position, so the two
+halves meet exactly at the seam. `SC_SIGN_ALIGN=0` restores the lag.
+
 Dumped OAM on the title with the sign stuck at the left edge (`SC_TITLE_DUMP`
 now writes OAM and the OBJ tile bases alongside VRAM):
 

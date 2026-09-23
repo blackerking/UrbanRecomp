@@ -73,6 +73,18 @@ static int record(unsigned idx, Rec out[8], ScSelRomRead rd, void *ctx) {
   return n;
 }
 
+static void put(ScSelSprite *s, int x, int y, const Rec *r, bool host);
+
+int ScSelector_Record(unsigned idx, int base_x, int base_y,
+                      ScSelSprite *out, int max, ScSelRomRead rd, void *ctx) {
+  Rec rec[8];
+  const int n = record(idx, rec, rd, ctx);
+  int k = 0;
+  for (int i = 0; i < n && k < max; i++)
+    put(&out[k++], base_x + rec[i].dx, base_y + rec[i].dy, &rec[i], false);
+  return k;
+}
+
 int ScSelector_Scroll(const Ppu *ppu, ScSelRomRead rd, void *ctx) {
   Rec pins[8];
   if (!ppu || record(kPinRecord, pins, rd, ctx) < 1) return -1;

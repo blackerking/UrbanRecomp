@@ -24,6 +24,12 @@ static inline bool ScSelector_OnScreen(unsigned screen) {
   return screen >= 0x0a && screen <= 0x0c;
 }
 
+/* One sprite-text record's sprites at a base position -- the game's $0261,
+ * $025D and $025F, expanded the way the emitter at 00:8ea9 does. Returns
+ * the count, at most 8. */
+int ScSelector_Record(unsigned idx, int base_x, int base_y,
+                      ScSelSprite *out, int max, ScSelRomRead rd, void *ctx);
+
 /* The scroll the displayed OAM was built with, or -1 when OAM slot 0 is not
  * the pin record's first sprite (not drawn yet, or another screen's OAM). */
 int ScSelector_Scroll(const Ppu *ppu, ScSelRomRead rd, void *ctx);

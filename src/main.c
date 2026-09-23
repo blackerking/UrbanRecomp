@@ -95,6 +95,7 @@ uint8_t    g_ram[0x20000];
 #include "sc_icon.h"
 #include "sc_vehicles.h"
 #include "sc_selector.h"
+#include "sc_titlesign.h"
 #include "sc_mapgen.h"
 #include "sc_decomp.h"
 /* Declared, not #included: cpu_trace.h pulls in cpu_state.h, whose CpuState
@@ -846,7 +847,10 @@ static bool host_map_screen_live(void);
 static void selector_extend_tilemap(void);
 static void widen_wood_bg(void);
 static void widen_title_lights(void);
+static uint8_t sc_bus_rom_read(void *ctx, uint32_t addr);
 static bool selector_on_screen(void);
+static void title_sign_place(void);
+static void title_sign_align(void);
 static void selector_after_upload(void);
 static void selector_hint_margin_sprites(void);
 static void selector_sylt_sprites(void);
@@ -1125,6 +1129,9 @@ static void handle_pos_stuff(void) {
       g_snes_ppu_dbg_layer_mask = 0xff;
     }
     if (snes->vPos == 0) {
+      /* The title sign's own entries, before anything reads OAM this frame.
+       * Not a widescreen repair: the shiver is in the guest's 256 columns. */
+      title_sign_align();
       /* Clamp the BG layers out of the widescreen margins on EVERY screen,
        * not only where the host map composes.
        *
@@ -1386,22 +1393,22 @@ static void handle_pos_stuff(void) {
             on = (e && *e) ? (*e != '0') : 1;
           }
           if (on) memset(s_oam_right_hints, 0xff, sizeof s_oam_right_hints);
-          /* NOT the left. Hinting the left slots too was tried and reverted:
-           * it let the sign leave at the true edge, but it also let it SIT
-           * there -- reported from play as sticking to the left border for a
-           * whole round until the sequence came back for it.
+          /* The LEFT margin is the sign's, by name.
            *
-           * The reasoning that looked sound was that the title parks unused
-           * sprites at x = -128, outside a 64 px margin, so nothing parked
-           * could show. That is true of the PARK SLOTS and false of the sign,
-           * which stops inside the margin rather than at the park position.
+           * Hinting every left slot was tried and reverted: it let the sign
+           * leave at the true edge, but it also let it SIT there -- the game
+           * stops emitting it for half of its round and its slots keep the
+           * last position, which showed as the sign stuck to the left border
+           * for twenty seconds. The margin's motion heuristic was the other
+           * way round: it admitted the sign while it moved and faded it out
+           * where it stopped, which is not how it leaves on hardware either.
            *
-           * And the measurement that seemed to confirm it did not: off-vs-on
-           * deltas that ramp and return to zero show objects leaving, but a
-           * sign sitting still while other content moves around it also gives
-           * a drifting delta, which is what I read as "not parked". Whatever
-           * is tried next needs to test the SIGN's own pixels over time, not
-           * the margin's total. */
+           * src/sc_titlesign.c settles it without guessing: the sign is an
+           * animation channel, so its record, its x and its six sprites are
+           * all readable, and it says nothing at all while the game is not
+           * showing it. Those slots are claimed, and the heuristic is off
+           * here -- nothing else on the title travels through a margin. */
+          title_sign_place();
         }
         /* SC_WS_SCEN_OAM_LEFT=1 (experiment): release the left hints on the
          * scenario selector ($14 = 0b). Widescreen reveals two card columns
@@ -1437,7 +1444,8 @@ static void handle_pos_stuff(void) {
           g_ppu->wsOamMotionGraceOn = 0;
           selector_hint_margin_sprites();
         } else if (g_ppu) {
-          g_ppu->wsOamMotionGraceOn = 1;
+          /* Off on the title too: the sign is hinted by name above. */
+          g_ppu->wsOamMotionGraceOn = title_ws_live() ? 0 : 1;
         }
         /* Releasing ALL the left hints on the selector was tried once, and
          * it is wrong: slots 8-21 are the selection bracket, which the blink
@@ -3436,6 +3444,11 @@ static bool run_one_frame(void) {
       sc_classifier_hook(cpu);
     if (cpu->k <= 0x01 && s_ws_vehicles && ScVehicles_WantsPc(cpu->k, cpu->pc))
       ScVehicles_OnPc(cpu->k, cpu->pc, cpu->x, cpu->y, cpu->dp, cpu->db);
+    /* The title sign's state with the shadow OAM it belongs to: read anywhere
+     * else in the frame it is a pixel ahead on some frames and not on others,
+     * which reads as a shiver (src/sc_titlesign.c). */
+    if (cpu->k == 0x00 && cpu->pc == 0x80c0)
+      ScTitleSign_Snapshot(g_ram, sc_bus_rom_read, NULL);
     if (cpu->k == 0x00 && (cpu->pc == 0x90dd || cpu->pc == 0x90ee ||
                            cpu->pc == 0x9108))
       sc_decomp_hook(cpu);
@@ -4153,7 +4166,9 @@ static void ws_fill_margins(void) {
  * i owns words 2i and 2i+1, and its two high bits live in highOam[(2i)>>3] at
  * bit (2i)&7 -- X bit 8 -- and the bit above it -- size. That is the ordinary
  * SNES arrangement of four sprites per high byte. */
-#define SC_LIGHTS_FIRST_SPARE 104
+#define SC_LIGHTS_FIRST_SPARE 104   /* the game's own slots end here */
+#define SC_SIGN_FIRST_SLOT    104   /* six for the sign ... */
+#define SC_LIGHTS_FLOOR       110   /* ... the rest for the light row */
 
 static int oam_get_x(int i) {
   const int wi = i * 2;
@@ -4229,6 +4244,99 @@ static void selector_hint_margin_sprites(void) {
   }
 }
 
+/* The title sign in the margins, from src/sc_titlesign.c's reading of its
+ * animation rather than from OAM.
+ *
+ * The game's own sprites cannot serve the margins here: its x counts through
+ * ten bits and OAM holds nine, so while the sign is still approaching from
+ * the right its entries read as far-left ones, and for the half of the round
+ * it is away they sit unchanged where it left. Both are what the margin used
+ * to show -- the sign appearing at the wrong edge, and the copy that hung at
+ * the left border until the motion heuristic faded it out.
+ *
+ * Its six sprites are placed here instead, at the position its own counter
+ * gives them, in the slots below the light row's pool, and only where they
+ * fall outside the guest's 256 columns -- those columns keep the game's own
+ * sprites, put on this frame by title_sign_align() below, so both halves of
+ * the board are at one position and meet exactly at the seam.
+ *
+ * SC_WS_TITLE_SIGN=0 turns it off. */
+static void title_sign_place(void) {
+  static const uint8_t kObjSizes[8][2] = {
+    {8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}
+  };
+  static int on = -1;
+  if (on < 0) { const char *e = getenv("SC_WS_TITLE_SIGN");
+                on = (e && *e) ? (*e != '0') : 1; }
+  if (!on || !g_ppu || s_ws_extra <= 0) return;
+  ScSelSprite sign[SC_SIGN_MAX_SPRITES];
+  const int n = ScTitleSign_Sprites(sign, SC_SIGN_MAX_SPRITES,
+                                    sc_bus_rom_read, NULL);
+  int slot = SC_SIGN_FIRST_SLOT;
+  for (int k = 0; k < n && slot < SC_LIGHTS_FLOOR; k++) {
+    const int size = kObjSizes[PPU_objSize(g_ppu)][sign[k].large ? 1 : 0];
+    const int x = sign[k].x;
+    if (x + size <= -s_ws_extra || x >= kVideoWidth + s_ws_extra) continue;
+    if (x >= 0 && x + size <= kVideoWidth) continue;   /* the guest's own */
+    oam_put(slot, x, sign[k].y, sign[k].tile, sign[k].attr, sign[k].large);
+    if (x < 0) s_oam_left_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    else if (x >= kVideoWidth)
+      s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
+    slot++;
+  }
+}
+
+/* The sign's own six sprites, put on the frame the rest of the picture is on.
+ *
+ * 05:942e runs the animation channel first -- the COP at 05:9448, which
+ * writes the sprites into the shadow OAM -- and steps the scene after it:
+ * INC $16 for the skyline's scroll and DEC $0277 for the sign, one after the
+ * other at 05:9460. Both reach the PPU at the next NMI, the sprites from
+ * before that pair and the scroll from after it, so the board is a frame
+ * behind the building it is bolted to. The pan moves a pixel every second
+ * frame, so the two never step together -- skyline, sign, skyline, sign --
+ * and the board shivers a pixel against the tower for the whole crossing.
+ * It does so on hardware too; it is still a frame of lag, not a design.
+ *
+ * src/sc_titlesign.c has the position the scroll of this frame implies, and
+ * ScTitleSign_Lag() says when the uploaded copy is the step behind it. The
+ * entries are found by tile, row and that older position -- so only the six
+ * are touched, and only where the game really emitted them -- and moved the
+ * pixel forward. The margins draw from the same position (title_sign_place),
+ * which is why the two halves meet exactly at the seam.
+ *
+ * SC_SIGN_ALIGN=0 leaves the guest's copy where the hardware would have it. */
+static void title_sign_align(void) {
+  static int on = -1;
+  if (on < 0) { const char *e = getenv("SC_SIGN_ALIGN"); on = (e && *e) ? (*e != '0') : 1; }
+  if (!on || !g_ppu) return;
+  const int lag = ScTitleSign_Lag();
+  if (lag <= 0) return;
+  ScSelSprite sign[SC_SIGN_MAX_SPRITES];
+  const int n = ScTitleSign_Sprites(sign, SC_SIGN_MAX_SPRITES,
+                                    sc_bus_rom_read, NULL);
+  unsigned taken = 0;
+  for (int s = 0; s < 128 && taken != (1u << n) - 1u; s++) {
+    const unsigned lo = g_ppu->oam[s * 2], hi = g_ppu->oam[s * 2 + 1];
+    const unsigned y = (lo >> 8) & 0xffu;
+    const unsigned x9 = (lo & 0xffu) |
+        (((g_ppu->highOam[s >> 2] >> ((s & 3) * 2)) & 1u) << 8);
+    const unsigned tile = (hi & 0xffu) | (((hi >> 8) & 1u) << 8);
+    for (int k = 0; k < n; k++) {
+      if (taken & (1u << k)) continue;
+      const unsigned wt = (unsigned)sign[k].tile | ((unsigned)sign[k].attr & 1u) << 8;
+      if (wt != tile || ((unsigned)sign[k].y & 0xffu) != y) continue;
+      if (x9 != ((unsigned)(sign[k].x + lag) & 0x1ffu)) continue;
+      const unsigned nx = (unsigned)sign[k].x & 0x1ffu;
+      g_ppu->oam[s * 2] = (uint16_t)((lo & 0xff00u) | (nx & 0xffu));
+      uint8_t *hb = &g_ppu->highOam[s >> 2];
+      const unsigned bit = 1u << ((s & 3) * 2);
+      *hb = (uint8_t)((nx & 0x100u) ? (*hb | bit) : (*hb & ~bit));
+      taken |= 1u << k;
+      break;
+    }
+  }
+}
 /* Sylt's pin, and its mark once won, in slots the selector leaves parked. */
 static void selector_sylt_sprites(void) {
   if (!s_ninth_scenario || !g_ppu || !selector_on_screen()) return;
@@ -4356,14 +4464,14 @@ static void widen_title_lights(void) {
 
   int slot = 127;
   int placed_l = 0, placed_r = 0;
-  for (int x = lo - pitch; x >= -s_ws_extra - pitch && slot >= SC_LIGHTS_FIRST_SPARE; x -= pitch) {
+  for (int x = lo - pitch; x >= -s_ws_extra - pitch && slot >= SC_LIGHTS_FLOOR; x -= pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
     /* Below 0 it is hardware-hidden unless this host claims it. */
     if (x < 0) s_oam_left_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));
     placed_l++;
     slot--;
   }
-  for (int x = hi + pitch; x <= 256 + s_ws_extra && slot >= SC_LIGHTS_FIRST_SPARE; x += pitch) {
+  for (int x = hi + pitch; x <= 256 + s_ws_extra && slot >= SC_LIGHTS_FLOOR; x += pitch) {
     oam_put(slot, x, best_y, best_tile, best_attr, best_size);
     /* Past 256 it lands in the ambiguous band, so claim it explicitly. */
     if (x >= 256) s_oam_right_hints[slot >> 3] |= (uint8_t)(1u << (slot & 7));

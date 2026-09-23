@@ -55,6 +55,7 @@ add_executable(UrbanRecomp
     src/sc_mapview.c
     src/sc_vehicles.c
     src/sc_selector.c
+    src/sc_titlesign.c
     src/sc_mapgen.c
         src/sc_decomp.c
     src/sc_video.c
@@ -232,7 +233,7 @@ if(BUILD_TESTING)
     list(APPEND SC_RENDER_TESTS sc_video_test)
     endif()
     add_executable(sc_renderer_test tests/sc_renderer_test.c src/sc_renderer.c src/sc_video.c
-                   src/sc_selector.c)
+                   src/sc_selector.c src/sc_titlesign.c)
     target_include_directories(sc_renderer_test PRIVATE src ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
     add_test(NAME simcity_renderer COMMAND sc_renderer_test)
     foreach(test ${SC_RENDER_TESTS})
@@ -397,6 +398,7 @@ if(SC_GEN_SOURCES)
         src/sc_mapview.c
         src/sc_vehicles.c
         src/sc_selector.c
+        src/sc_titlesign.c
         ${SC_GEN_SOURCES}
         src/sc_hle.c
         src/sc_mapgen.c
