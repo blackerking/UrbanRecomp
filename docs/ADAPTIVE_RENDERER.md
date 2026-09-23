@@ -220,6 +220,19 @@ separate work; this branch no longer drops the game's engine dependencies.
 | 9. City load | Hold old map, graphics, palette and camera through dark-to-lit transition |
 | 10. No OpenGL | Probe the actual GL version; skip the launcher below desktop GL 3.3 |
 | 11. Engine pin | Retain current main's published engine and optional AOT ABI |
+| 12. Card pictures in the margin | Lay the synthesised desk only where the guest's own cell draws nothing |
+
+Report 12 was the desk showing through the card pictures in the margin
+columns: their dark pixels are colour 0, which the guest's own columns show
+as the backdrop, and the selector path put a plank under every pixel before
+drawing the guest's layers over it. `guest_cell_inked()` now asks whether the
+cell has any ink in CHR: an empty cell -- the shipped map's unused right-hand
+columns, which the synthesised desk exists to fill -- keeps its plank, a cell
+with art does not. Measured on two selector states, the margins then match a
+classic-widescreen render of the same frame to the pixel (763 differing
+pixels before, 0 after), and the card pictures read #000000 as they do in the
+native columns. Report 13, the margin cards arriving at full brightness
+instead of fading in, went with it -- confirmed from play.
 
 Validation uses the expanded CTests, the 16-case game-route suite, six actual
 window resizes, actual Mods toggle/choice/Play/persistence, and a no-OpenGL run

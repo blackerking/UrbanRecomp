@@ -329,6 +329,34 @@ static void find_wood(ScRenderer *r,const Ppu *p,const uint8_t *ram) {
         break;
     }
 }
+/* Does the guest's own map draw anything in the cell this pixel falls in?
+ *
+ * An empty cell is the shipped map's unused right-hand columns, which the
+ * synthesised desk exists to fill. A cell with art is a card, and nothing of
+ * ours belongs under one: the picture's dark pixels are colour 0, which the
+ * guest's own columns show as the backdrop, so a plank laid under them shows
+ * through the picture instead of black. Reported as brown card pictures in
+ * the margin columns (issue #2, item 12). */
+static bool guest_cell_inked(const Ppu *p,int layer,int x,int y) {
+    int mode=PPU_mode(p);
+    int depth=mode==0 || layer==2 ? 2 : 4;
+    x=(x+p->hScroll[layer])&1023; y=(y+p->vScroll[layer])&1023;
+    int bits=PPU_bigTiles(p,layer) ? 4 : 3;
+    unsigned addr=PPU_bgTilemapAdr(p,layer)+((y>>bits)&31)*32+((x>>bits)&31);
+    if ((x&(32<<bits)) && PPU_bgTilemapWider(p,layer)) addr+=0x400;
+    if ((y&(32<<bits)) && PPU_bgTilemapHigher(p,layer))
+        addr+=PPU_bgTilemapWider(p,layer) ? 0x800 : 0x400;
+    unsigned word=p->vram[addr&0x7fff];
+    if (bits==4) {
+        unsigned n=word&1023;
+        if (((x&8)!=0) != ((word&0x4000)!=0)) n++;
+        if (((y&8)!=0) != ((word&0x8000)!=0)) n+=16;
+        word=(word&~1023u)|(n&1023);
+    }
+    unsigned base=PPU_bgTileAdr(p,layer)+(word&1023)*(4u*(unsigned)depth), ink=0;
+    for (int i=0;i<4*depth;++i) ink|=p->vram[(base+(unsigned)i)&0x7fff];
+    return ink!=0;
+}
 static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int x,int y) {
     unsigned screen=ram[0x14], ci=0;
     int owner=5;
@@ -357,11 +385,21 @@ static uint32_t scenery(const ScRenderer *r,const Ppu *p,const uint8_t *ram,int 
     } else if (selector) {
         /* Cards and translated names already exist in the wide guest maps.
          * Show that single strip, then continue the desk beyond it. Wrapping
-         * the entire layer would repeat cards on ultrawide displays. */
+         * the entire layer would repeat cards on ultrawide displays.
+         *
+         * Only where the strip itself draws nothing: inside a cell the guest
+         * has drawn, its own layers are the whole answer, backdrop included,
+         * exactly as in the native columns. */
         int tx=x+p->hScroll[0], ty=(y+1+p->vScroll[0])&255;
+        bool inked=false;
+        for (int layer=3;layer>=0 && !inked;--layer) {
+            int lx=x+p->hScroll[layer], ly=y+1+p->vScroll[layer];
+            if (!(p->screenEnabled[0]&(1<<layer)) || lx<0 || lx>=416 || ly<0 || ly>=256) continue;
+            inked=guest_cell_inked(p,layer,x,y+1);
+        }
         unsigned anchor=p->vram[0x3400+(ty/8)*32+9]; /* column 41 */
         if (!wood_tile(anchor) && r->wood_layer==0) anchor=r->wood_rows[ty/8];
-        if (wood_tile(anchor)) {
+        if (!inked && wood_tile(anchor)) {
             unsigned word=wood_grow(anchor,(tx>>3)-41);
             ci=tile_pixel(p,word,PPU_bgTileAdr(p,0),tx,ty,2,0); owner=0;
         }
