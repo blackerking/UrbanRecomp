@@ -57,6 +57,9 @@ add_executable(UrbanRecomp
     src/sc_selector.c
     src/sc_mapgen.c
         src/sc_decomp.c
+    src/sc_video.c
+    $<$<BOOL:${SC_HAVE_LAUNCHER}>:${CMAKE_SOURCE_DIR}/src/sc_mods.c>
+    src/sc_renderer.c
 )
 
 target_include_directories(UrbanRecomp PRIVATE
@@ -219,6 +222,32 @@ if(UNIX AND NOT APPLE)
             DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
 
+include(CTest)
+if(BUILD_TESTING)
+    set(SC_RENDER_TESTS sc_renderer_test)
+    if(EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
+    add_executable(sc_video_test tests/sc_video_test.c src/sc_video.c src/sc_mods.c)
+    target_include_directories(sc_video_test PRIVATE src ${RECOMP_UI_ROOT}/src)
+    add_test(NAME simcity_video COMMAND sc_video_test ${CMAKE_CURRENT_BINARY_DIR}/sc-test-video.ini)
+    list(APPEND SC_RENDER_TESTS sc_video_test)
+    endif()
+    add_executable(sc_renderer_test tests/sc_renderer_test.c src/sc_renderer.c src/sc_video.c
+                   src/sc_selector.c)
+    target_include_directories(sc_renderer_test PRIVATE src ${SNESRECOMP_RUNNER_INCLUDE_DIRS})
+    add_test(NAME simcity_renderer COMMAND sc_renderer_test)
+    foreach(test ${SC_RENDER_TESTS})
+        if(MSVC)
+            target_compile_options(${test} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test} PRIVATE -UNDEBUG -Wall -Wextra)
+            target_link_libraries(${test} PRIVATE m)
+            if(MINGW)
+                target_link_options(${test} PRIVATE -static)
+            endif()
+        endif()
+    endforeach()
+endif()
+
 # ── AOT link probe (step 1 of the CpuState migration) ────────────────────────
 #
 # Optional target, NOT built by default and NOT part of the shipping
@@ -374,6 +403,9 @@ if(SC_GEN_SOURCES)
         src/sc_decomp.c
         src/sc_fiber.c
         src/sc_fiberdrive.c
+    src/sc_video.c
+    $<$<BOOL:${SC_HAVE_LAUNCHER}>:${CMAKE_SOURCE_DIR}/src/sc_mods.c>
+    src/sc_renderer.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c

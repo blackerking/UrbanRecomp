@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "sc_video.h"
 
 enum { SC_LANG_ENGLISH, SC_LANG_GERMAN, SC_LANG_FRENCH, SC_LANG_COUNT };
 
@@ -51,7 +52,8 @@ bool ScFindRom(unsigned long fnv, char *out, size_t out_n);
 
 /* Returns 1 to launch (s->rom holds the ROM), 0 to quit, -1 when no launcher
  * could be shown -- then the caller starts as if it had been skipped. */
-int ScLauncherRun(ScSettings *s, const char *settings_path);
+int ScLauncherRun(ScSettings *s, const char *settings_path,
+                  ScVideoSettings *video, const char *video_path);
 
 /* The SNES pad through the launcher's keyboard bindings (keybinds.ini).
  * ScKeybindsInit before the first read, once SDL video is up: a first run

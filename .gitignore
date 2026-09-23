@@ -40,6 +40,11 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# Local-only config overrides (per-developer, applied after config.ini)
+config.local.ini
+sc-video.ini
+sc-video.ini.tmp
+rom.cfg
 # Launcher state (src/sc_launcher.c, recomp-ui)
 sc-settings.ini
 sc-settings.ini.tmp

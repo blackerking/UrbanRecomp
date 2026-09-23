@@ -14,6 +14,7 @@
 
 #ifdef RECOMP_LAUNCHER
 #include "recomp_launcher.h"
+#include "sc_mods.h"
 #include "launcher_profile.h"
 #include "common/keybinds.h"   /* recomp-ui's, not the runner's */
 #endif
@@ -207,8 +208,9 @@ void ScSettingsApply(const ScSettings *s) {
 
 #ifndef RECOMP_LAUNCHER
 
-int ScLauncherRun(ScSettings *s, const char *settings_path) {
-  (void)s; (void)settings_path;
+int ScLauncherRun(ScSettings *s, const char *settings_path,
+                  ScVideoSettings *video, const char *video_path) {
+  (void)s; (void)settings_path; (void)video; (void)video_path;
   return -1;
 }
 bool ScKeybindsInit(void) { return false; }
@@ -302,7 +304,9 @@ static bool gl3_available(void) {
         version = (const char *)get_string(0x1F02);    /* GL_VERSION */
         renderer = (const char *)get_string(0x1F01);   /* GL_RENDERER */
       }
-      ok = version && atoi(version) >= 3;
+      int major=0, minor=0;
+      ok = version && sscanf(version, "%d.%d", &major, &minor)==2 &&
+           (major>3 || (major==3 && minor>=3));
       fprintf(stderr, "launcher: OpenGL %s (%s)\n", version ? version : "?",
               renderer ? renderer : "?");
       SDL_GL_MakeCurrent(w, NULL);
@@ -321,13 +325,16 @@ static bool gl3_available(void) {
 /* ── the Sylt scenario, as the launcher's one mod ──────────────────────── */
 
 static ScSettings *s_mod_settings;
+static const RecompLauncherCModProvider *s_adaptive;
 #define COPY(field, text) snprintf(field, sizeof(field), "%s", text)
 
 static int is_sylt(const char *p, const char *f) {
   return p && f && !strcmp(p, "sc-sylt") && !strcmp(f, "sylt");
 }
-static int one(void *ctx) { (void)ctx; return 1; }
+static int one(void *ctx) { (void)ctx; return 2; }
 static int package_get(void *ctx, int i, RecompLauncherCModPackage *out) {
+  if (i == 0) return s_adaptive->package_get(ctx, 0, out);
+  --i;
   (void)ctx;
   if (i || !out) return 0;
   memset(out, 0, sizeof *out);
@@ -340,6 +347,8 @@ static int package_get(void *ctx, int i, RecompLauncherCModPackage *out) {
   return 1;
 }
 static int feature_get(void *ctx, int i, RecompLauncherCModFeature *out) {
+  if (i == 0) return s_adaptive->feature_get(ctx, 0, out);
+  --i;
   (void)ctx;
   if (i || !out) return 0;
   memset(out, 0, sizeof *out);
@@ -359,30 +368,27 @@ static int feature_get(void *ctx, int i, RecompLauncherCModFeature *out) {
 }
 static int no_option(void *ctx, const char *p, const char *f, int i,
                      RecompLauncherCModOption *out) {
-  (void)ctx; (void)p; (void)f; (void)i; (void)out;
-  return 0;
+  return s_adaptive->feature_option_get(ctx, p, f, i, out);
 }
 static int no_choice(void *ctx, const char *p, const char *f, const char *o, int i,
                      RecompLauncherCModChoice *out) {
-  (void)ctx; (void)p; (void)f; (void)o; (void)i; (void)out;
-  return 0;
+  return s_adaptive->feature_choice_get(ctx, p, f, o, i, out);
 }
 static int enable(void *ctx, const char *p, const char *f, int on) {
   (void)ctx;
-  if (!is_sylt(p, f)) return 0;
+  if (!is_sylt(p, f)) return s_adaptive->feature_enable(ctx, p, f, on);
   s_mod_settings->sylt = on != 0;
   return 1;
 }
 static int set_option(void *ctx, const char *p, const char *f, const char *o,
                       const char *v) {
-  (void)ctx; (void)p; (void)f; (void)o; (void)v;
-  return 0;
+  return s_adaptive->feature_set_option(ctx, p, f, o, v);
 }
 static int commit(void *ctx, const char *image) {
   (void)ctx; (void)image;
-  return 1;   /* saved with the rest of the settings when the game starts */
+  return s_adaptive->commit(ctx, image);
 }
-static const char *last_error(void *ctx) { (void)ctx; return ""; }
+static const char *last_error(void *ctx) { return s_adaptive->last_error(ctx); }
 
 static const RecompLauncherCModProvider *sylt_provider(ScSettings *s) {
   static RecompLauncherCModProvider p;
@@ -405,13 +411,14 @@ static const RecompLauncherCModProvider *sylt_provider(ScSettings *s) {
 
 /* ── the launcher ─────────────────────────────────────────────────────── */
 
-int ScLauncherRun(ScSettings *s, const char *settings_path) {
+int ScLauncherRun(ScSettings *s, const char *settings_path,
+                  ScVideoSettings *video, const char *video_path) {
 #if SNESRECOMP_SDL3
-  const bool video = SDL_InitSubSystem(SDL_INIT_VIDEO);
+  const bool video_ready = SDL_InitSubSystem(SDL_INIT_VIDEO);
 #else
-  const bool video = SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
+  const bool video_ready = SDL_InitSubSystem(SDL_INIT_VIDEO) == 0;
 #endif
-  if (!video) {
+  if (!video_ready) {
     fprintf(stderr, "launcher: no video (%s); starting the game\n", SDL_GetError());
     return -1;
   }
@@ -444,6 +451,7 @@ int ScLauncherRun(ScSettings *s, const char *settings_path) {
   game.num_languages = SC_LANG_COUNT;
   game.lock_device = 0;
 #if RECOMP_UI_ENABLE_MODS
+  s_adaptive = ScModsProvider(video, video_path);
   game.mods = sylt_provider(s);
 #endif
 
