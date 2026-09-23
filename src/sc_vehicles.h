@@ -12,7 +12,7 @@ static inline bool ScVehicles_WantsPc(unsigned bank, unsigned pc) {
   if (bank == 0x00)
     return pc == 0xc019 || pc == 0xc0f5 || pc == 0xc154 || pc == 0xbd41 ||
            pc == 0x80c0;
-  return bank == 0x01 && pc == 0xf11a;
+  return bank == 0x01 && (pc == 0xf11a || pc == 0xef29 || pc == 0xef86);
 }
 
 /* Call BEFORE the opcode at bank:pc runs, with the CPU's registers. */

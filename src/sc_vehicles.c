@@ -30,7 +30,9 @@
  *     slots 124-127 included when the icon keeps them unparked, as the ship
  *     is not placed then;
  *   - 01:f11a, which shifts every object sprite while the player scrolls
- *     between the four-frame updates, shifts the records by the same $7C;
+ *     with A held between the four-frame updates, shifts the records by the
+ *     same $7C, and 01:ef29 / 01:ef86, the same job for the scroll the
+ *     cursor starts at the screen edge, by its own 2 px;
  *   - 00:bd41, where the object at slot 123 moves its sprite (-$91, +6) after
  *     placing it, does the same to that record;
  *   - the full NMI (00:80c0), which DMAs the shadow OAM, snapshots the
@@ -141,7 +143,7 @@ static void on_place(uint16_t y, uint16_t dp, uint8_t db) {
 
 void ScVehicles_OnPc(unsigned bank, unsigned pc, uint16_t x, uint16_t y,
                      uint16_t dp, uint8_t db) {
-  if (bank == 0x01) {                  /* 01:f11a: the scroll shift */
+  if (bank == 0x01 && pc == 0xf11a) {  /* the A-held scroll's shift */
     const int d = (int8_t)g_ram[(uint16_t)(dp + 0x7c)];
     const bool vertical = (x & 1) != 0;
     for (int s = kFirstSlot; s < 128; s++) {
@@ -149,6 +151,22 @@ void ScVehicles_OnPc(unsigned bank, unsigned pc, uint16_t x, uint16_t y,
       if (vertical) s_live[s].y = (int16_t)(s_live[s].y + d);
       else s_live[s].x = (int16_t)(s_live[s].x + d);
     }
+    return;
+  }
+  if (bank == 0x01) {
+    /* 01:ef29 and 01:ef86, the OTHER scroll's shift. Pushing the cursor
+     * against the edge scrolls without holding A, and that path does not go
+     * through 01:f11a at all: it walks the live objects' slots and adds or
+     * subtracts 2 from each sprite's X or Y byte itself. Missing it left a
+     * kept vehicle standing still while the map slid under it, until the
+     * next placement put it back -- reported from play as the train
+     * shivering on its rail. X is the byte's offset in the shadow OAM, so
+     * its low two bits say which coordinate this is. */
+    const int slot = (int)((x & 0xffffu) >> 2), part = x & 3;
+    const int d = pc == 0xef29 ? 2 : -2;
+    if (slot < kFirstSlot || slot > 127 || !s_live[slot].on) return;
+    if (part == 0) s_live[slot].x = (int16_t)(s_live[slot].x + d);
+    else if (part == 1) s_live[slot].y = (int16_t)(s_live[slot].y + d);
     return;
   }
   switch (pc) {
