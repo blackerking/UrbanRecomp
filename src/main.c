@@ -130,6 +130,8 @@ void RtlApuUnlock(void) {}
 void rtl_sync_apu_to_cpu_locked(void) {}
 void RtlApuWrite(uint16 adr, uint8 val) { g_snes->apu->inPorts[adr & 3] = val; }
 void rtl_accumulate_apu_catchup(void) {}
+/* No host audio replacement here: APU port reads pass through. */
+uint8 rtl_apu_port_observers_read(uint16 reg, uint8 value) { (void)reg; return value; }
 void NORETURN Die(const char *e) { fprintf(stderr, "FATAL: %s\n", e ? e : "(null)"); exit(1); }
 void debug_on_wram_write_byte(uint32_t a, uint8_t o, uint8_t n) { (void)a; (void)o; (void)n; }
 void debug_on_wram_write_word(uint32_t a, uint16_t o, uint16_t n) { (void)a; (void)o; (void)n; }

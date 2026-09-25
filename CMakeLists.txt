@@ -92,6 +92,7 @@ set(SC_DEVICE_SOURCES
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu.c
     ${SNESRECOMP_ROOT}/runner/src/snes/ppu_legacy.c
     ${SNESRECOMP_ROOT}/runner/src/snes/sa1.c
+    ${SNESRECOMP_ROOT}/runner/src/snes/sdd1.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes.c
     ${SNESRECOMP_ROOT}/runner/src/snes/snes_other.c
     ${SNESRECOMP_ROOT}/runner/src/snes/spc.c
@@ -293,6 +294,8 @@ if(SC_GEN_SOURCES)
         ${SNESRECOMP_ROOT}/runner/src/cpu_state.c
         ${SNESRECOMP_ROOT}/runner/src/common_cpu_infra.c
         ${SNESRECOMP_ROOT}/runner/src/common_rtl.c
+        ${SNESRECOMP_ROOT}/runner/src/mod_audio.c
+        ${SNESRECOMP_ROOT}/runner/src/snes_runahead.c
         ${SNESRECOMP_ROOT}/runner/src/cpu_trace.c
         ${SNESRECOMP_ROOT}/runner/src/ppu_dma_trace.c
         ${SNESRECOMP_ROOT}/runner/src/recomp_hw.c
