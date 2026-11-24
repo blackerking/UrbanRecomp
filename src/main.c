@@ -6269,7 +6269,7 @@ static uint8_t *read_file(const char *path, uint32_t *size_out) {
  * array/parser (--input2) -- needed for the documented debug-menu code
  * entry, which is read on controller 2. ──────────────────────────────── */
 typedef struct InputEvent { uint64_t start, duration; uint16_t mask; } InputEvent;
-static InputEvent s_input_events[64];
+static InputEvent s_input_events[8192];
 static uint32_t s_input_event_count;
 static InputEvent s_input2_events[96];
 static uint32_t s_input2_event_count;
@@ -6287,11 +6287,49 @@ static bool add_input_event_to(InputEvent *arr, uint32_t *count, uint32_t cap, c
 }
 
 static bool add_input_event(const char *text) {
-  return add_input_event_to(s_input_events, &s_input_event_count, 64, text);
+  return add_input_event_to(s_input_events, &s_input_event_count, 8192, text);
 }
 
 static bool add_input2_event(const char *text) {
   return add_input_event_to(s_input2_events, &s_input2_event_count, 96, text);
+}
+
+/* Headless capture (HEADLESS_CAPTURE_SPEC): presented-frame dump + mixed audio +
+ * frame-indexed input script, no window / audio device.  See main(). */
+static struct {
+  bool on; const char *dir; long from, to, every; const char *wav; FILE *wavf;
+  uint64_t wav_frames, written; uint64_t exit_at; int w, h;
+} s_cap = { false, NULL, 0, -1, 1, NULL, NULL, 0, 0, 0, 1920, 1080 };
+
+/* `<frame> BUTTON[+BUTTON...]` lines; `-` releases.  Converted to the existing
+ * start:duration:mask events (host serial-order pad bits). */
+static bool cap_load_input_script(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f) return false;
+  static const struct { const char *n; uint16_t m; } names[] = {
+    {"B",kPad_B},{"Y",kPad_Y},{"SELECT",kPad_Select},{"START",kPad_Start},{"UP",kPad_Up},
+    {"DOWN",kPad_Down},{"LEFT",kPad_Left},{"RIGHT",kPad_Right},{"A",kPad_A},{"X",kPad_X},
+    {"L",kPad_L},{"R",kPad_R} };
+  static unsigned long long frames[8192]; static uint16_t masks[8192]; uint32_t n = 0;
+  char line[256];
+  while (fgets(line, sizeof line, f) && n < 8192) {
+    char *c = strchr(line, '#'); if (c) *c = 0;
+    unsigned long long fr; char btn[200] = "";
+    if (sscanf(line, "%llu %199s", &fr, btn) < 1) continue;
+    uint16_t m = 0;
+    for (char *t = strtok(btn, "+"); t; t = strtok(NULL, "+"))
+      for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(t, names[i].n)) m |= names[i].m;
+    frames[n] = fr; masks[n] = m; n++;
+  }
+  fclose(f);
+  for (uint32_t i = 0; i < n; i++) {
+    if (!masks[i]) continue;
+    unsigned long long end = (i + 1 < n) ? frames[i + 1] : frames[i] + 1000000ULL;
+    if (end <= frames[i] || s_input_event_count >= 8192) continue;
+    s_input_events[s_input_event_count++] = (InputEvent){frames[i], end - frames[i], masks[i]};
+  }
+  return true;
 }
 
 /* One-button macro for the documented debug-menu entry code (Peter's
@@ -8531,6 +8569,16 @@ int main(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
       scale = atoi(argv[++i]);
       scale_given = true;
+    } else if (!strcmp(argv[i], "--capture-out") && i + 1 < argc) { s_cap.dir = argv[++i]; s_cap.on = true;
+    } else if (!strcmp(argv[i], "--capture-size") && i + 1 < argc) {
+      if (sscanf(argv[++i], "%dx%d", &s_cap.w, &s_cap.h) != 2) return 2;
+    } else if (!strcmp(argv[i], "--capture-from") && i + 1 < argc) { s_cap.from = atol(argv[++i]);
+    } else if (!strcmp(argv[i], "--capture-to") && i + 1 < argc) { s_cap.to = atol(argv[++i]);
+    } else if (!strcmp(argv[i], "--capture-every") && i + 1 < argc) { s_cap.every = atol(argv[++i]); if (s_cap.every < 1) s_cap.every = 1;
+    } else if (!strcmp(argv[i], "--capture-wav") && i + 1 < argc) { s_cap.wav = argv[++i];
+    } else if (!strcmp(argv[i], "--exit-at-frame") && i + 1 < argc) { s_cap.exit_at = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--input-script") && i + 1 < argc) {
+      if (!cap_load_input_script(argv[++i])) { fprintf(stderr, "cannot read input script\n"); return 2; }
     } else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
       if (!add_input_event(argv[++i])) {
         fprintf(stderr, "invalid --input event; expected start:duration:hexmask\n");
@@ -8546,6 +8594,25 @@ int main(int argc, char **argv) {
     } else if (argv[i][0] != '-') {
       rom_path = argv[i];
       rom_given = true;
+    }
+  }
+
+  if (s_cap.on) {
+    /* No window, no audio device: SDL dummy drivers + the software renderer
+     * still run the whole presentation pipeline (widescreen, settings overlay). */
+#ifdef _WIN32
+    _putenv_s("SDL_VIDEODRIVER", "dummy"); _putenv_s("SDL_AUDIODRIVER", "dummy");
+    _putenv_s("SDL_RENDER_DRIVER", "software");
+#else
+    setenv("SDL_VIDEODRIVER", "dummy", 1); setenv("SDL_AUDIODRIVER", "dummy", 1);
+    setenv("SDL_RENDER_DRIVER", "software", 1);
+#endif
+    no_settings = true; explicit_size = true; s_enable_audio = false;
+    s_window_width = s_cap.w; s_window_height = s_cap.h;
+    if (s_cap.wav) {
+      s_cap.wavf = fopen(s_cap.wav, "wb");
+      if (!s_cap.wavf) { fprintf(stderr, "cannot open --capture-wav\n"); return 2; }
+      uint8_t hdr[44] = {0}; fwrite(hdr, 1, 44, s_cap.wavf);
     }
   }
 
@@ -9985,7 +10052,22 @@ int main(int argc, char **argv) {
     /* Audio: drain one frame's worth of DSP output at the native SNES rate,
      * same pacing model as snesrecomp/cosim/ref_driver.c's deterministic
      * consumer, queued to the SDL audio device instead of discarded. */
-    if (audio_dev) {
+    if (s_cap.on) {
+      if (!s_menu_open) audio_acc += kDspSamplesPerFrame;
+      if (audio_acc > 1024.0) audio_acc = 1024.0;
+      int wantN = (int)audio_acc;
+      Dsp *dsp = g_snes->apu->dsp;
+      uint32_t available = dsp->sampleWrite - dsp->sampleRead;
+      if (available >= (uint32_t)wantN && wantN > 0 && wantN <= 1024) {
+        audio_acc -= (double)wantN;
+        const uint32_t got = dsp_getSamples(dsp, audio_buf, wantN);
+        if (s_cap.wavf && (long)s_frames >= s_cap.from && (s_cap.to < 0 || (long)s_frames <= s_cap.to)) {
+          fwrite(audio_buf, sizeof(int16_t) * 2, got, s_cap.wavf);
+          s_cap.wav_frames += got;
+        }
+      }
+      if (dsp->sampleWrite - dsp->sampleRead > 1600u) dsp_trimSamples(dsp, 534u);
+    } else if (audio_dev) {
       /* Don't accrue playback debt for wall-clock time the emulator wasn't
        * actually running: while the settings menu is open no frames are
        * simulated, so no samples are produced and there is nothing to pace
@@ -10132,7 +10214,9 @@ int main(int argc, char **argv) {
     next_frame_deadline += (uint64_t)(kTargetFrameSeconds * (double)SDL_GetPerformanceFrequency());
     uint64_t now = SDL_GetPerformanceCounter();
     SC_PERF_ADD(kPerfDraw, draw_t0, now);
-    if (now < next_frame_deadline) {
+    if (s_cap.on) {
+      next_frame_deadline = now;   /* capture: unpaced */
+    } else if (now < next_frame_deadline) {
       double remaining_ms = (double)(next_frame_deadline - now) * 1000.0 /
                              (double)SDL_GetPerformanceFrequency();
       if (remaining_ms > 1.0) SDL_Delay((Uint32)(remaining_ms - 1.0));
@@ -10153,6 +10237,15 @@ int main(int argc, char **argv) {
      * path only. A capture session recorded zero frames because of it, which
      * matters whenever a defect only shows while the map is moving and so
      * cannot be caught in a screenshot. */
+    if (s_cap.on) {
+      if (s_cap.dir && (long)s_frames >= s_cap.from && (s_cap.to < 0 || (long)s_frames <= s_cap.to) &&
+          ((long)s_frames - s_cap.from) % s_cap.every == 0) {
+        char cp[600];
+        snprintf(cp, sizeof cp, "%s/frame_%06ld.ppm", s_cap.dir, (long)s_frames);
+        if (write_renderer_ppm(renderer, cp)) s_cap.written++;
+      }
+      if (s_cap.exit_at && s_frames >= s_cap.exit_at) quit = true;
+    }
     { const char *dd = getenv("SC_DUMP_DIR"), *di = getenv("SC_DUMP_INTERVAL");
       if (dd && *dd && di && *di) {
         static unsigned long long cap_frame;
@@ -10218,6 +10311,20 @@ int main(int argc, char **argv) {
   ScSram_Flush();
   SDL_DestroyTexture(texture);
   SDL_DestroyRenderer(renderer);
+  if (s_cap.on) {
+    if (s_cap.wavf) {
+      uint32_t data = (uint32_t)(s_cap.wav_frames * 4u), riff = 36u + data, rate = 32040u, brate = 32040u * 4u;
+      uint16_t fmt = 1, ch = 2, align = 4, bits = 16; uint32_t fmtlen = 16;
+      fseek(s_cap.wavf, 0, SEEK_SET);
+      fwrite("RIFF", 1, 4, s_cap.wavf); fwrite(&riff, 4, 1, s_cap.wavf); fwrite("WAVEfmt ", 1, 8, s_cap.wavf);
+      fwrite(&fmtlen, 4, 1, s_cap.wavf); fwrite(&fmt, 2, 1, s_cap.wavf); fwrite(&ch, 2, 1, s_cap.wavf);
+      fwrite(&rate, 4, 1, s_cap.wavf); fwrite(&brate, 4, 1, s_cap.wavf); fwrite(&align, 2, 1, s_cap.wavf);
+      fwrite(&bits, 2, 1, s_cap.wavf); fwrite("data", 1, 4, s_cap.wavf); fwrite(&data, 4, 1, s_cap.wavf);
+      fclose(s_cap.wavf);
+    }
+    fprintf(stderr, "capture: %llu frames written, %llu audio samples, present size %dx%d\n",
+            (unsigned long long)s_cap.written, (unsigned long long)s_cap.wav_frames, s_cap.w, s_cap.h);
+  }
   SDL_DestroyWindow(window);
   SDL_Quit();
   ScRendererDestroy(&s_custom_renderer);
